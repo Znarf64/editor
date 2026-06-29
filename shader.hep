@@ -1,0 +1,109 @@
+import "core:sdf"
+
+@(uniform_buffer, binding = 0)
+vertex_uniforms: #import(Uniforms)
+
+@(vertex_shader)
+vertex_main :: proc(
+	a_position:     [2]f32 @ 0,
+	i_offset:       [2]f32 @ 1,
+	i_size:         [2]f32 @ 2,
+	i_texture:      [3]f32 @ 3,
+	i_color:        [4]f32 @ 4,
+	i_border_radius:   f32 @ 5,
+	i_border_width:    f32 @ 6,
+	i_border_color: [4]f32 @ 7,
+	i_shadow_width:    f32 @ 8,
+) -> (
+	v_position:     [2]f32 @ 0,
+	v_size:         [2]f32 @ 1,
+	v_texture:      [3]f32 @ 2,
+	v_color:        [4]f32 @ 3,
+	v_border_radius:   f32 @ 4,
+	v_border_width:    f32 @ 5,
+	v_border_color: [4]f32 @ 6,
+	v_shadow_width:    f32 @ 7,
+) {
+	v_texture       = { ..i_texture.xy + a_position * i_size, i_texture.z, }
+	v_color         = i_color
+	v_size          = i_size
+	v_border_radius = i_border_radius
+	v_border_width  = i_border_width
+	v_border_color  = i_border_color
+	v_shadow_width  = i_shadow_width
+
+	v_position = a_position * (i_size + i_shadow_width)
+	
+	$Position    = { ..2 * (i_offset + v_position) / vertex_uniforms.screen_size - 1, 0, 1, }
+	$Position.y *= -1
+	return
+}
+
+@(uniform)
+font_texture: sampler[2][3]f32
+
+@(uniform_buffer, binding = 1)
+fragment_uniforms: #import(Uniforms)
+
+@(fragment_shader)
+fragment_main :: proc(
+	v_position:     [2]f32 @ 0,
+	v_size:         [2]f32 @ 1,
+	v_texture:      [3]f32 @ 2,
+	v_color:        [4]f32 @ 3,
+	v_border_radius:   f32 @ 4,
+	v_border_width:    f32 @ 5,
+	v_border_color: [4]f32 @ 6,
+	v_shadow_width:    f32 @ 7,
+) -> (
+	f_color: [4]f32 @ 0,
+) {
+	f_color = 1
+
+	shadow_strength := 1 - (sdf.rounded_box(v_position - v_size / 2 - v_shadow_width / 2, v_size / 2 - v_shadow_width / 2, v_border_radius) - 0.5) / v_shadow_width
+	shadow_strength  = smooth_step(0.0, 1, shadow_strength)
+	shadow          := [4]f32 { rgb = 0, a = 0.3, } * shadow_strength
+
+	d := sdf.rounded_box(v_position - v_size / 2, v_size / 2, v_border_radius) - 0.5
+	border_weight: f32
+	if v_border_width != 0 {
+		if d > 0 {
+			f_color = shadow
+			return
+		} else if d > -1 {
+			shadow.rgb = lerp(v_border_color.rgb, shadow.rgb, shadow_strength)
+			f_color    = lerp(shadow, v_border_color, -d)
+			return
+		} else if d > -v_border_width {
+			f_color = v_border_color
+			return
+		} else if d > -v_border_width - 1 {
+			border_weight = d + v_border_width + 1
+		}
+	} else {
+		if d > 0 {
+			f_color.a = 0
+			return
+		} else if d > -1 {
+			f_color.a = -d
+		}
+	}
+
+	f_color *= v_color
+
+	if v_texture.z != 0 {
+		sample  := pow(font_texture[v_texture.xy / fragment_uniforms.atlas_size], 1 / 2.2)
+		f_color *= {
+			..sample,
+			(sample.r + sample.g + sample.b) / 3,
+		}
+		// f_color      = {
+		// 	..f_color.rgb * sample,
+		// 	f_color.a * (sample.r + sample.g + sample.b) / 3,
+		// }
+		// f_color.rgb *= sample
+		// f_color.a   *= (sample.r + sample.g + sample.b) / 3
+	}
+	
+	f_color = lerp(f_color, v_border_color, border_weight)
+}
