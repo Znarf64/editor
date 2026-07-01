@@ -92,11 +92,12 @@ fragment_main :: proc(
 	f_color *= v_color
 
 	if v_texture.z != 0 {
-		sample  := pow(font_texture[v_texture.xy / fragment_uniforms.atlas_size], 1 / 2.2)
-		f_color *= {
-			..sample,
-			(sample.r + sample.g + sample.b) / 3,
-		}
+		// sample  := pow(font_texture[v_texture.xy / fragment_uniforms.atlas_size], 1 / 2.2)
+		// f_color *= {
+		// 	..sample,
+		// 	(sample.r + sample.g + sample.b) / 3,
+		// }
+		f_color.a *= font_texture[v_texture.xy / fragment_uniforms.atlas_size].r
 		// f_color      = {
 		// 	..f_color.rgb * sample,
 		// 	f_color.a * (sample.r + sample.g + sample.b) / 3,
@@ -106,4 +107,5 @@ fragment_main :: proc(
 	}
 	
 	f_color = lerp(f_color, v_border_color, border_weight)
+	return
 }

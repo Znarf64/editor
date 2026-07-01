@@ -3,14 +3,12 @@ package editor
 import ease    "core:math/ease"
 import fmt     "core:fmt"
 import la      "core:math/linalg"
+import os      "core:os"
 import strings "core:strings"
 import time    "core:time"
 import unicode "core:unicode"
 
-import glfw "vendor:glfw"
-
 import glodin "vendor/glodin"
-import input  "vendor/input"
 
 Instance :: struct {
 	offset:        [2]f32,
@@ -23,20 +21,32 @@ Instance :: struct {
 	shadow_width:  f32,
 }
 
-FONT_HEIGHT :: 10
+Cursor :: struct {
+	line, column: int,
+}
+
+Editor :: struct {
+	cursor: Cursor,
+	rope:   Rope,
+	theme:  [Style]struct { fg, bg: [4]f32, },
+	styles: map[string]Style,
+	font:   Font,
+	scroll: f32,
+}
+
+FONT_HEIGHT :: 12
 
 main :: proc() {
-	glfw_ok := glfw.Init()
-	assert(bool(glfw_ok), "Failed to initialize glfw")
-	defer glfw.Terminate()
+	backend: Backend
+	backend_ok := backend_init(&backend)
+	if !backend_ok {
+		fmt.eprintln("Failed to initialize backend")
+		os.exit(1)
+	}
+	defer backend->destroy()
 
-	window := glfw.CreateWindow(900, 600, "Hello Editor", nil, nil)
-	defer glfw.DestroyWindow(window)
-
-	glodin.init_glfw(window)
+	glodin.init(proc(rawptr, cstring) {})
 	defer glodin.uninit()
-
-	input.init(window)
 
 	Vertex :: struct {
 		position: [2]f32,
@@ -71,15 +81,11 @@ main :: proc() {
 	glodin.set_uniform(program, "vertex_uniforms",   uniform_buffer)
 	glodin.set_uniform(program, "fragment_uniforms", uniform_buffer)
 
-	// uniforms.atlas_size = ATLAS_SIZE
+	editor: Editor
 
-	font: Font
-	font_ok := font_init(&font, #load("font.ttf"), FONT_HEIGHT)
+	font_ok := font_init(&editor.font, #load("font.ttf"), FONT_HEIGHT)
 	assert(font_ok)
-	defer font_destroy(font)
-
-	fmt.println(get_baked_glyph(&font, '0'))
-	fmt.println(get_baked_glyph(&font, '1'))
+	defer font_destroy(editor.font)
 
 	file_picker: struct {
 		left, right: Animation(Rect),
@@ -104,16 +110,9 @@ main :: proc() {
 
 	// S :: #load("/home/znarf/source/odin/src/check_expr.cpp", string)
 	S :: #load(#file, string)
-	rope := rope_from_string(S, context.allocator) or_else panic("")
+	editor.rope = rope_from_string(S, context.allocator) or_else panic("")
 
 	scroll: Animation(f32)
-
-	color_from_hex_rgba :: proc(hex: u32) -> (rgba: [4]f32) {
-		for i in 0 ..< u32(4) {
-			rgba[i] = f32((hex >> ((3 - i) * 8)) & 0xFF) / 255.999
-		}
-		return
-	}
 
 	// // theme: [Style]struct {
 	// // 	fg, bg: [4]f32,
@@ -130,9 +129,7 @@ main :: proc() {
 	// // 	.Type       = { fg = { 0.9, 0.7, 0.5, 1, }, },
 	// // }
 
-	theme: [Style]struct {
-		fg, bg: [4]f32,
-	} = {
+	editor.theme = {
 		.Invalid    = { fg = {}, },
 		.Whitespace = { fg = {}, },
 		.Ident      = { fg = color_from_hex_rgba(0xABB2BFFF), },
@@ -149,25 +146,18 @@ main :: proc() {
 		.Background = { bg = color_from_hex_rgba(0x1E2128FF), },
 	}
 
-	styles: map[string]Style
-
 	keywords := []string{ "import", "foreign", "package", "when", "where", "if", "else", "for", "switch", "in", "not_in", "do", "case", "break", "continue", "fallthrough", "defer", "return", "proc", "struct", "union", "enum", "bit_set", "bit_field", "map", "dynamic", "auto_cast", "cast", "transmute", "distinct", "using", "context", "or_else", "or_return", "or_break", "or_continue", "asm", "matrix", }
 	types := []string{ "bool", "b8", "b16", "b32", "b64", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "i128", "u128", "rune", "f16", "f32", "f64", "complex32", "complex64", "complex128", "quaternion64", "quaternion128", "quaternion256", "int", "uint", "uintptr", "rawptr", "string", "cstring", "string16", "cstring16", "any", "typeid", "i16le", "u16le", "i32le", "u32le", "i64le", "u64le", "i128le", "u128le", "i16be", "u16be", "i32be", "u32be", "i64be", "u64be", "i128be", "u128be", "f16le", "f32le", "f64le", "f16be", "f32be", "f64be", }
 	constants := []string{ "true", "false", "nil", }
 
 	for k in keywords {
-		styles[k] = .Keyword
+		editor.styles[k] = .Keyword
 	}
 	for t in types {
-		styles[t] = .Type
+		editor.styles[t] = .Type
 	}
 	for c in constants {
-		styles[c] = .Constant
-	}
-
-	cursor: struct {
-		line, column: int,
-		// rect: Animation(Rect),
+		editor.styles[c] = .Constant
 	}
 
 	Mode :: enum {
@@ -181,18 +171,46 @@ main :: proc() {
 	last_print_time    := time.now()
 	frames_since_print := 0
 
-	text_buffer: [dynamic]Instance
+	screen_size: [2]f32
 
-	for !glfw.WindowShouldClose(window) {
+	main_loop: for {
 		frames_since_print += 1
 		if time.since(last_print_time) > time.Second {
-			glfw.SetWindowTitle(window, fmt.ctprintf("%v", frames_since_print))
+			backend->set_title(fmt.tprintf("%v FPS", frames_since_print))
 			frames_since_print = 0
 			last_print_time    = time.now()
 		}
 
-		x, y        := glfw.GetFramebufferSize(window)
-		screen_size := [2]f32{ f32(x), f32(y), }
+		for event in backend->poll_events() {
+			switch e in event {
+			case Event_Window_Close:
+				break main_loop
+			case Event_Window_Resize:
+				screen_size = ([2]f32)(e.size)
+				glodin.window_size_callback(e.size.x, e.size.y)
+	
+			case Event_Input_Key:
+				if e.key == .O && .Control in e.modifiers && e.action == .Down {
+					file_picker.active ~= true
+
+					left_rect  := rect_from_min_max(40, { screen_size.x / 2 - 10, screen_size.y - 40, })
+					right_rect := rect_from_min_max({ screen_size.x / 2 + 10, 40, }, screen_size - 40)
+
+					if !file_picker.active {
+						left_rect  = rect_center(left_rect).xyxy
+						right_rect = rect_center(right_rect).xyxy
+					}
+
+					animation_begin(&file_picker.left,  left_rect)
+					animation_begin(&file_picker.right, right_rect)
+				}
+			case Event_Input_Codepoint:
+			case Event_Input_Mouse_Move:
+			case Event_Input_Mouse_Button:
+			case Event_Input_Scroll:
+				animation_begin(&scroll, min(0, scroll.target + e.delta.y * FONT_HEIGHT * 5))
+			}
+		}
 
 		current_time := time.duration_seconds(time.since(start_time))
 		delta_time   := current_time - prev_time
@@ -200,318 +218,136 @@ main :: proc() {
 
 		clear(&instance_buffer)
 
-		switch mode {
-		case .Insert:
-		case .Visual:
-		case .Normal:
-			if y := input.get_scroll().y; y != 0 {
-				animation_begin(&scroll, min(0, scroll.target + y * FONT_HEIGHT * 5))
-			}
+		// switch mode {
+		// case .Insert:
+		// case .Visual:
+		// case .Normal:
+		// 	if y := input.get_scroll().y; y != 0 {
+		// 		animation_begin(&scroll, min(0, scroll.target + y * FONT_HEIGHT * 5))
+		// 	}
 
-			if input.get_key(.Left_Control) || input.get_key(.Right_Control) {
-				if input.get_key_down(.D, true) {
-					animation_begin(&scroll, min(0, scroll.target - screen_size.y / 2))
-				}
-				if input.get_key_down(.U, true) {
-					animation_begin(&scroll, min(0, scroll.target + screen_size.y / 2))
-				}
+		// 	if .Control in input.modifiers {
+		// 		if input.get_key_down(.D, true) {
+		// 			animation_begin(&scroll, min(0, scroll.target - screen_size.y / 2))
+		// 		}
+		// 		if input.get_key_down(.U, true) {
+		// 			animation_begin(&scroll, min(0, scroll.target + screen_size.y / 2))
+		// 		}
 
-				if input.get_key_down(.F) {
-					command_palette.active ~= true
+		// 		if input.get_key_down(.F) {
+		// 			command_palette.active ~= true
 
-					rect := rect_from_min_max(200, screen_size - 200)
+		// 			rect := rect_from_min_max(200, screen_size - 200)
 
-					if !command_palette.active {
-						rect = rect_center(rect).xyxy
-					}
+		// 			if !command_palette.active {
+		// 				rect = rect_center(rect).xyxy
+		// 			}
 
-					animation_begin(&command_palette.rect, rect)
-				}
-			}
+		// 			animation_begin(&command_palette.rect, rect)
+		// 		}
+		// 	}
 
-			if input.get_key_down(.J, true) || input.get_key_down(.Down, true) {
-				cursor.line        += 1
-				// cursor.rect.t       = 0
-				// cursor.rect.origin  = cursor.rect.current
- 				// animation_begin(&scroll, min(0, scroll.target - FONT_SIZE * 5))
-			}
-			if input.get_key_down(.K, true) || input.get_key_down(.Up, true) {
-				cursor.line        -= 1
-				// cursor.rect.t       = 0
-				// cursor.rect.origin  = cursor.rect.current
- 				// animation_begin(&scroll, min(0, scroll.target + FONT_SIZE * 5))
-			}
+		// 	if input.get_key_down(.G) {
+		// 		if .Shift in input.modifiers {
+		// 		} else {
+		// 			animation_begin(&scroll, 0)
+		// 		}
+		// 	}
 
-			if input.get_key_down(.H, true) || input.get_key_down(.Left, true) {
-				cursor.column      -= 1
-				// cursor.rect.t       = 0
-				// cursor.rect.origin  = cursor.rect.current
- 			}
-			if input.get_key_down(.L, true) || input.get_key_down(.Right, true) {
-				cursor.column      += 1
-				// cursor.rect.t       = 0
-				// cursor.rect.origin  = cursor.rect.current
- 			}
+		// 	if input.get_key_down(.O) && .Control in input.modifiers {
+		// 		file_picker.active ~= true
 
-			if input.get_key_down(.G) {
-				if input.get_key_down(.Left_Shift) || input.get_key_down(.Right_Shift) {
-				} else {
-					animation_begin(&scroll, 0)
-				}
-			}
+		// 		left_rect  := rect_from_min_max(40, { screen_size.x / 2 - 10, screen_size.y - 40, })
+		// 		right_rect := rect_from_min_max({ screen_size.x / 2 + 10, 40, }, screen_size - 40)
 
-			if input.get_key_down(.Space) {
-				file_picker.active ~= true
+		// 		if !file_picker.active {
+		// 			left_rect  = rect_center(left_rect).xyxy
+		// 			right_rect = rect_center(right_rect).xyxy
+		// 		}
 
-				left_rect  := rect_from_min_max(40, { screen_size.x / 2 - 10, screen_size.y - 40, })
-				right_rect := rect_from_min_max({ screen_size.x / 2 + 10, 40, }, screen_size - 40)
+		// 		animation_begin(&file_picker.left,  left_rect)
+		// 		animation_begin(&file_picker.right, right_rect)
+		// 	}
 
-				if !file_picker.active {
-					left_rect  = rect_center(left_rect).xyxy
-					right_rect = rect_center(right_rect).xyxy
-				}
+		// 	if input.get_key_down(.F1) {
+		// 		command_palette.active ~= true
 
-				animation_begin(&file_picker.left,  left_rect)
-				animation_begin(&file_picker.right, right_rect)
-			}
+		// 		rect := rect_from_min_max(200, screen_size - 200)
 
-			if input.get_key_down(.F1) {
-				command_palette.active ~= true
+		// 		if !command_palette.active {
+		// 			rect = rect_center(rect).xyxy
+		// 		}
 
-				rect := rect_from_min_max(200, screen_size - 200)
+		// 		animation_begin(&command_palette.rect, rect)
+		// 	}
 
-				if !command_palette.active {
-					rect = rect_center(rect).xyxy
-				}
+		// 	if input.get_key_down(.Slash) {
+		// 		mode = .Prompt
+		// 	}
+		// case .Prompt:
+		// 	if input.get_key_down(.Backspace, true) {
+		// 		delete: if .Control in input.modifiers {
+		// 			r, w := strings.pop_rune(&prompt.command)
+		// 			if w == 0 {
+		// 				break delete
+		// 			}
 
-				animation_begin(&command_palette.rect, rect)
-			}
+		// 			if !unicode.is_alpha(r) && !unicode.is_number(r) do for {
+		// 				r, w := strings.pop_rune(&prompt.command)
+		// 				if w == 0 {
+		// 					break
+		// 				}
+		// 				if unicode.is_alpha(r) || unicode.is_number(r) {
+		// 					break
+		// 				}
+		// 			}
 
-			if input.get_key_down(.Slash) {
-				mode = .Prompt
-			}
-		case .Prompt:
-			if input.get_key_down(.Backspace, true) {
-				delete: if input.get_key(.Left_Control) || input.get_key(.Right_Control) {
-					r, w := strings.pop_rune(&prompt.command)
-					if w == 0 {
-						break delete
-					}
+		// 			for {
+		// 				r, w := strings.pop_rune(&prompt.command)
+		// 				if w == 0 {
+		// 					break
+		// 				}
+		// 				if !unicode.is_alpha(r) && !unicode.is_number(r) {
+		// 					strings.write_rune(&prompt.command, r)
+		// 					break
+		// 				}
+		// 			}
+		// 		} else {
+		// 			strings.pop_rune(&prompt.command)
+		// 		}
+		// 	}
 
-					if !unicode.is_alpha(r) && !unicode.is_number(r) do for {
-						r, w := strings.pop_rune(&prompt.command)
-						if w == 0 {
-							break
-						}
-						if unicode.is_alpha(r) || unicode.is_number(r) {
-							break
-						}
-					}
+		// 	strings.write_string(&prompt.command, strings.to_string(input.text_input))
 
-					for {
-						r, w := strings.pop_rune(&prompt.command)
-						if w == 0 {
-							break
-						}
-						if !unicode.is_alpha(r) && !unicode.is_number(r) {
-							strings.write_rune(&prompt.command, r)
-							break
-						}
-					}
-				} else {
-					strings.pop_rune(&prompt.command)
-				}
-			}
+		// 	if input.get_key_down(.Escape) || input.get_key_down(.Enter) {
+		// 		strings.builder_reset(&prompt.command)
+		// 		mode = .Normal
+		// 	}
+		// }
 
-			strings.write_string(&prompt.command, strings.to_string(input.text_input))
+		// if y := input.get_scroll().y; y != 0 {
+		// 	animation_begin(&scroll, min(0, scroll.target + y * FONT_HEIGHT * 5))
+		// }
 
-			if input.get_key_down(.Escape) || input.get_key_down(.Enter) {
-				strings.builder_reset(&prompt.command)
-				mode = .Normal
-			}
-		}
+		editor.scroll = animation_update(&scroll, f32(delta_time), 5)
 
-		scroll := animation_update(&scroll, f32(delta_time), 5)
-
-		{
-			text := rope_to_string(rope, context.temp_allocator)
-
-			highlighter: Highlighter = {
-				text     = text,
-				keywords = styles,
-			}
-
-			line, column: int
-			cell_size: [2]f32 = { get_baked_glyph(&font, 0).x_advance, (FONT_HEIGHT - f32(font.descender) * font.scale) * 1.2, }
-
-			// cursor_rect := animation_update(&cursor.rect, f32(delta_time), 10)
-			// append(&instance_buffer, Instance {
-			// 	offset        = cursor_rect.xy,
-			// 	size          = cursor_rect.zw - cursor_rect.xy,
-			// 	color         = theme[.Cursor].bg,
-			// 	border_radius = 2,
-			// })
-
-			render: for {
-				start := highlighter.pos
-				style := highlighter_advance(&highlighter)
-				if style == .Invalid {
-					break
-				}
-
-				start_column := column
-
-				for char in text[start:highlighter.pos] {
-					style := style
-					if line == cursor.line && column == cursor.column {
-						// min := [2]f32 { f32(column) * cell_size.x + 10, cell_size.y * f32(line) + FONT_HEIGHT + scroll - 15, }
-						// cursor.rect.target = { **min, **(min + { cell_size.x, FONT_HEIGHT, }), }
-
-						append(&instance_buffer, Instance {
-							offset        = { f32(column) * cell_size.x + 10, cell_size.y * f32(line) + scroll, },
-							size          = { cell_size.x, FONT_HEIGHT - f32(font.descender) * font.scale, },
-							color         = theme[.Cursor].bg,
-							border_radius = 2,
-						})
-
-						style = .Cursor
-					}
-
-					switch char {
-					case '\t':
-						// advance by one, round up to next multiple of four
-						column = (column + 1 + 3) & -4
-						continue
-					case '\n':
-						if theme[style].bg != 0 {
-							append(&instance_buffer, Instance {
-								offset        = { f32(start_column) * cell_size.x + 10, cell_size.y * f32(line) + FONT_HEIGHT + scroll - 15, },
-								size          = { f32(column - start_column) * cell_size.x, FONT_HEIGHT, },
-								color         = theme[style].bg,
-								border_radius = 2,
-							})
-							start_column = 0
-						}
-
-						column = 0
-						line  += 1
-						continue
-					case ' ':
-						column += 1
-						continue
-					}
-
-					x := f32(column) * cell_size.x + 10
-					y := cell_size.y * f32(line) + FONT_HEIGHT + scroll
-					if y < 0 {
-						continue
-					}
-					if y > screen_size.y {
-						break render
-					}
-
-					g := get_baked_glyph(&font, char)
-
-					append(&text_buffer, Instance {
-						offset  = { x, y, } + g.offset,
-						size    = ([2]f32)(g.max - g.min),
-						texture = { **([2]f32)(g.min), 1, },
-						color   = theme[style].fg,
-					})
-
-					column += 1
-
-					if x + cell_size.x * 2 > screen_size.x {
-						column = 1
-						line  += 1
-					}
-				}
-
-				if theme[style].bg != 0 {
-					append(&instance_buffer, Instance {
-						offset        = { f32(start_column) * cell_size.x + 10, cell_size.y * f32(line) + scroll - 2, },
-						size          = { f32(column - start_column) * cell_size.x, cell_size.y + 0.5, },
-						color         = theme[style].bg,
-						border_radius = 2,
-					})
-					// append(&instance_buffer, Instance {
-					// 	offset        = { f32(start_column) * cell_size.x + 10, cell_size.y * f32(line) + FONT_HEIGHT + scroll - 15, },
-					// 	size          = { f32(column - start_column) * cell_size.x, FONT_HEIGHT + 0.5 /* inflate this enough that connecting lines will reliably connect without gaps */, },
-					// 	color         = theme[style].bg,
-					// 	border_radius = 2,
-					// })
-				}
-			}
-
-			append(&instance_buffer, ..text_buffer[:])
-			clear(&text_buffer)
-		}
-
-		append(&instance_buffer, Instance {
-			offset       = { 0, screen_size.y - FONT_HEIGHT, },
-			size         = { screen_size.x, FONT_HEIGHT, },
-			color        = color_from_hex_rgba(0x1E2128FF),
-			border_color = color_from_hex_rgba(0x32363DFF),
-			border_width = 2,
-		})
-
-		w := measure_text(&font, strings.to_string(prompt.command))
-		draw_text(&font, &instance_buffer, strings.to_string(prompt.command), theme[.Ident].fg, { 0, screen_size.y, })
-
-		append(&instance_buffer, Instance {
-			offset = { w, screen_size.y - FONT_HEIGHT, },
-			size   = { 2, FONT_HEIGHT, },
-			color  = theme[.Ident].fg,
-		})
-
-		left  := animation_update(&file_picker.left,  f32(delta_time), 4)
-		right := animation_update(&file_picker.right, f32(delta_time), 4)
-
-		append(&instance_buffer, Instance {
-			offset        = left.xy,
-			size          = rect_size(left),
-			color         = color_from_hex_rgba(0x1E2128FF),
-			border_color  = color_from_hex_rgba(0x32363DFF),
-			border_radius = 8,
-			border_width  = 2,
-			shadow_width  = 16,
-		})
-		append(&instance_buffer, Instance {
-			offset        = right.xy,
-			size          = rect_size(right),
-			color         = color_from_hex_rgba(0x1E2128FF),
-			border_color  = color_from_hex_rgba(0x32363DFF),
-			border_radius = 8,
-			border_width  = 2,
-			shadow_width  = 16,
-		})
-
-		render_rect := animation_update(&command_palette.rect, f32(delta_time), 4)
-
-		append(&instance_buffer, Instance {
-			offset        = render_rect.xy,
-			size          = rect_size(render_rect),
-			color         = color_from_hex_rgba(0x1E2128FF),
-			border_color  = color_from_hex_rgba(0x32363DFF),
-			border_radius = 8,
-			border_width  = 2,
-			shadow_width  = 16,
-		})
+		render(&editor, &instance_buffer, screen_size)
 
 		instance_mesh := glodin.create_instanced_mesh(quad, instance_buffer[:])
 		defer glodin.destroy(instance_mesh)
 
 		uniforms.screen_size = screen_size
-		uniforms.atlas_size  = 1024
+		uniforms.atlas_size  = f32(len(editor.font.skyline))
 
-		glodin.clear_color({}, theme[.Background].bg)
-		glodin.set_uniform(program, "font_texture", font.atlas)
+		glodin.clear_color({}, editor.theme[.Background].bg)
+		glodin.set_uniform(program, "font_texture", editor.font.atlas)
 
 		glodin.draw({}, program, instance_mesh)
 
-		glfw.SwapBuffers(window)
-		input.poll()
-		glfw.PollEvents()
+		backend->draw(instance_buffer[:])
+		// glfw.SwapBuffers(window)
+		// input.poll()
+		// glfw.PollEvents()
 		free_all(context.temp_allocator)
 	}
 }
@@ -552,4 +388,180 @@ animation_begin :: proc(anim: ^Animation($T), target: T) {
 	anim.origin = anim.current
 	anim.target = target
 	anim.t      = 0
+}
+
+render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, screen_size: [2]f32) {
+	text_buffer := make([dynamic]Instance, context.temp_allocator)
+
+	{
+		text := rope_to_string(editor.rope, context.temp_allocator)
+
+		highlighter: Highlighter = {
+			text     = text,
+			keywords = editor.styles,
+		}
+
+		line, column: int
+		cell_size: [2]f32 = { get_baked_glyph(&editor.font, 0).x_advance, ((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale), }
+
+		// cursor_rect := animation_update(&cursor.rect, f32(delta_time), 10)
+		// append(&instance_buffer, Instance {
+		// 	offset        = cursor_rect.xy,
+		// 	size          = cursor_rect.zw - cursor_rect.xy,
+		// 	color         = theme[.Cursor].bg,
+		// 	border_radius = 2,
+		// })
+
+		render_text: for {
+			start := highlighter.pos
+			style := highlighter_advance(&highlighter)
+			if style == .Invalid {
+				break
+			}
+
+			start_column := column
+
+			for char in text[start:highlighter.pos] {
+				style := style
+				if line == editor.cursor.line && column == editor.cursor.column {
+					// min := [2]f32 { f32(column) * cell_size.x + 10, cell_size.y * f32(line) + FONT_HEIGHT + scroll - 15, }
+					// cursor.rect.target = { **min, **(min + { cell_size.x, FONT_HEIGHT, }), }
+
+					append(instance_buffer, Instance {
+						offset        = { f32(column) * cell_size.x + 10, cell_size.y * f32(line) + editor.scroll - f32(editor.font.descender) * editor.font.scale, },
+						size          = cell_size,
+						color         = editor.theme[.Cursor].bg,
+						border_radius = 2,
+					})
+
+					style = .Cursor
+				}
+
+				switch char {
+				case '\t':
+					// advance by one, round up to next multiple of four
+					column = (column + 1 + 3) & -4
+					continue
+				case '\n':
+					if editor.theme[style].bg != 0 {
+						append(instance_buffer, Instance {
+							offset        = { f32(start_column) * cell_size.x + 10, cell_size.y * f32(line) + FONT_HEIGHT + editor.scroll - 15, },
+							size          = { f32(column - start_column) * cell_size.x, FONT_HEIGHT, },
+							color         = editor.theme[style].bg,
+							border_radius = 2,
+						})
+						start_column = 0
+					}
+
+					column = 0
+					line  += 1
+					continue
+				case ' ':
+					column += 1
+					continue
+				}
+
+				x := f32(column) * cell_size.x + 10
+				y := cell_size.y * f32(line) + FONT_HEIGHT + editor.scroll + 10
+				if y < 0 {
+					continue
+				}
+				if y > screen_size.y {
+					break render_text
+				}
+
+				g := get_baked_glyph(&editor.font, char)
+
+				append(&text_buffer, Instance {
+					offset  = { x, y, } + ([2]f32)(g.offset),
+					size    = ([2]f32)(g.max - g.min),
+					texture = { **([2]f32)(g.min), 1, },
+					color   = editor.theme[style].fg,
+				})
+
+				column += 1
+
+				// if x + cell_size.x * 2 > screen_size.x {
+				// 	column = 1
+				// 	line  += 1
+				// }
+			}
+
+			if editor.theme[style].bg != 0 {
+				append(instance_buffer, Instance {
+					offset        = { f32(start_column) * cell_size.x + 10, cell_size.y * f32(line) + editor.scroll + 10 - 2, },
+					size          = { f32(column - start_column) * cell_size.x, cell_size.y + 0.5, },
+					color         = editor.theme[style].bg,
+					border_radius = 2,
+				})
+				// append(&instance_buffer, Instance {
+				// 	offset        = { f32(start_column) * cell_size.x + 10, cell_size.y * f32(line) + FONT_HEIGHT + scroll - 15, },
+				// 	size          = { f32(column - start_column) * cell_size.x, FONT_HEIGHT + 0.5 /* inflate this enough that connecting lines will reliably connect without gaps */, },
+				// 	color         = theme[style].bg,
+				// 	border_radius = 2,
+				// })
+			}
+		}
+
+		append(instance_buffer, ..text_buffer[:])
+		clear(&text_buffer)
+	}
+
+	// append(instance_buffer, Instance {
+	// 	offset       = { 0, screen_size.y - FONT_HEIGHT, },
+	// 	size         = { screen_size.x, FONT_HEIGHT, },
+	// 	color        = color_from_hex_rgba(0x1E2128FF),
+	// 	border_color = color_from_hex_rgba(0x32363DFF),
+	// 	border_width = 2,
+	// })
+
+	// w := measure_text(&font, strings.to_string(prompt.command))
+	// draw_text(&font, &instance_buffer, strings.to_string(prompt.command), editor.theme[.Ident].fg, { 0, screen_size.y, })
+
+	// append(&instance_buffer, Instance {
+	// 	offset = { w, screen_size.y - FONT_HEIGHT, },
+	// 	size   = { 2, FONT_HEIGHT, },
+	// 	color  = editor.theme[.Ident].fg,
+	// })
+
+	// left  := animation_update(&file_picker.left,  f32(delta_time), 4)
+	// right := animation_update(&file_picker.right, f32(delta_time), 4)
+
+	// append(&instance_buffer, Instance {
+	// 	offset        = left.xy,
+	// 	size          = rect_size(left),
+	// 	color         = color_from_hex_rgba(0x1E2128FF),
+	// 	border_color  = color_from_hex_rgba(0x32363DFF),
+	// 	border_radius = 8,
+	// 	border_width  = 2,
+	// 	shadow_width  = 16,
+	// })
+	// append(&instance_buffer, Instance {
+	// 	offset        = right.xy,
+	// 	size          = rect_size(right),
+	// 	color         = color_from_hex_rgba(0x1E2128FF),
+	// 	border_color  = color_from_hex_rgba(0x32363DFF),
+	// 	border_radius = 8,
+	// 	border_width  = 2,
+	// 	shadow_width  = 16,
+	// })
+
+	// render_rect := animation_update(&command_palette.rect, f32(delta_time), 4)
+
+	// append(&instance_buffer, Instance {
+	// 	offset        = render_rect.xy,
+	// 	size          = rect_size(render_rect),
+	// 	color         = color_from_hex_rgba(0x1E2128FF),
+	// 	border_color  = color_from_hex_rgba(0x32363DFF),
+	// 	border_radius = 8,
+	// 	border_width  = 2,
+	// 	shadow_width  = 16,
+	// })
+}
+
+color_from_hex_rgba :: proc(hex: u32) -> (rgba: [4]f32) {
+	for i in 0 ..< u32(4) {
+		rgba[i] = f32((hex >> ((3 - i) * 8)) & 0xFF) / 255.999
+	}
+	return
 }

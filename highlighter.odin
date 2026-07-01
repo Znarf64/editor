@@ -130,7 +130,7 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style {
 		}
 
 		return .Ident
-	case '\'', '+', '-', '*', '=', '~', '&', '|', '^', '@', '>', '<':
+	case '+', '-', '*', '=', '~', '&', '|', '^', '@', '>', '<':
 		h.pos += 1
 		return .Operator
 	case '.':
@@ -150,11 +150,7 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style {
 
 		return .Ident
 
-	// case ' ', '\t', '\n':
-	// 	h.pos += 1
-	// 	return .Whitespace
-
-	case '\"':
+	case '"':
 		h.pos += 1
 		parse_string: for h.pos < len(h.text) {
 			defer h.pos += 1
@@ -166,6 +162,21 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style {
 			case '\n':
 				h.pos -= 1
 				break parse_string
+			}
+		}
+		return .String
+	case '\'':
+		h.pos += 1
+		parse_string_single_quote: for h.pos < len(h.text) {
+			defer h.pos += 1
+			switch h.text[h.pos] {
+			case '\\':
+				h.pos += 1
+			case '\'':
+				break parse_string_single_quote
+			case '\n':
+				h.pos -= 1
+				break parse_string_single_quote
 			}
 		}
 		return .String
