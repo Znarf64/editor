@@ -1,9 +1,10 @@
 package editor
 
-import "vendor:glfw"
-
 Key :: enum {
-	A = glfw.KEY_A,
+	Escape,
+	Enter,
+
+	A,
 	B,
 	C,
 	D,
@@ -29,6 +30,17 @@ Key :: enum {
 	X,
 	Y,
 	Z,
+
+	_0,
+	_1,
+	_2,
+	_3,
+	_4,
+	_5,
+	_6,
+	_7,
+	_8,
+	_9,
 }
 
 Modifier :: enum {
@@ -44,7 +56,7 @@ Keybind :: struct {
 	key:       Key,
 }
 
-Keybinds :: map[Keybind]union{
-	map[Keybind]Command,
+Keybinds :: distinct map[Keybind]union{
+	Keybinds,
 	Command,
 }

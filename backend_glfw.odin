@@ -7,6 +7,7 @@ import strings "core:strings"
 import gl   "vendor:OpenGL"
 import glfw "vendor:glfw"
 
+@(require_results)
 backend_init_glfw :: proc(backend: ^Backend) -> (ok: bool) {
 	Backend_Glfw :: struct {
 		window: glfw.WindowHandle,
@@ -89,8 +90,20 @@ backend_init_glfw :: proc(backend: ^Backend) -> (ok: bool) {
 		backend := cast(^Backend)glfw.GetWindowUserPointer(window)
 
 		event: Event_Input_Key = {
-			key       = Key(key),
 			scancode  = int(scancode),
+		}
+
+		switch key {
+		case glfw.KEY_0 ..= glfw.KEY_9:
+			event.key = ._0 + Key(key - glfw.KEY_0)
+		case glfw.KEY_A ..= glfw.KEY_Z:
+			event.key = .A + Key(key - glfw.KEY_A)
+		case glfw.KEY_ESCAPE:
+			event.key = .Escape
+		case glfw.KEY_ENTER:
+			event.key = .Enter
+		case:
+			return
 		}
 
 		switch action {
@@ -120,7 +133,7 @@ backend_init_glfw :: proc(backend: ^Backend) -> (ok: bool) {
 
 		backend := cast(^Backend)glfw.GetWindowUserPointer(window)
 		append(&backend._events, Event_Input_Mouse_Move {
-			position = { int(xpos), int(ypos), }
+			position = { int(xpos), int(ypos), },
 		})
 	})
 

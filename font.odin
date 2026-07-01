@@ -102,8 +102,8 @@ draw_text :: proc(font: ^Font, instance_buffer: ^[dynamic]Instance, text: string
 @(require_results)
 font_init :: proc(font: ^Font, data: []byte, font_height: int) -> bool {
 	font.ttf_font = ttf.load(data) or_return
-	font.atlas    = glodin.create_texture(256, 256, format = .RGB8, mag_filter = .Nearest, min_filter = .Nearest)
-	font.skyline  = make([dynamic]int, 256)
+	font.atlas    = glodin.create_texture(1024, 1024, format = .RGB8, mag_filter = .Nearest, min_filter = .Nearest)
+	font.skyline  = make([dynamic]int, 1024)
 	font.scale    = ttf.font_height_to_scale(font^, f32(font_height))
 	font.baked    = make(map[rune]Baked_Glyph)
 	return true
