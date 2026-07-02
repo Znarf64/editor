@@ -59,4 +59,5 @@ Keybind :: struct {
 Keybinds :: distinct map[Keybind]union{
 	Keybinds,
 	Command,
+	Motion,
 }

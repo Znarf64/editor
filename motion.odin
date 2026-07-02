@@ -1,6 +1,6 @@
 package editor
 
-Command :: enum {
+Motion :: enum {
 	Cursor_Half_Page_Up,
 	Cursor_Half_Page_Down,
 
@@ -54,12 +54,10 @@ Command :: enum {
 	Open_Above,
 }
 
-command_apply :: proc(editor: ^Editor, command: Command) -> (repeat: bool) {
-	switch command {
+motion_apply :: proc(editor: ^Editor, motion: Motion) {
+	switch motion {
 	case .Cursor_Half_Page_Up:
-		return true
 	case .Cursor_Half_Page_Down:
-		return true
 
 	case .Go_To_File_Start:
 		editor.cursor = {}
@@ -69,45 +67,39 @@ command_apply :: proc(editor: ^Editor, command: Command) -> (repeat: bool) {
 	case .Go_To_Line_Start_Non_Whitespace:
 
 	case .Character_Down:
-		editor.cursor.line   += 1
-		return true
+		editor.cursor.line   += editor.repeat_count
 	case .Character_Up:
-		editor.cursor.line   -= 1
-		return true
+		editor.cursor.line   -= editor.repeat_count
 	case .Character_Left:
-		editor.cursor.column -= 1
-		return true
+		editor.cursor.column -= editor.repeat_count
 	case .Character_Right:
-		editor.cursor.column += 1
-		return true
+		editor.cursor.column += editor.repeat_count
 
 	case .Select_All:
 	case .Select_Word_Forward:
-		return true
 	case .Select_Word_Backward:
-		return true
 
 	case .Search:
 		editor.mode = .Prompt
 	case .Search_Global:
-		editor.mode   = .Picker
-		editor.picker = .Global_Search
+		editor.mode        = .Picker
+		editor.picker.kind = .Global_Search
 	case .Search_Symbols:
-		editor.mode   = .Picker
-		editor.picker = .Symbols
+		editor.mode        = .Picker
+		editor.picker.kind = .Symbols
 	case .Command_Palette:
-		editor.mode   = .Picker
-		editor.picker = .Commands
+		editor.mode        = .Picker
+		editor.picker.kind = .Commands
 
 	case .Save:
 	case .Save_As:
 
 	case .Open_File:
 		rect := rect_from_min_max(40, editor.screen_size - 40)
-		animation_begin(&editor.file_picker.rect, rect)
+		animation_begin(&editor.picker.rect, rect)
 
-		editor.mode   = .Picker
-		editor.picker = .Files
+		editor.mode        = .Picker
+		editor.picker.kind = .Files
 	case .Close_File:
 
 	case .Case_Swap:
@@ -140,6 +132,4 @@ command_apply :: proc(editor: ^Editor, command: Command) -> (repeat: bool) {
 
 	case:
 	}
-
-	return false
 }

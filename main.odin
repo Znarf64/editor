@@ -41,35 +41,33 @@ Picker :: enum {
 }
 
 Editor :: struct {
-	cursor:       Cursor,
-	mode:         Mode,
-	picker:       Picker,
+	cursor:        Cursor,
+	mode:          Mode,
 
-	screen_size:  [2]f32,
+	visible_lines: int,
+	screen_size:   [2]f32,
 
-	repeat_count: int,
+	repeat_count:  int,
 
-	scroll_anim:  Animation(f32),
-	cursor_anim:  Animation(Rect),
+	scroll_anim:   Animation(f32),
+	cursor_anim:   Animation(Rect),
 
-	file_picker:  struct {
-		rect:     Animation(Rect),
-		color:    Animation([4]f32),
+	picker:        struct {
+		kind: Picker,
+		rect: Animation(Rect),
 	},
 
-	prompt:       struct {
-		command:  strings.Builder,
+	prompt:        struct {
+		command: strings.Builder,
 	},
 
-	rope:         Rope,
+	rope:          Rope,
 
-	config:       Config,
-	styles:       map[string]Style,
+	config:        Config,
 
-	sub_menu:     Maybe(Keybinds), // used for multi key binds, ie. vim "leader" binds
-	keybinds:     [Mode]Keybinds,
+	sub_menu:      Maybe(Keybinds), // used for multi key binds, ie. vim "leader" binds
 
-	font:         Font,
+	font:          Font,
 }
 
 FONT_HEIGHT :: 12
@@ -121,25 +119,25 @@ main :: proc() {
 
 	editor: Editor
 
-	editor.keybinds[.Normal][{ key = .H, }] = .Character_Left
-	editor.keybinds[.Normal][{ key = .J, }] = .Character_Down
-	editor.keybinds[.Normal][{ key = .K, }] = .Character_Up
-	editor.keybinds[.Normal][{ key = .L, }] = .Character_Right
+	editor.config.keybinds[.Normal][{ key = .H, }] = .Character_Left
+	editor.config.keybinds[.Normal][{ key = .J, }] = .Character_Down
+	editor.config.keybinds[.Normal][{ key = .K, }] = .Character_Up
+	editor.config.keybinds[.Normal][{ key = .L, }] = .Character_Right
 
-	editor.keybinds[.Normal][{ key = .W, }] = .Select_Word_Forward
-	editor.keybinds[.Normal][{ key = .E, }] = .Select_Word_Backward
+	editor.config.keybinds[.Normal][{ key = .W, }] = .Select_Word_Forward
+	editor.config.keybinds[.Normal][{ key = .E, }] = .Select_Word_Backward
 
-	editor.keybinds[.Normal][{ key = .I,                            }] = .Insert
-	editor.keybinds[.Normal][{ key = .O,                            }] = .Open_Below
-	editor.keybinds[.Normal][{ key = .O, modifiers = { .Shift,   }, }] = .Open_Above
-	editor.keybinds[.Normal][{ key = .O, modifiers = { .Control, }, }] = .Open_File
+	editor.config.keybinds[.Normal][{ key = .I,                            }] = .Insert
+	editor.config.keybinds[.Normal][{ key = .O,                            }] = .Open_Below
+	editor.config.keybinds[.Normal][{ key = .O, modifiers = { .Shift,   }, }] = .Open_Above
+	editor.config.keybinds[.Normal][{ key = .O, modifiers = { .Control, }, }] = .Open_File
 
-	editor.keybinds[.Normal][{ key = .G, }] = .Go_To_File_Start
+	editor.config.keybinds[.Normal][{ key = .G, }] = .Go_To_File_Start
 
-	editor.keybinds[.Insert][{ key = .Escape, }] = .Normal
-	editor.keybinds[.Visual][{ key = .Escape, }] = .Normal
-	editor.keybinds[.Prompt][{ key = .Escape, }] = .Normal
-	editor.keybinds[.Picker][{ key = .Escape, }] = .Normal
+	editor.config.keybinds[.Insert][{ key = .Escape, }] = .Normal
+	editor.config.keybinds[.Visual][{ key = .Escape, }] = .Normal
+	editor.config.keybinds[.Prompt][{ key = .Escape, }] = .Normal
+	editor.config.keybinds[.Picker][{ key = .Escape, }] = .Normal
 
 	font_ok := font_init(&editor.font, #load("font.ttf"), FONT_HEIGHT)
 	assert(font_ok)
@@ -157,20 +155,6 @@ main :: proc() {
 	config_ok := load_config(&editor.config)
 	if !config_ok {
 		fmt.eprintln("Failed to load config")
-	}
-
-	keywords := []string{ "import", "foreign", "package", "when", "where", "if", "else", "for", "switch", "in", "not_in", "do", "case", "break", "continue", "fallthrough", "defer", "return", "proc", "struct", "union", "enum", "bit_set", "bit_field", "map", "dynamic", "auto_cast", "cast", "transmute", "distinct", "using", "context", "or_else", "or_return", "or_break", "or_continue", "asm", "matrix", }
-	types := []string{ "bool", "b8", "b16", "b32", "b64", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "i128", "u128", "rune", "f16", "f32", "f64", "complex32", "complex64", "complex128", "quaternion64", "quaternion128", "quaternion256", "int", "uint", "uintptr", "rawptr", "string", "cstring", "string16", "cstring16", "any", "typeid", "i16le", "u16le", "i32le", "u32le", "i64le", "u64le", "i128le", "u128le", "i16be", "u16be", "i32be", "u32be", "i64be", "u64be", "i128be", "u128be", "f16le", "f32le", "f64le", "f16be", "f32be", "f64be", }
-	constants := []string{ "true", "false", "nil", }
-
-	for k in keywords {
-		editor.styles[k] = .Keyword
-	}
-	for t in types {
-		editor.styles[t] = .Type
-	}
-	for c in constants {
-		editor.styles[c] = .Constant
 	}
 
 	last_print_time    := time.now()
@@ -199,43 +183,60 @@ main :: proc() {
 					break
 				}
 
-				if e.key >= ._0 && e.key <= ._9 {
+				if e.key >= ._0 && e.key <= ._9 && e.modifiers == {} {
 					editor.repeat_count *= 10
 					editor.repeat_count += int(e.key - ._0)
 					break
 				}
 
-				binds   := editor.sub_menu.? or_else editor.keybinds[editor.mode]
+				binds   := editor.sub_menu.? or_else editor.config.keybinds[editor.mode]
 				keybind := Keybind {
 					modifiers = e.modifiers,
 					key       = e.key,
 				}
 				bind, ok := binds[keybind]
 				if !ok {
-					editor.sub_menu = nil
+					editor.sub_menu     = nil
+					editor.repeat_count = 0
 					break
 				}
 
-				switch cmd in bind {
-				case Command:
-					for _ in 0 ..< max(editor.repeat_count, 1) {
-						command_apply(&editor, cmd) or_break
+				switch v in bind {
+				case Motion:
+					if editor.repeat_count == 0 {
+						editor.repeat_count = 1
 					}
+					motion_apply(&editor, v)
+					editor.repeat_count = 0
+				case Command:
+					command_execute(&editor, v)
 					editor.repeat_count = 0
 				case Keybinds:
-					editor.sub_menu = cmd
+					editor.sub_menu = v
 				}
 			case Event_Input_Codepoint:
 			case Event_Input_Mouse_Move:
 			case Event_Input_Mouse_Button:
 			case Event_Input_Scroll:
-				animation_begin(&editor.scroll_anim, min(0, editor.scroll_anim.target + e.delta.y * 5))
+				animation_begin(&editor.scroll_anim, max(0, editor.scroll_anim.target - e.delta.y * 5))
 			}
 		}
 
 		if prev_cursor != editor.cursor {
 			editor.cursor_anim.origin = editor.cursor_anim.current
 			editor.cursor_anim.t      = 0
+
+			if editor.scroll_anim.target < f32(editor.cursor.line - editor.visible_lines + 5) {
+				editor.scroll_anim.origin = editor.scroll_anim.current
+				editor.scroll_anim.target = f32(editor.cursor.line - editor.visible_lines + 5)
+				editor.scroll_anim.t      = 0
+			}
+
+			if editor.scroll_anim.target > f32(editor.cursor.line - 5) {
+				editor.scroll_anim.origin = editor.scroll_anim.current
+				editor.scroll_anim.target = f32(editor.cursor.line - 5)
+				editor.scroll_anim.t      = 0
+			}
 		}
 
 		current_time := time.duration_seconds(time.since(start_time))
@@ -307,7 +308,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 
 	highlighter: Highlighter = {
 		text     = text,
-		keywords = editor.styles,
+		keywords = editor.config.styles,
 	}
 
 	line, column: int
@@ -316,9 +317,11 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		la.round(((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale)),
 	}
 
+	editor.visible_lines = int(editor.screen_size.y / cell_size.y)
+
 	scroll := animation_update(&editor.scroll_anim, delta_time, 7.5)
 
-	cursor_rect := animation_update(&editor.cursor_anim, delta_time, 10)
+	cursor_rect := animation_update(&editor.cursor_anim, delta_time, 15)
 	append(instance_buffer, Instance {
 		offset        = cursor_rect.xy,
 		size          = cursor_rect.zw - cursor_rect.xy,
@@ -347,12 +350,13 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 					l = abs(editor.cursor.line - line) - 1
 				}
 				str := strconv.write_int(line_number_buf[:], i64(l + 1), base = 10)
-				draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { f32(start_column) * cell_size.x, cell_size.y * (f32(line) + scroll) + FONT_HEIGHT, } + padding)
+				w   := measure_text(&editor.font, str)
+				draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { gutter_width - cell_size.x * 2 - w, cell_size.y * (f32(line) - scroll) + FONT_HEIGHT, } + padding)
 
 				append(instance_buffer, Instance {
 					offset = {
 						gutter_width - cell_size.x + padding,
-						cell_size.y * (f32(line) + scroll) - f32(editor.font.descender) * editor.font.scale,
+						cell_size.y * (f32(line) - scroll) - f32(editor.font.descender) * editor.font.scale,
 					},
 					size   = cell_size * { 0.25, 1, },
 					color  = editor.config.theme[.Ident].fg,
@@ -363,14 +367,14 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 			if line == editor.cursor.line && column == editor.cursor.column {
 				offset := [2]f32{
 					f32(column) * cell_size.x + gutter_width,
-					cell_size.y * (f32(line - 1) + scroll) + f32(editor.font.ascender) * editor.font.scale,
+					cell_size.y * (f32(line - 1) - scroll) + f32(editor.font.ascender) * editor.font.scale,
 				} + padding
 				editor.cursor_anim.target.xy = offset
 				editor.cursor_anim.target.zw = offset + cell_size
 				// append(instance_buffer, Instance {
 				// 	offset        = {
 				// 		f32(column) * cell_size.x + gutter_width,
-				// 		cell_size.y * (f32(line - 1) + scroll) + f32(editor.font.ascender) * editor.font.scale,
+				// 		cell_size.y * (f32(line - 1) - scroll) + f32(editor.font.ascender) * editor.font.scale,
 				// 	} + padding,
 				// 	size          = cell_size,
 				// 	color         = editor.config.theme[.Cursor].bg,
@@ -390,7 +394,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 				// 	append(instance_buffer, Instance {
 				// 		offset        = {
 				// 			f32(column) * cell_size.x + gutter_width,
-				// 			cell_size.y * (f32(line) + scroll) + f32(editor.font.ascender) * editor.font.scale,
+				// 			cell_size.y * (f32(line) - scroll) + f32(editor.font.ascender) * editor.font.scale,
 				// 		} + padding,
 				// 		size          = cell_size,
 				// 		color         = editor.config.theme[style].fg,
@@ -406,7 +410,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 			}
 
 			x := f32(column) * cell_size.x + padding + gutter_width
-			y := cell_size.y * (f32(line) + scroll) + FONT_HEIGHT + padding
+			y := cell_size.y * (f32(line) - scroll) + FONT_HEIGHT + padding
 			if y < 0 {
 				continue
 			}
@@ -434,8 +438,8 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		if editor.config.theme[style].bg != 0 {
 			append(instance_buffer, Instance {
 				offset        = {
-					f32(column) * cell_size.x + gutter_width,
-					cell_size.y * (f32(line - 1) + scroll) + f32(editor.font.ascender) * editor.font.scale,
+					f32(start_column) * cell_size.x + gutter_width,
+					cell_size.y * (f32(line - 1) - scroll) + f32(editor.font.ascender) * editor.font.scale,
 				} + padding,
 				size          = { f32(column - start_column) * cell_size.x, cell_size.y + 0.5, },
 				color         = editor.config.theme[style].bg,
@@ -464,17 +468,17 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		color  = editor.config.theme[.Ident].fg,
 	})
 
-	if editor.mode != .Picker && editor.file_picker.rect.target != 0 {
+	if editor.mode != .Picker && editor.picker.rect.target != 0 {
 		rect := rect_from_min_max(40, editor.screen_size.x - 40)
-		animation_begin(&editor.file_picker.rect, rect_center(rect).xyxy)
+		animation_begin(&editor.picker.rect, rect_center(rect).xyxy)
 
 	}
 
-	render_rect := animation_update(&editor.file_picker.rect, delta_time, 4)
+	picker_rect := animation_update(&editor.picker.rect, delta_time, 4)
 
 	append(instance_buffer, Instance {
-		offset        = render_rect.xy,
-		size          = rect_size(render_rect),
+		offset        = picker_rect.xy,
+		size          = rect_size(picker_rect),
 		color         = color_from_hex_rgba(0x1E2128FF),
 		border_color  = color_from_hex_rgba(0x32363DFF),
 		border_radius = 8,
