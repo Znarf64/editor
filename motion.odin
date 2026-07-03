@@ -62,7 +62,9 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 	case .Go_To_File_Start:
 		editor.cursor = {}
 	case .Go_To_File_End:
+		editor.cursor = { column = 0, line = editor.rope.lines - 1, }
 	case .Go_To_Line_Start:
+		editor.cursor.column = 0
 	case .Go_To_Line_End:
 	case .Go_To_Line_Start_Non_Whitespace:
 

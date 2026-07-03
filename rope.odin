@@ -5,18 +5,19 @@ import "base:runtime"
 import "core:strings"
 import "core:unicode/utf8"
 
-Rope_Index :: bit_field i64 {
-	index: i64  | 63,
+Rope_Index :: bit_field int {
+	index: int  | size_of(int) * 8 - 1,
 	leaf:  bool | 1,
 }
 
 Rope_Node :: struct {
-	weight: i64,
+	weight: int,
+	lines:  int,
 	l, r:   Rope_Index,
 }
 
 ROPE_LEAF_SIZE :: 16
-Rope_Leaf      :: [16]u8
+Rope_Leaf      :: [ROPE_LEAF_SIZE]u8
 
 Dynamic_Pool :: struct (E: typeid) where size_of(E) > size_of(i32) {
 	data: [dynamic]E,
@@ -25,6 +26,8 @@ Dynamic_Pool :: struct (E: typeid) where size_of(E) > size_of(i32) {
 
 Rope :: struct {
 	root:   Rope_Index,
+	len:    int,
+	lines:  int,
 	nodes:  [dynamic]Rope_Node,
 	leaves: [dynamic]Rope_Leaf,
 }
@@ -52,30 +55,44 @@ rope_to_string :: proc(rope: Rope, allocator: runtime.Allocator) -> string {
 
 @(require_results)
 rope_build :: proc(leaves: []Rope_Leaf, allocator: runtime.Allocator) -> (rope: Rope) {
-	rope.nodes.allocator  = allocator
-	rope.leaves.allocator = allocator
-	rope.root             = _rope_build(&rope, leaves)
+	rope.nodes.allocator            = allocator
+	rope.leaves.allocator           = allocator
+	rope.root, rope.len, rope.lines = _rope_build(&rope, leaves)
 	return
 }
 
 @(require_results)
-_rope_build :: proc(rope: ^Rope, leaves: []Rope_Leaf) -> (index: Rope_Index) {
+_rope_build :: proc(rope: ^Rope, leaves: []Rope_Leaf) -> (index: Rope_Index, weight, lines: int) {
 	switch len(leaves) {
 	case 0:
 		return
 	case 1:
+		leaf := leaves[0]
+
+		str   := strings.truncate_to_byte(string(leaf[:]), 0)
+		weight = len(str)
+		lines  = strings.count(str, "\n")
+
 		index.leaf  = true
-		index.index = i64(len(rope.leaves))
-		append(&rope.leaves, leaves[0])
+		index.index = int(len(rope.leaves))
+		append(&rope.leaves, leaf)
 	case:
 		mid := len(leaves) / 2
 
+		li, lw, ll := _rope_build(rope, leaves[:mid])
+		ri, rw, rl := _rope_build(rope, leaves[mid:])
+
+		weight = lw + rw
+		lines  = ll + rl
+
 		append(&rope.nodes, Rope_Node {
-			l = _rope_build(rope, leaves[:mid]),
-			r = _rope_build(rope, leaves[mid:]),
+			weight = lw,
+			lines  = ll,
+			l      = li,
+			r      = ri,
 		})
 		index.leaf  = false
-		index.index = i64(len(rope.nodes)) - 1
+		index.index = int(len(rope.nodes)) - 1
 	}
 
 	return

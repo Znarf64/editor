@@ -82,21 +82,23 @@ measure_text :: proc(font: ^Font, text: string) -> (w: f32) {
 	return w
 }
 
-draw_text :: proc(font: ^Font, instance_buffer: ^[dynamic]Instance, text: string, color: [4]f32, position: [2]f32) {
-	position := position
+draw_text :: proc(font: ^Font, instance_buffer: ^[dynamic]Instance, text: string, color: [4]f32, position: [2]f32) -> (width: f32) {
+	pos := position
 
 	for r in text {
 		g := get_baked_glyph(font, r)
 
 		append(instance_buffer, Instance {
-			offset  = position + ([2]f32)(g.offset),
+			offset  = pos + ([2]f32)(g.offset),
 			size    = ([2]f32)(g.max - g.min),
 			texture = { **([2]f32)(g.min), 1, },
 			color   = color,
 		})
 
-		position.x += g.x_advance
+		pos.x += g.x_advance
 	}
+
+	return pos.x - position.x
 }
 
 @(require_results)

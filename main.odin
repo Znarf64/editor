@@ -53,12 +53,13 @@ Editor :: struct {
 	cursor_anim:   Animation(Rect),
 
 	picker:        struct {
-		kind: Picker,
-		rect: Animation(Rect),
+		kind:  Picker,
+		input: strings.Builder,
+		rect:  Animation(Rect),
 	},
 
 	prompt:        struct {
-		command: strings.Builder,
+		input: strings.Builder,
 	},
 
 	rope:          Rope,
@@ -132,7 +133,18 @@ main :: proc() {
 	editor.config.keybinds[.Normal][{ key = .O, modifiers = { .Shift,   }, }] = .Open_Above
 	editor.config.keybinds[.Normal][{ key = .O, modifiers = { .Control, }, }] = .Open_File
 
-	editor.config.keybinds[.Normal][{ key = .G, }] = .Go_To_File_Start
+	leader_g: Keybinds
+	leader_g[{ key = .G, }] = .Go_To_File_Start
+	leader_g[{ key = .E, }] = .Go_To_File_End
+	leader_g[{ key = .H, }] = .Go_To_Line_Start
+	leader_g[{ key = .L, }] = .Go_To_Line_End
+	leader_g[{ key = .S, }] = .Go_To_Line_Start_Non_Whitespace
+
+	editor.config.keybinds[.Normal][{ key = .G, }] = leader_g
+
+	editor.config.keybinds[.Normal][{ key = .F, }] = .Search
+
+	editor.config.keybinds[.Normal][{ key = .V, }] = .Visual
 
 	editor.config.keybinds[.Insert][{ key = .Escape, }] = .Normal
 	editor.config.keybinds[.Visual][{ key = .Escape, }] = .Normal
@@ -189,14 +201,14 @@ main :: proc() {
 					break
 				}
 
-				binds   := editor.sub_menu.? or_else editor.config.keybinds[editor.mode]
-				keybind := Keybind {
+				binds          := editor.sub_menu.? or_else editor.config.keybinds[editor.mode]
+				editor.sub_menu = nil
+				keybind        := Keybind {
 					modifiers = e.modifiers,
 					key       = e.key,
 				}
 				bind, ok := binds[keybind]
 				if !ok {
-					editor.sub_menu     = nil
 					editor.repeat_count = 0
 					break
 				}
@@ -215,6 +227,12 @@ main :: proc() {
 					editor.sub_menu = v
 				}
 			case Event_Input_Codepoint:
+				if editor.mode == .Prompt {
+					strings.write_rune(&editor.prompt.input, e.codepoint)
+				}
+				if editor.mode == .Picker {
+					strings.write_rune(&editor.picker.input, e.codepoint)
+				}
 			case Event_Input_Mouse_Move:
 			case Event_Input_Mouse_Button:
 			case Event_Input_Scroll:
@@ -227,15 +245,11 @@ main :: proc() {
 			editor.cursor_anim.t      = 0
 
 			if editor.scroll_anim.target < f32(editor.cursor.line - editor.visible_lines + 5) {
-				editor.scroll_anim.origin = editor.scroll_anim.current
-				editor.scroll_anim.target = f32(editor.cursor.line - editor.visible_lines + 5)
-				editor.scroll_anim.t      = 0
+				animation_begin(&editor.scroll_anim, f32(editor.cursor.line - editor.visible_lines + 5))
 			}
 
 			if editor.scroll_anim.target > f32(editor.cursor.line - 5) {
-				editor.scroll_anim.origin = editor.scroll_anim.current
-				editor.scroll_anim.target = f32(editor.cursor.line - 5)
-				editor.scroll_anim.t      = 0
+				animation_begin(&editor.scroll_anim, max(0, f32(editor.cursor.line - 5)))
 			}
 		}
 
@@ -320,14 +334,6 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 	editor.visible_lines = int(editor.screen_size.y / cell_size.y)
 
 	scroll := animation_update(&editor.scroll_anim, delta_time, 7.5)
-
-	cursor_rect := animation_update(&editor.cursor_anim, delta_time, 15)
-	append(instance_buffer, Instance {
-		offset        = cursor_rect.xy,
-		size          = cursor_rect.zw - cursor_rect.xy,
-		color         = editor.config.theme[.Cursor].bg,
-		border_radius = 2,
-	})
 
 	padding: f32 = 10
 	gutter_width := cell_size.x * 6
@@ -448,30 +454,67 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		}
 	}
 
+	cursor_rect := animation_update(&editor.cursor_anim, delta_time, 15)
+	append(instance_buffer, Instance {
+		offset        = cursor_rect.xy,
+		size          = cursor_rect.zw - cursor_rect.xy,
+		color         = editor.config.theme[.Cursor].bg,
+		border_radius = 2,
+	})
+
 	append(instance_buffer, ..text_buffer[:])
 	clear(&text_buffer)
 
 	append(instance_buffer, Instance {
-		offset       = { 0, editor.screen_size.y - FONT_HEIGHT, },
-		size         = { editor.screen_size.x, FONT_HEIGHT, },
+		offset       = { 0, editor.screen_size.y - FONT_HEIGHT - padding * 2, },
+		size         = { editor.screen_size.x, FONT_HEIGHT + padding * 2, },
 		color        = color_from_hex_rgba(0x1E2128FF),
 		border_color = color_from_hex_rgba(0x32363DFF),
 		border_width = 2,
 	})
 
-	w := measure_text(&editor.font, strings.to_string(editor.prompt.command))
-	draw_text(&editor.font, instance_buffer, strings.to_string(editor.prompt.command), editor.config.theme[.Ident].fg, { 0, editor.screen_size.y, })
+	x := padding
 
-	append(instance_buffer, Instance {
-		offset = { w, editor.screen_size.y - FONT_HEIGHT, },
-		size   = { 2, FONT_HEIGHT, },
-		color  = editor.config.theme[.Ident].fg,
-	})
+	mode_text: string
+	#partial switch editor.mode {
+	case .Normal:
+		mode_text = "NORMAL"
+	case .Visual:
+		mode_text = "VISUAL"
+	case .Insert:
+		mode_text = "INSERT"
+	}
+
+	if mode_text != "" {
+		w := draw_text(
+			&editor.font,
+			instance_buffer,
+			mode_text,
+			editor.config.theme[.Ident].fg,
+			{ x, editor.screen_size.y - padding, },
+		)
+		x += w
+	}
+
+	if editor.mode == .Prompt {
+		w := draw_text(
+			&editor.font,
+			instance_buffer,
+			strings.to_string(editor.prompt.input),
+			editor.config.theme[.Ident].fg,
+			{ x, editor.screen_size.y - padding, },
+		)
+
+		append(instance_buffer, Instance {
+			offset = { x + w, editor.screen_size.y - FONT_HEIGHT - padding, },
+			size   = { 2, FONT_HEIGHT, },
+			color  = editor.config.theme[.Ident].fg,
+		})
+	}
 
 	if editor.mode != .Picker && editor.picker.rect.target != 0 {
 		rect := rect_from_min_max(40, editor.screen_size.x - 40)
 		animation_begin(&editor.picker.rect, rect_center(rect).xyxy)
-
 	}
 
 	picker_rect := animation_update(&editor.picker.rect, delta_time, 4)
@@ -485,6 +528,14 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		border_width  = 2,
 		shadow_width  = 16,
 	})
+
+	draw_text(
+		&editor.font,
+		instance_buffer,
+		strings.to_string(editor.picker.input),
+		editor.config.theme[.Ident].fg,
+		picker_rect.xy + padding + { 0, FONT_HEIGHT, },
+	)
 }
 
 @(require_results)
