@@ -1,10 +1,19 @@
 package editor
 
+import "core:fmt"
+
 Motion :: enum {
+	Cursor_Page_Up,
+	Cursor_Page_Down,
 	Cursor_Half_Page_Up,
 	Cursor_Half_Page_Down,
 
-	Go_To_File_Start,
+	View_Page_Up,
+	View_Page_Down,
+	View_Half_Page_Up,
+	View_Half_Page_Down,
+
+	Go_To_Line,
 	Go_To_File_End,
 	Go_To_Line_Start,
 	Go_To_Line_End,
@@ -20,6 +29,9 @@ Motion :: enum {
 	Select_Word_Backward,
 
 	Search,
+	Command,
+
+	Open_File,
 	Search_Global,
 	Search_Symbols,
 	Command_Palette,
@@ -27,7 +39,6 @@ Motion :: enum {
 	Save,
 	Save_As,
 
-	Open_File,
 	Close_File,
 
 	Case_Swap,
@@ -57,10 +68,25 @@ Motion :: enum {
 motion_apply :: proc(editor: ^Editor, motion: Motion) {
 	switch motion {
 	case .Cursor_Half_Page_Up:
+		editor.cursor.line -= editor.visible_lines / 2
 	case .Cursor_Half_Page_Down:
+		editor.cursor.line += editor.visible_lines / 2
+	case .Cursor_Page_Up:
+		editor.cursor.line -= editor.visible_lines
+	case .Cursor_Page_Down:
+		editor.cursor.line += editor.visible_lines
 
-	case .Go_To_File_Start:
-		editor.cursor = {}
+	case .View_Half_Page_Up:
+		editor.scroll -= editor.visible_lines / 2
+	case .View_Half_Page_Down:
+		editor.scroll += editor.visible_lines / 2
+	case .View_Page_Up:
+		editor.scroll -= editor.visible_lines
+	case .View_Page_Down:
+		editor.scroll += editor.visible_lines
+
+	case .Go_To_Line:
+		editor.cursor = { line = editor.repeat_count - 1, }
 	case .Go_To_File_End:
 		editor.cursor = { column = 0, line = editor.rope.lines - 1, }
 	case .Go_To_Line_Start:
@@ -82,26 +108,28 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 	case .Select_Word_Backward:
 
 	case .Search:
-		editor.mode = .Prompt
+		editor.mode        = .Prompt
+		editor.prompt.mode = .Search
+	case .Command:
+		editor.mode        = .Prompt
+		editor.prompt.mode = .Command
+
 	case .Search_Global:
 		editor.mode        = .Picker
-		editor.picker.kind = .Global_Search
+		editor.picker.mode = .Global_Search
 	case .Search_Symbols:
 		editor.mode        = .Picker
-		editor.picker.kind = .Symbols
+		editor.picker.mode = .Symbols
 	case .Command_Palette:
 		editor.mode        = .Picker
-		editor.picker.kind = .Commands
+		editor.picker.mode = .Commands
 
 	case .Save:
 	case .Save_As:
 
 	case .Open_File:
-		rect := rect_from_min_max(40, editor.screen_size - 40)
-		animation_begin(&editor.picker.rect, rect)
-
 		editor.mode        = .Picker
-		editor.picker.kind = .Files
+		editor.picker.mode = .Files
 	case .Close_File:
 
 	case .Case_Swap:
@@ -114,6 +142,8 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 	case .Case_To_Screaming_Snake:
 
 	case .Replace:
+		// fmt.println(rope_get_character_at_line(editor.rope, editor.cursor.line)^)
+		// fmt.println(rope_line_to_offset(editor.rope, editor.cursor.line))
 	case .Delete:
 
 	case .Paste:

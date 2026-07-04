@@ -97,7 +97,7 @@ fragment_main :: proc(
 		// 	..sample,
 		// 	(sample.r + sample.g + sample.b) / 3,
 		// }
-		f_color.a *= font_texture[v_texture.xy / fragment_uniforms.atlas_size].r
+		f_color.a *= font_texture[v_texture.xy / ([2]f32)(texture_size(font_texture))].r
 		// f_color      = {
 		// 	..f_color.rgb * sample,
 		// 	f_color.a * (sample.r + sample.g + sample.b) / 3,

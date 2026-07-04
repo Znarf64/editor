@@ -1,5 +1,7 @@
 package editor
 
+import "base:runtime"
+
 import "core:slice"
 
 import glodin "vendor/glodin"
@@ -102,15 +104,17 @@ draw_text :: proc(font: ^Font, instance_buffer: ^[dynamic]Instance, text: string
 }
 
 @(require_results)
-font_init :: proc(font: ^Font, data: []byte, font_height: int) -> bool {
+font_init :: proc(font: ^Font, data: []byte, font_height: int, allocator: runtime.Allocator) -> bool {
 	font.ttf_font = ttf.load(data) or_return
 	font.atlas    = glodin.create_texture(1024, 1024, format = .RGB8, mag_filter = .Nearest, min_filter = .Nearest)
-	font.skyline  = make([dynamic]int, 1024)
+	font.skyline  = make([dynamic]int, 1024, allocator)
 	font.scale    = ttf.font_height_to_scale(font^, f32(font_height))
-	font.baked    = make(map[rune]Baked_Glyph)
+	font.baked    = make(map[rune]Baked_Glyph, allocator)
 	return true
 }
 
 font_destroy :: proc(font: Font) {
+	delete(font.baked)
+	delete(font.skyline)
 	glodin.destroy(font.atlas)
 }

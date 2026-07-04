@@ -3,18 +3,44 @@ package editor
 import "base:runtime"
 
 import "core:encoding/ini"
-import "core:fmt"
 import "core:strconv"
 import "core:strings"
+import vmem "core:mem/virtual"
 
-Theme :: [Style]struct { fg, bg: [4]f32, }
+Style_Key :: enum {
+	Invalid = 0,
+	Background,
+	Whitespace,
+	Ident,
+	Keyword,
+	Type,
+	Comment,
+	String,
+	Number,
+	Directive,
+	Operator,
+	Constant,
+	Function,
+	Cursor,
+
+	Indicator_Normal,
+	Indicator_Visual,
+	Indicator_Insert,
+}
+
+Style :: struct {
+	fg, bg: [4]f32,
+}
+
+Theme :: [Style_Key]Style
 
 Config :: struct {
+	arena:                 vmem.Arena,
 	animations:            bool,
 	relative_line_numbers: bool,
 	theme:                 Theme,
 	keybinds:              [Mode]Keybinds,
-	styles:                map[string]Style,
+	styles:                map[string]Style_Key,
 	languages:             []Language,
 }
 
@@ -28,6 +54,24 @@ Language :: struct {
 
 load_config_file :: proc(config: ^Config, src: string) -> (ok: bool) {
 	it := ini.iterator_from_string(src, {})
+
+	colors := make(map[string][4]f32, context.temp_allocator)
+
+	@(require_results)
+	parse_color :: proc(str: string) -> (color: [4]f32, ok: bool) {
+		str := strings.trim_prefix(str, "#")
+		u: u32
+		switch len(str) {
+		case 6:
+			u = (u32(strconv.parse_uint(str, 16) or_return) << 8) | 0xFF
+		case 8:
+			u = u32(strconv.parse_uint(str, 16) or_return)
+		case:
+			return
+		}
+
+		return color_from_hex_rgba(u), true
+	}
 
 	for key, value in ini.iterate(&it) {
 		@(require_results)
@@ -48,27 +92,25 @@ load_config_file :: proc(config: ^Config, src: string) -> (ok: bool) {
 		switch it.section {
 		case "theme":
 			base, _, selector := strings.partition(key, ".")
-			style: Style
-			ti := runtime.type_info_base(type_info_of(Style))
+			style: Style_Key
+			ti := runtime.type_info_base(type_info_of(Style_Key))
 			if e, ok := ti.variant.(runtime.Type_Info_Enum); ok {
 				for name, i in e.names {
 					if strings.equal_fold(base, name) {
-						style = Style(e.values[i])
+						style = Style_Key(e.values[i])
 						break
 					}
 				}
+			} else {
+				unreachable()
 			}
 
-			value := strings.trim_prefix(value, "#")
-			u: u32
-			switch len(value) {
-			case 6:
-				u = (u32(strconv.parse_uint(value, 16) or_continue) << 8) | 0xFF
-			case 8:
-				u = u32(strconv.parse_uint(value, 16) or_continue)
+			color: [4]f32
+			if strings.has_prefix(value, "#") {
+				color = parse_color(value) or_continue
+			} else {
+				color = colors[value]
 			}
-
-			color := color_from_hex_rgba(u)
 
 			switch selector {
 			case "fg", "":
@@ -82,16 +124,66 @@ load_config_file :: proc(config: ^Config, src: string) -> (ok: bool) {
 			// fmt.printfln("%v: %v = %v", section, key, value)
 		case "keybinds":
 			// fmt.printfln("%v: %v = %v", section, key, value)
+		case "colors":
+			colors[key] = parse_color(value) or_continue
 		}
 	}
 
 	return true
 }
 
+@(require_results)
 load_config :: proc(config: ^Config) -> (ok: bool) {
+	err := vmem.arena_init_growing(&config.arena)
+	assert(err == nil)
+
+	allocator := vmem.arena_allocator(&config.arena)
+
+	for &binds in config.keybinds {
+		binds = make(Keybinds, allocator)
+	}
+
+	config.keybinds[.Normal][{ key = .H, }] = .Character_Left
+	config.keybinds[.Normal][{ key = .J, }] = .Character_Down
+	config.keybinds[.Normal][{ key = .K, }] = .Character_Up
+	config.keybinds[.Normal][{ key = .L, }] = .Character_Right
+
+	config.keybinds[.Normal][{ key = .W, }] = .Select_Word_Forward
+	config.keybinds[.Normal][{ key = .E, }] = .Select_Word_Backward
+
+	config.keybinds[.Normal][{ key = .R, }] = .Replace
+
+	config.keybinds[.Normal][{ key = .I,                            }] = .Insert
+	config.keybinds[.Normal][{ key = .O,                            }] = .Open_Below
+	config.keybinds[.Normal][{ key = .O, modifiers = { .Shift,   }, }] = .Open_Above
+	config.keybinds[.Normal][{ key = .O, modifiers = { .Control, }, }] = .Open_File
+
+	config.keybinds[.Normal][{ key = .D, modifiers = { .Control, }, }] = .View_Half_Page_Down
+	config.keybinds[.Normal][{ key = .U, modifiers = { .Control, }, }] = .View_Half_Page_Up
+
+	leader_g := make(Keybinds, allocator)
+	leader_g[{ key = .G, }] = .Go_To_Line
+	leader_g[{ key = .E, }] = .Go_To_File_End
+	leader_g[{ key = .H, }] = .Go_To_Line_Start
+	leader_g[{ key = .L, }] = .Go_To_Line_End
+	leader_g[{ key = .S, }] = .Go_To_Line_Start_Non_Whitespace
+
+	config.keybinds[.Normal][{ key = .G, }] = leader_g
+
+	config.keybinds[.Normal][{ key = .F, }] = .Search
+
+	config.keybinds[.Normal][{ key = .V, }] = .Visual
+
+	config.keybinds[.Insert][{ key = .Escape, }] = .Normal
+	config.keybinds[.Visual][{ key = .Escape, }] = .Normal
+	config.keybinds[.Prompt][{ key = .Escape, }] = .Normal
+	config.keybinds[.Picker][{ key = .Escape, }] = .Normal
+
 	keywords := []string{ "import", "foreign", "package", "when", "where", "if", "else", "for", "switch", "in", "not_in", "do", "case", "break", "continue", "fallthrough", "defer", "return", "proc", "struct", "union", "enum", "bit_set", "bit_field", "map", "dynamic", "auto_cast", "cast", "transmute", "distinct", "using", "context", "or_else", "or_return", "or_break", "or_continue", "asm", "matrix", }
 	types := []string{ "bool", "b8", "b16", "b32", "b64", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "i128", "u128", "rune", "f16", "f32", "f64", "complex32", "complex64", "complex128", "quaternion64", "quaternion128", "quaternion256", "int", "uint", "uintptr", "rawptr", "string", "cstring", "string16", "cstring16", "any", "typeid", "i16le", "u16le", "i32le", "u32le", "i64le", "u64le", "i128le", "u128le", "i16be", "u16be", "i32be", "u32be", "i64be", "u64be", "i128be", "u128be", "f16le", "f32le", "f64le", "f16be", "f32be", "f64be", }
 	constants := []string{ "true", "false", "nil", }
+
+	config.styles = make(map[string]Style_Key, allocator)
 
 	for k in keywords {
 		config.styles[k] = .Keyword
@@ -109,4 +201,8 @@ load_config :: proc(config: ^Config) -> (ok: bool) {
 	load_config_file(config, #load("config.ini"))
 
 	return true
+}
+
+config_destroy :: proc(config: ^Config) {
+	vmem.arena_destroy(&config.arena)
 }

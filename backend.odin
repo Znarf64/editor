@@ -52,11 +52,16 @@ Backend :: struct {
 	draw:        proc(backend: ^Backend, instances: []Instance),
 	set_title:   proc(backend: ^Backend, title: string),
 	destroy:     proc(backend: ^Backend),
-	data:        rawptr,
 	_events:     [dynamic]Event,
 }
 
 @(require_results)
-backend_init :: proc(backend: ^Backend) -> bool {
-	return backend_init_glfw(backend)
+backend_init :: proc() -> (backend: ^Backend) {
+	when ODIN_OS == .Linux && false {
+		backend = backend_init_wayland()
+		if backend != nil {
+			return
+		}
+	}
+	return backend_init_glfw()
 }

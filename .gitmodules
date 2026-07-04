@@ -7,3 +7,9 @@
 [submodule "vendor/input"]
 	path = vendor/input
 	url = https://github.com/znarf64/input
+[submodule "vendor/odin-wayland"]
+	path = vendor/odin-wayland
+	url = https://github.com/yasinkaraaslan/odin-wayland
+[submodule "vendor/odin-xkbcommon"]
+	path = vendor/odin-xkbcommon
+	url = https://github.com/salfel/odin-xkbcommon

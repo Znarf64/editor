@@ -103,7 +103,7 @@ rope_from_string :: proc(str: string, allocator: runtime.Allocator) -> (rope: Ro
 	buf: Rope_Leaf
 	buf_len: int
 
-	leaves := make([dynamic]Rope_Leaf, allocator)
+	leaves := make([dynamic]Rope_Leaf, context.temp_allocator)
 
 	str := str
 	for len(str) != 0 {
@@ -129,8 +129,83 @@ rope_from_string :: proc(str: string, allocator: runtime.Allocator) -> (rope: Ro
 	return rope_build(leaves[:], allocator), true
 }
 
+@(require_results)
+rope_get_character :: proc(rope: Rope, offset: int) -> ^u8 {
+	offset := offset
+	index  := rope.root
+	for !index.leaf {
+		node := rope.nodes[index.index]
+		if offset > node.weight {
+			index   = node.r
+			offset -= node.weight
+		} else {
+			index = node.l
+		}
+	}
+	return &rope.leaves[index.index][offset]
+}
+
+@(require_results)
+rope_get_character_at_line :: proc(rope: Rope, line: int) -> ^u8 {
+	line  := line
+	index := rope.root
+	for !index.leaf {
+		node := rope.nodes[index.index]
+		if line > node.lines {
+			index = node.r
+			line -= node.lines
+		} else {
+			index = node.l
+		}
+	}
+	leaf := &rope.leaves[index.index]
+	for &char in leaf {
+		if char == '\n' {
+			line -= 1
+			continue
+		}
+		if line == 0 {
+			return &char
+		}
+	}
+	unreachable()
+}
+
+@(require_results)
+rope_line_to_offset :: proc(rope: Rope, line: int) -> int {
+	line   := line
+	index  := rope.root
+	offset := 0
+	for !index.leaf {
+		node := rope.nodes[index.index]
+		if line > node.lines {
+			index   = node.r
+			line   -= node.lines
+			offset += node.weight
+		} else {
+			index = node.l
+		}
+	}
+	leaf := &rope.leaves[index.index]
+	for &char, i in leaf {
+		if char == '\n' {
+			line -= 1
+			continue
+		}
+		if line == 0 {
+			return offset + i
+		}
+	}
+	unreachable()
+}
+
 rope_split :: proc(rope: ^Rope, index: int) {
 	
+}
+
+rope_destroy :: proc(rope: Rope) {
+	delete(rope.nodes)
+	delete(rope.leaves)
 }
 
 import "core:testing"
@@ -138,8 +213,13 @@ import "core:testing"
 @(test)
 rope_test_round_trip :: proc(t: ^testing.T) {
 	data := #load(#file, string)
-	rope, ok := rope_from_string(data, context.temp_allocator)
+
+	rope, ok := rope_from_string(data, context.allocator)
 	assert(ok)
-	decoded := rope_to_string(rope, context.temp_allocator)
+	defer rope_destroy(rope)
+
+	decoded := rope_to_string(rope, context.allocator)
+	defer delete(decoded)
+
 	assert(decoded == data)
 }

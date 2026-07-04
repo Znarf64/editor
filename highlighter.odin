@@ -3,35 +3,16 @@ package editor
 Highlighter :: struct {
 	pos:      int,
 	text:     string,
-	// line:     int,
-	// column:   int,
-	keywords: map[string]Style,
-}
-
-Style :: enum {
-	Invalid = 0,
-	Background,
-	Whitespace,
-	Ident,
-	Keyword,
-	Type,
-	Comment,
-	String,
-	Number,
-	Directive,
-	Operator,
-	Constant,
-	Function,
-	Cursor,
+	keywords: map[string]Style_Key,
 }
 
 @(require_results)
-highlighter_advance :: proc(h: ^Highlighter) -> Style {
+highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 	if h.pos >= len(h.text) {
 		return nil
 	}
 
-	advance_token :: proc(h: ^Highlighter) -> Style {
+	advance_token :: proc(h: ^Highlighter) -> Style_Key {
 		start := h.pos
 
 		has_upper: bool

@@ -7,50 +7,57 @@ import strings "core:strings"
 import gl   "vendor:OpenGL"
 import glfw "vendor:glfw"
 
+Backend_Glfw :: struct {
+	using base: Backend,
+	window:     glfw.WindowHandle,
+}
+
 @(require_results)
-backend_init_glfw :: proc(backend: ^Backend) -> (ok: bool) {
-	Backend_Glfw :: struct {
-		window: glfw.WindowHandle,
+backend_init_glfw :: proc() -> ^Backend {
+	backend := new(Backend_Glfw)
+	if _backend_init_glfw(backend) {
+		return backend
+	} else {
+		free(backend)
+		return nil
 	}
+}
 
-	data        := new(Backend_Glfw)
-	backend.data = data
-
+@(require_results)
+_backend_init_glfw :: proc(backend: ^Backend_Glfw) -> (ok: bool) {
 	glfw.Init() or_return
 	defer if !ok {
 		glfw.Terminate()
 	}
 
-	data.window = glfw.CreateWindow(900, 600, "Editor", nil, nil)
-	(data.window != nil) or_return
+	backend.window = glfw.CreateWindow(900, 600, "", nil, nil)
+	(backend.window != nil) or_return
 
-	glfw.MakeContextCurrent(data.window)
+	glfw.MakeContextCurrent(backend.window)
 
 	gl.load_up_to(4, 6, glfw.gl_set_proc_address)
 
-	backend.poll_events = proc(backend: ^Backend) -> []Event {
+	backend.poll_events = proc(backend: ^Backend_Glfw) -> []Event {
 		glfw.PollEvents()
 		events := backend._events[:]
 		clear(&backend._events)
 		return events
 	}
-	backend.draw = proc(backend: ^Backend, instances: []Instance) {
-		data := (^Backend_Glfw)(backend.data)
-		glfw.SwapBuffers(data.window)
+	backend.draw = proc(backend: ^Backend_Glfw, instances: []Instance) {
+		glfw.SwapBuffers(backend.window)
 	}
-	backend.set_title = proc(backend: ^Backend, title: string) {
-		data := (^Backend_Glfw)(backend.data)
-		glfw.SetWindowTitle(data.window, strings.clone_to_cstring(title, context.temp_allocator))
+	backend.set_title = proc(backend: ^Backend_Glfw, title: string) {
+		glfw.SetWindowTitle(backend.window, strings.clone_to_cstring(title, context.temp_allocator))
 	}
-	backend.destroy = proc(backend: ^Backend) {
-		data := (^Backend_Glfw)(backend.data)
-		glfw.DestroyWindow(data.window)
+	backend.destroy = proc(backend: ^Backend_Glfw) {
+		glfw.DestroyWindow(backend.window)
 		glfw.Terminate()
+		free(backend)
 	}
 
-	glfw.SetWindowUserPointer(data.window, backend)
+	glfw.SetWindowUserPointer(backend.window, backend)
 
-	glfw.SetFramebufferSizeCallback(data.window, proc "c" (window: glfw.WindowHandle, width, height: i32) {
+	glfw.SetFramebufferSizeCallback(backend.window, proc "c" (window: glfw.WindowHandle, width, height: i32) {
 		context = runtime.default_context()
 
 		backend := cast(^Backend)glfw.GetWindowUserPointer(window)
@@ -59,14 +66,14 @@ backend_init_glfw :: proc(backend: ^Backend) -> (ok: bool) {
 		})
 	})
 
-	glfw.SetWindowCloseCallback(data.window, proc "c" (window: glfw.WindowHandle) {
+	glfw.SetWindowCloseCallback(backend.window, proc "c" (window: glfw.WindowHandle) {
 		context = runtime.default_context()
 
 		backend := cast(^Backend)glfw.GetWindowUserPointer(window)
 		append(&backend._events, Event_Window_Close {})
 	})
 
-	glfw.SetScrollCallback(data.window, proc "c" (window: glfw.WindowHandle, xoffset, yoffset: f64) {
+	glfw.SetScrollCallback(backend.window, proc "c" (window: glfw.WindowHandle, xoffset, yoffset: f64) {
 		context = runtime.default_context()
 
 		backend := cast(^Backend)glfw.GetWindowUserPointer(window)
@@ -75,7 +82,7 @@ backend_init_glfw :: proc(backend: ^Backend) -> (ok: bool) {
 		})
 	})
 
-	glfw.SetCharCallback(data.window, proc "c" (window: glfw.WindowHandle, codepoint: rune) {
+	glfw.SetCharCallback(backend.window, proc "c" (window: glfw.WindowHandle, codepoint: rune) {
 		context = runtime.default_context()
 
 		backend := cast(^Backend)glfw.GetWindowUserPointer(window)
@@ -84,7 +91,7 @@ backend_init_glfw :: proc(backend: ^Backend) -> (ok: bool) {
 		})
 	})
 
-	glfw.SetKeyCallback(data.window, proc "c" (window: glfw.WindowHandle, key, scancode, action, mods: i32) {
+	glfw.SetKeyCallback(backend.window, proc "c" (window: glfw.WindowHandle, key, scancode, action, mods: i32) {
 		context = runtime.default_context()
 
 		backend := cast(^Backend)glfw.GetWindowUserPointer(window)
@@ -128,7 +135,7 @@ backend_init_glfw :: proc(backend: ^Backend) -> (ok: bool) {
 		append(&backend._events, event)
 	})
 
-	glfw.SetCursorPosCallback(data.window, proc "c" (window: glfw.WindowHandle, xpos, ypos: f64) {
+	glfw.SetCursorPosCallback(backend.window, proc "c" (window: glfw.WindowHandle, xpos, ypos: f64) {
 		context = runtime.default_context()
 
 		backend := cast(^Backend)glfw.GetWindowUserPointer(window)
@@ -137,7 +144,7 @@ backend_init_glfw :: proc(backend: ^Backend) -> (ok: bool) {
 		})
 	})
 
-	glfw.SetMouseButtonCallback(data.window, proc "c" (window: glfw.WindowHandle, button, action, mods: i32) {
+	glfw.SetMouseButtonCallback(backend.window, proc "c" (window: glfw.WindowHandle, button, action, mods: i32) {
 		context = runtime.default_context()
 
 		backend := cast(^Backend)glfw.GetWindowUserPointer(window)

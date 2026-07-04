@@ -7,6 +7,7 @@ import os      "core:os"
 import strings "core:strings"
 import strconv "core:strconv"
 import time    "core:time"
+import mem     "core:mem"
 
 import glodin "vendor/glodin"
 
@@ -33,11 +34,16 @@ Mode :: enum {
 	Picker,
 }
 
-Picker :: enum {
+Picker_Mode :: enum {
 	Files,
 	Global_Search,
 	Symbols,
 	Commands,
+}
+
+Prompt_Mode :: enum {
+	Command,
+	Search,
 }
 
 Editor :: struct {
@@ -49,16 +55,18 @@ Editor :: struct {
 
 	repeat_count:  int,
 
+	scroll:        int,
 	scroll_anim:   Animation(f32),
 	cursor_anim:   Animation(Rect),
 
 	picker:        struct {
-		kind:  Picker,
+		mode:  Picker_Mode,
 		input: strings.Builder,
 		rect:  Animation(Rect),
 	},
 
 	prompt:        struct {
+		mode:  Prompt_Mode,
 		input: strings.Builder,
 	},
 
@@ -74,9 +82,24 @@ Editor :: struct {
 FONT_HEIGHT :: 12
 
 main :: proc() {
-	backend: Backend
-	backend_ok := backend_init(&backend)
-	if !backend_ok {
+	when ODIN_DEBUG {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		defer mem.tracking_allocator_destroy(&track)
+
+		context.allocator = mem.tracking_allocator(&track)
+
+		defer for _, leak in track.allocation_map {
+			fmt.println(leak.location, "leaked", leak.size, "bytes")
+		}
+
+		defer for bad_free in track.bad_free_array {
+			fmt.eprintln(bad_free.location, "allocation was freed badly")
+		}
+	}
+
+	backend := backend_init()
+	if backend == nil {
 		fmt.eprintln("Failed to initialize backend")
 		os.exit(1)
 	}
@@ -100,11 +123,11 @@ main :: proc() {
 	quad := glodin.create_mesh(vertex_buffer[:])
 	defer glodin.destroy(quad)
 
-	instance_buffer := make([dynamic]Instance)
+	instance_buffer := make([dynamic]Instance, context.allocator)
+	defer delete(instance_buffer)
 
 	Uniforms :: struct {
 		screen_size: [2]f32,
-		atlas_size:  [2]f32,
 	}
 	uniform_buffer := glodin.create_uniform_buffer(Uniforms)
 	defer glodin.destroy(uniform_buffer)
@@ -120,38 +143,7 @@ main :: proc() {
 
 	editor: Editor
 
-	editor.config.keybinds[.Normal][{ key = .H, }] = .Character_Left
-	editor.config.keybinds[.Normal][{ key = .J, }] = .Character_Down
-	editor.config.keybinds[.Normal][{ key = .K, }] = .Character_Up
-	editor.config.keybinds[.Normal][{ key = .L, }] = .Character_Right
-
-	editor.config.keybinds[.Normal][{ key = .W, }] = .Select_Word_Forward
-	editor.config.keybinds[.Normal][{ key = .E, }] = .Select_Word_Backward
-
-	editor.config.keybinds[.Normal][{ key = .I,                            }] = .Insert
-	editor.config.keybinds[.Normal][{ key = .O,                            }] = .Open_Below
-	editor.config.keybinds[.Normal][{ key = .O, modifiers = { .Shift,   }, }] = .Open_Above
-	editor.config.keybinds[.Normal][{ key = .O, modifiers = { .Control, }, }] = .Open_File
-
-	leader_g: Keybinds
-	leader_g[{ key = .G, }] = .Go_To_File_Start
-	leader_g[{ key = .E, }] = .Go_To_File_End
-	leader_g[{ key = .H, }] = .Go_To_Line_Start
-	leader_g[{ key = .L, }] = .Go_To_Line_End
-	leader_g[{ key = .S, }] = .Go_To_Line_Start_Non_Whitespace
-
-	editor.config.keybinds[.Normal][{ key = .G, }] = leader_g
-
-	editor.config.keybinds[.Normal][{ key = .F, }] = .Search
-
-	editor.config.keybinds[.Normal][{ key = .V, }] = .Visual
-
-	editor.config.keybinds[.Insert][{ key = .Escape, }] = .Normal
-	editor.config.keybinds[.Visual][{ key = .Escape, }] = .Normal
-	editor.config.keybinds[.Prompt][{ key = .Escape, }] = .Normal
-	editor.config.keybinds[.Picker][{ key = .Escape, }] = .Normal
-
-	font_ok := font_init(&editor.font, #load("font.ttf"), FONT_HEIGHT)
+	font_ok := font_init(&editor.font, #load("font.ttf"), FONT_HEIGHT, context.allocator)
 	assert(font_ok)
 	defer font_destroy(editor.font)
 
@@ -163,11 +155,13 @@ main :: proc() {
 	S :: #load("/home/znarf/source/odin/src/check_expr.cpp", string)
 	// S :: #load(#file, string)
 	editor.rope = rope_from_string(S, context.allocator) or_else panic("")
+	defer rope_destroy(editor.rope)
 
 	config_ok := load_config(&editor.config)
 	if !config_ok {
 		fmt.eprintln("Failed to load config")
 	}
+	defer config_destroy(&editor.config)
 
 	last_print_time    := time.now()
 	frames_since_print := 0
@@ -181,6 +175,7 @@ main :: proc() {
 		}
 
 		prev_cursor := editor.cursor
+		prev_scroll := editor.scroll
 
 		for event in backend->poll_events() {
 			switch e in event {
@@ -236,7 +231,7 @@ main :: proc() {
 			case Event_Input_Mouse_Move:
 			case Event_Input_Mouse_Button:
 			case Event_Input_Scroll:
-				animation_begin(&editor.scroll_anim, max(0, editor.scroll_anim.target - e.delta.y * 5))
+				editor.scroll -= int(e.delta.y * 5)
 			}
 		}
 
@@ -244,13 +239,18 @@ main :: proc() {
 			editor.cursor_anim.origin = editor.cursor_anim.current
 			editor.cursor_anim.t      = 0
 
-			if editor.scroll_anim.target < f32(editor.cursor.line - editor.visible_lines + 5) {
-				animation_begin(&editor.scroll_anim, f32(editor.cursor.line - editor.visible_lines + 5))
+			if editor.scroll < editor.cursor.line - editor.visible_lines + 5 {
+				editor.scroll = editor.cursor.line - editor.visible_lines + 5
 			}
 
-			if editor.scroll_anim.target > f32(editor.cursor.line - 5) {
-				animation_begin(&editor.scroll_anim, max(0, f32(editor.cursor.line - 5)))
+			if editor.scroll > editor.cursor.line - 5 {
+				editor.scroll = editor.cursor.line - 5
 			}
+		}
+
+		editor.scroll = clamp(editor.scroll, 0, editor.rope.lines - 1)
+		if prev_scroll != editor.scroll {
+			animation_begin(&editor.scroll_anim, f32(editor.scroll))
 		}
 
 		current_time := time.duration_seconds(time.since(start_time))
@@ -265,7 +265,6 @@ main :: proc() {
 		defer glodin.destroy(instance_mesh)
 
 		uniforms.screen_size = editor.screen_size
-		uniforms.atlas_size  = f32(len(editor.font.skyline))
 
 		glodin.clear_color({}, editor.config.theme[.Background].bg)
 		glodin.set_uniform(program, "font_texture", editor.font.atlas)
@@ -331,12 +330,12 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		la.round(((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale)),
 	}
 
-	editor.visible_lines = int(editor.screen_size.y / cell_size.y)
-
-	scroll := animation_update(&editor.scroll_anim, delta_time, 7.5)
-
 	padding: f32 = 10
 	gutter_width := cell_size.x * 6
+
+	editor.visible_lines = int((editor.screen_size.y - FONT_HEIGHT - padding * 2) / cell_size.y)
+
+	scroll := animation_update(&editor.scroll_anim, delta_time, 7.5)
 
 	line_number_buf: [32]byte
 
@@ -350,14 +349,20 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		start_column := column
 
 		for char in text[start:highlighter.pos] {
-			if column == 0 {
+			draw_gutter: if column == 0 {
+				y := cell_size.y * (f32(line) - scroll) + FONT_HEIGHT + padding
+
+				if y < 0 {
+					break draw_gutter
+				}
+
 				l := line
 				if editor.config.relative_line_numbers && editor.cursor.line != line {
 					l = abs(editor.cursor.line - line) - 1
 				}
 				str := strconv.write_int(line_number_buf[:], i64(l + 1), base = 10)
 				w   := measure_text(&editor.font, str)
-				draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { gutter_width - cell_size.x * 2 - w, cell_size.y * (f32(line) - scroll) + FONT_HEIGHT, } + padding)
+				draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { gutter_width - cell_size.x * 2 - w + padding, y, })
 
 				append(instance_buffer, Instance {
 					offset = {
@@ -473,27 +478,45 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		border_width = 2,
 	})
 
-	x := padding
-
 	mode_text: string
+	mode_style: Style_Key
 	#partial switch editor.mode {
 	case .Normal:
-		mode_text = "NORMAL"
+		mode_text  = "NORMAL"
+		mode_style = .Indicator_Normal
 	case .Visual:
-		mode_text = "VISUAL"
+		mode_text  = "VISUAL"
+		mode_style = .Indicator_Visual
 	case .Insert:
-		mode_text = "INSERT"
+		mode_text  = "INSERT"
+		mode_style = .Indicator_Insert
 	}
 
+	x := padding
+
 	if mode_text != "" {
-		w := draw_text(
+		w     := measure_text(&editor.font, mode_text)
+		style := editor.config.theme[mode_style]
+		if style.bg != 0 {
+			append(instance_buffer, Instance {
+				offset = { x - padding, editor.screen_size.y - FONT_HEIGHT - padding * 2, },
+				size   = { w, FONT_HEIGHT, } + padding * 2,
+				color  = style.bg,
+			})
+		}
+		draw_text(
 			&editor.font,
 			instance_buffer,
 			mode_text,
-			editor.config.theme[.Ident].fg,
+			editor.config.theme[mode_style].fg,
 			{ x, editor.screen_size.y - padding, },
 		)
-		x += w
+
+		x += w + padding
+
+		if style.bg != 0 {
+			x += padding
+		}
 	}
 
 	if editor.mode == .Prompt {
@@ -512,9 +535,14 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		})
 	}
 
-	if editor.mode != .Picker && editor.picker.rect.target != 0 {
-		rect := rect_from_min_max(40, editor.screen_size.x - 40)
+	if editor.mode != .Picker && rect_size(editor.picker.rect.target) != 0 {
+		rect := rect_from_min_max(40, editor.screen_size - 40)
 		animation_begin(&editor.picker.rect, rect_center(rect).xyxy)
+	}
+
+	if editor.mode == .Picker && rect_size(editor.picker.rect.target) == 0 {
+		rect := rect_from_min_max(40, editor.screen_size - 40 - { 0, FONT_HEIGHT + padding * 2, })
+		animation_begin(&editor.picker.rect, rect)
 	}
 
 	picker_rect := animation_update(&editor.picker.rect, delta_time, 4)
@@ -529,13 +557,15 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		shadow_width  = 16,
 	})
 
-	draw_text(
-		&editor.font,
-		instance_buffer,
-		strings.to_string(editor.picker.input),
-		editor.config.theme[.Ident].fg,
-		picker_rect.xy + padding + { 0, FONT_HEIGHT, },
-	)
+	if editor.mode == .Picker {
+		draw_text(
+			&editor.font,
+			instance_buffer,
+			strings.to_string(editor.picker.input),
+			editor.config.theme[.Ident].fg,
+			picker_rect.xy + padding + { 0, FONT_HEIGHT, },
+		)
+	}
 }
 
 @(require_results)
