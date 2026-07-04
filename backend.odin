@@ -18,6 +18,7 @@ Event_Window_Resize :: struct {
 }
 
 Event_Input_Codepoint :: struct {
+	source:    int, // The id of the key event that caused this event
 	codepoint: rune,
 }
 
@@ -28,6 +29,7 @@ Action :: enum {
 }
 
 Event_Input_Key :: struct {
+	id:        int,
 	action:    Action,
 	key:       Key,
 	scancode:  int,

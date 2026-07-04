@@ -1,9 +1,10 @@
 package editor
 
 import "core:fmt"
+import "core:unicode"
 
 Motion :: enum {
-	Cursor_Page_Up,
+	Cursor_Page_Up = 1,
 	Cursor_Page_Down,
 	Cursor_Half_Page_Up,
 	Cursor_Half_Page_Down,
@@ -12,6 +13,10 @@ Motion :: enum {
 	View_Page_Down,
 	View_Half_Page_Up,
 	View_Half_Page_Down,
+
+	Find,
+
+	Go_To_Matching,
 
 	Go_To_Line,
 	Go_To_File_End,
@@ -65,16 +70,104 @@ Motion :: enum {
 	Open_Above,
 }
 
+normalize_cursor_position :: proc(editor: ^Editor, vertical_move: bool) {
+	if editor.cursor.column < 0 {
+		editor.cursor.column = 0
+	}
+
+	if editor.cursor.line < 0 {
+		editor.cursor.line = 0
+	}
+
+	iter   := rope_iterator(&editor.rope, line = editor.cursor.line)
+	column := 0
+	for r in rope_iter(&iter) {
+		if r == '\t' {
+			next_column := (column + 1 + 3) & -4
+			if editor.cursor.column > column && editor.cursor.column < next_column {
+				editor.cursor.column = column
+			}
+			column = next_column
+		} else {
+			column += 1
+		}
+		if r == '\n' {
+			break
+		}
+	}
+
+	if editor.cursor.column > column - 1 {
+		editor.cursor.column = column - 1
+	} else if vertical_move {
+		editor.cursor.column = min(editor.cursor.target_column, column - 1)
+	}
+
+	if !vertical_move {
+		editor.cursor.target_column = editor.cursor.column
+	}
+}
+
+motion_apply_queued :: proc(editor: ^Editor, motion: Motion, arg: rune) {
+	#partial switch motion {
+	case .Find:
+		iter   := rope_iterator(&editor.rope, line = editor.cursor.line)
+		column := 0
+		for r in rope_iter(&iter) {
+			if column == editor.cursor.column {
+				break
+			}
+
+			if r == '\t' {
+				column = (column + 1 + 3) & -4
+			} else {
+				column += 1
+			}
+			if r == '\n' {
+				break
+			}
+		}
+
+		line   := editor.cursor.line
+		column += 1
+		for r in rope_iter(&iter) {
+			if r == arg {
+				break
+			}
+
+			if r == '\t' {
+				column = (column + 1 + 3) & -4
+			} else {
+				column += 1
+			}
+			if r == '\n' {
+				line  += 1
+				column = 0
+			}
+		}
+
+		editor.cursor = { line = line, column = column, }
+	}
+}
+
 motion_apply :: proc(editor: ^Editor, motion: Motion) {
+	vertical_move: bool
+	defer normalize_cursor_position(editor, vertical_move)
+
 	switch motion {
+	case .Find:
+		editor.queued = .Find
 	case .Cursor_Half_Page_Up:
 		editor.cursor.line -= editor.visible_lines / 2
+		vertical_move       = true
 	case .Cursor_Half_Page_Down:
 		editor.cursor.line += editor.visible_lines / 2
+		vertical_move       = true
 	case .Cursor_Page_Up:
 		editor.cursor.line -= editor.visible_lines
+		vertical_move       = true
 	case .Cursor_Page_Down:
 		editor.cursor.line += editor.visible_lines
+		vertical_move       = true
 
 	case .View_Half_Page_Up:
 		editor.scroll -= editor.visible_lines / 2
@@ -85,6 +178,89 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 	case .View_Page_Down:
 		editor.scroll += editor.visible_lines
 
+	case .Go_To_Matching:
+		iter   := rope_iterator(&editor.rope, line = editor.cursor.line)
+		column := 0
+		start: rune
+		for r in rope_iter(&iter) {
+			if column == editor.cursor.column {
+				start = r
+				break
+			}
+
+			if r == '\t' {
+				column = (column + 1 + 3) & -4
+			} else {
+				column += 1
+			}
+			if r == '\n' {
+				break
+			}
+		}
+
+		back := false
+
+		delim: rune
+		switch start {
+		case '(':
+			delim = ')'
+		case '{':
+			delim = '}'
+		case '[':
+			delim = ']'
+		case '"':
+			delim = '"'
+		case '\'':
+			delim = '\''
+		case '<':
+			delim = '<'
+
+		case ')':
+			delim = '('
+			back  = true
+		case '}':
+			delim = '{'
+			back  = true
+		case ']':
+			delim = '['
+			back  = true
+		case '>':
+			delim = '<'
+			back  = true
+		}
+
+		line := editor.cursor.line
+		if back {
+
+		}
+
+		depth := 1
+
+		column += 1
+		for r in rope_iter(&iter) {
+			if r == delim {
+				depth -= 1
+			} else if r == start {
+				depth += 1
+			}
+
+			if depth == 0 {
+				break
+			}
+
+			if r == '\t' {
+				column = (column + 1 + 3) & -4
+			} else {
+				column += 1
+			}
+			if r == '\n' {
+				line  += 1
+				column = 0
+			}
+		}
+
+		editor.cursor = { line = line, column = column, }
+
 	case .Go_To_Line:
 		editor.cursor = { line = editor.repeat_count - 1, }
 	case .Go_To_File_End:
@@ -92,12 +268,40 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 	case .Go_To_Line_Start:
 		editor.cursor.column = 0
 	case .Go_To_Line_End:
+		iter   := rope_iterator(&editor.rope, line = editor.cursor.line)
+		column := 0
+		for r in rope_iter(&iter) {
+			if r == '\t' {
+				column = (column + 1 + 3) & -4
+			} else {
+				column += 1
+			}
+			if r == '\n' {
+				break
+			}
+		}
+		editor.cursor.column = column - 1
 	case .Go_To_Line_Start_Non_Whitespace:
+		iter   := rope_iterator(&editor.rope, line = editor.cursor.line)
+		column := 0
+		for r in rope_iter(&iter) {
+			if r == '\t' {
+				column = (column + 1 + 3) & -4
+			} else {
+				column += 1
+			}
+			if r == '\n' || !unicode.is_space(r) {
+				break
+			}
+		}
+		editor.cursor.column = column - 1
 
 	case .Character_Down:
 		editor.cursor.line   += editor.repeat_count
+		vertical_move         = true
 	case .Character_Up:
 		editor.cursor.line   -= editor.repeat_count
+		vertical_move         = true
 	case .Character_Left:
 		editor.cursor.column -= editor.repeat_count
 	case .Character_Right:
@@ -105,6 +309,38 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 
 	case .Select_All:
 	case .Select_Word_Forward:
+		iter   := rope_iterator(&editor.rope, line = editor.cursor.line)
+		column := 0
+		for r in rope_iter(&iter) {
+			if column == editor.cursor.column {
+				break
+			}
+
+			if r == '\t' {
+				column = (column + 1 + 3) & -4
+			} else {
+				column += 1
+			}
+			if r == '\n' {
+				return
+			}
+		}
+
+		for r in rope_iter(&iter) {
+			column += 1
+			if !unicode.is_space(r) {
+				break
+			}
+		}
+
+		for r in rope_iter(&iter) {
+			if !unicode.is_letter(r) && !unicode.is_digit(r) && r != '_' {
+				break
+			}
+			column += 1
+		}
+
+		editor.cursor.column = column
 	case .Select_Word_Backward:
 
 	case .Search:

@@ -35,13 +35,16 @@ Style :: struct {
 Theme :: [Style_Key]Style
 
 Config :: struct {
-	arena:                 vmem.Arena,
-	animations:            bool,
-	relative_line_numbers: bool,
-	theme:                 Theme,
-	keybinds:              [Mode]Keybinds,
-	styles:                map[string]Style_Key,
-	languages:             []Language,
+	arena:                  vmem.Arena,
+	animations:             bool,
+	relative_line_numbers:  bool,
+	scroll_animation_speed: f32,
+	cursor_animation_speed: f32,
+	popup_animation_speed:  f32,
+	theme:                  Theme,
+	keybinds:               [Mode]Keybinds,
+	styles:                 map[string]Style_Key,
+	languages:              []Language,
 }
 
 Language :: struct {
@@ -161,6 +164,10 @@ load_config :: proc(config: ^Config) -> (ok: bool) {
 	config.keybinds[.Normal][{ key = .D, modifiers = { .Control, }, }] = .View_Half_Page_Down
 	config.keybinds[.Normal][{ key = .U, modifiers = { .Control, }, }] = .View_Half_Page_Up
 
+	leader_m := make(Keybinds, allocator)
+	leader_m[{ key = .M, }] = .Go_To_Matching
+	config.keybinds[.Normal][{ key = .M, }] = leader_m
+
 	leader_g := make(Keybinds, allocator)
 	leader_g[{ key = .G, }] = .Go_To_Line
 	leader_g[{ key = .E, }] = .Go_To_File_End
@@ -170,7 +177,7 @@ load_config :: proc(config: ^Config) -> (ok: bool) {
 
 	config.keybinds[.Normal][{ key = .G, }] = leader_g
 
-	config.keybinds[.Normal][{ key = .F, }] = .Search
+	config.keybinds[.Normal][{ key = .F, }] = .Find
 
 	config.keybinds[.Normal][{ key = .V, }] = .Visual
 
@@ -195,8 +202,11 @@ load_config :: proc(config: ^Config) -> (ok: bool) {
 		config.styles[c] = .Constant
 	}
 
-	config.animations            = true
-	config.relative_line_numbers = true
+	config.animations             = true
+	config.relative_line_numbers  = true
+	config.scroll_animation_speed = 7.5
+	config.cursor_animation_speed = 15
+	config.popup_animation_speed  = 7.5
 
 	load_config_file(config, #load("config.ini"))
 

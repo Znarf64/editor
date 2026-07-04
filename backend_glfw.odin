@@ -8,8 +8,9 @@ import gl   "vendor:OpenGL"
 import glfw "vendor:glfw"
 
 Backend_Glfw :: struct {
-	using base: Backend,
-	window:     glfw.WindowHandle,
+	using base:        Backend,
+	window:            glfw.WindowHandle,
+	current_key_event: int,
 }
 
 @(require_results)
@@ -85,8 +86,9 @@ _backend_init_glfw :: proc(backend: ^Backend_Glfw) -> (ok: bool) {
 	glfw.SetCharCallback(backend.window, proc "c" (window: glfw.WindowHandle, codepoint: rune) {
 		context = runtime.default_context()
 
-		backend := cast(^Backend)glfw.GetWindowUserPointer(window)
+		backend := cast(^Backend_Glfw)glfw.GetWindowUserPointer(window)
 		append(&backend._events, Event_Input_Codepoint {
+			source    = backend.current_key_event,
 			codepoint = codepoint,
 		})
 	})
@@ -94,10 +96,13 @@ _backend_init_glfw :: proc(backend: ^Backend_Glfw) -> (ok: bool) {
 	glfw.SetKeyCallback(backend.window, proc "c" (window: glfw.WindowHandle, key, scancode, action, mods: i32) {
 		context = runtime.default_context()
 
-		backend := cast(^Backend)glfw.GetWindowUserPointer(window)
+		backend := cast(^Backend_Glfw)glfw.GetWindowUserPointer(window)
+
+		backend.current_key_event += 1
 
 		event: Event_Input_Key = {
-			scancode  = int(scancode),
+			id       = backend.current_key_event,
+			scancode = int(scancode),
 		}
 
 		switch key {

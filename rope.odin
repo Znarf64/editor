@@ -2,6 +2,8 @@ package editor
 
 import "base:runtime"
 
+import "core:bytes"
+import "core:fmt"
 import "core:strings"
 import "core:unicode/utf8"
 
@@ -18,11 +20,6 @@ Rope_Node :: struct {
 
 ROPE_LEAF_SIZE :: 16
 Rope_Leaf      :: [ROPE_LEAF_SIZE]u8
-
-Dynamic_Pool :: struct (E: typeid) where size_of(E) > size_of(i32) {
-	data: [dynamic]E,
-	free: i32,
-}
 
 Rope :: struct {
 	root:   Rope_Index,
@@ -130,6 +127,65 @@ rope_from_string :: proc(str: string, allocator: runtime.Allocator) -> (rope: Ro
 }
 
 @(require_results)
+rope_index :: proc(rope: Rope, offset: int, stack: ^[dynamic]Rope_Index, reverse: bool) -> (leaf_index: int, leaf_offset: int) {
+	offset := offset
+	index  := rope.root
+	for !index.leaf {
+		node := rope.nodes[index.index]
+		if offset > node.weight {
+			index   = node.r
+			offset -= node.weight
+
+			if reverse {
+				append(stack, node.l)
+			}
+		} else {
+			index = node.l
+
+			if !reverse {
+				append(stack, node.r)
+			}
+		}
+	}
+	return index.index, offset
+}
+
+@(require_results)
+rope_index_line :: proc(rope: Rope, line: int, stack: ^[dynamic]Rope_Index, reverse: bool) -> (leaf_index: int, leaf_offset: int) {
+	line  := line
+	index := rope.root
+	for !index.leaf {
+		node := rope.nodes[index.index]
+		if line > node.lines {
+			index = node.r
+			line -= node.lines
+
+			if reverse {
+				append(stack, node.l)
+			}
+		} else {
+			index = node.l
+
+			if !reverse {
+				append(stack, node.r)
+			}
+		}
+	}
+
+	leaf := &rope.leaves[index.index]
+	for &char, i in leaf {
+		if char == '\n' {
+			line -= 1
+		}
+		if line == 0 {
+			return index.index, i + 1
+		}
+	}
+
+	unreachable()
+}
+
+@(require_results)
 rope_get_character :: proc(rope: Rope, offset: int) -> ^u8 {
 	offset := offset
 	index  := rope.root
@@ -142,70 +198,156 @@ rope_get_character :: proc(rope: Rope, offset: int) -> ^u8 {
 			index = node.l
 		}
 	}
-	return &rope.leaves[index.index][offset]
+	return &bytes.truncate_to_byte(rope.leaves[index.index][:], 0)[offset]
 }
 
-@(require_results)
-rope_get_character_at_line :: proc(rope: Rope, line: int) -> ^u8 {
-	line  := line
-	index := rope.root
-	for !index.leaf {
-		node := rope.nodes[index.index]
-		if line > node.lines {
-			index = node.r
-			line -= node.lines
-		} else {
-			index = node.l
-		}
-	}
-	leaf := &rope.leaves[index.index]
-	for &char in leaf {
-		if char == '\n' {
-			line -= 1
-			continue
-		}
-		if line == 0 {
-			return &char
-		}
-	}
-	unreachable()
-}
+// @(require_results)
+// rope_get_character_at_line :: proc(rope: Rope, line: int) -> ^u8 {
+// 	line  := line
+// 	index := rope.root
+// 	for !index.leaf {
+// 		node := rope.nodes[index.index]
+// 		if line > node.lines {
+// 			index = node.r
+// 			line -= node.lines
+// 		} else {
+// 			index = node.l
+// 		}
+// 	}
+// 	leaf := &rope.leaves[index.index]
+// 	for &char in leaf {
+// 		if char == '\n' {
+// 			line -= 1
+// 			continue
+// 		}
+// 		if line == 0 {
+// 			return &char
+// 		}
+// 	}
+// 	unreachable()
+// }
 
-@(require_results)
-rope_line_to_offset :: proc(rope: Rope, line: int) -> int {
-	line   := line
-	index  := rope.root
-	offset := 0
-	for !index.leaf {
-		node := rope.nodes[index.index]
-		if line > node.lines {
-			index   = node.r
-			line   -= node.lines
-			offset += node.weight
-		} else {
-			index = node.l
-		}
-	}
-	leaf := &rope.leaves[index.index]
-	for &char, i in leaf {
-		if char == '\n' {
-			line -= 1
-			continue
-		}
-		if line == 0 {
-			return offset + i
-		}
-	}
-	unreachable()
-}
+// @(require_results)
+// rope_line_to_offset :: proc(rope: Rope, line: int) -> int {
+// 	line   := line
+// 	index  := rope.root
+// 	offset := 0
+// 	for !index.leaf {
+// 		node := rope.nodes[index.index]
+// 		if line > node.lines {
+// 			index   = node.r
+// 			line   -= node.lines
+// 			offset += node.weight
+// 		} else {
+// 			index = node.l
+// 		}
+// 	}
+// 	leaf := &rope.leaves[index.index]
+// 	for &char, i in leaf {
+// 		if char == '\n' {
+// 			line -= 1
+// 			continue
+// 		}
+// 		if line == 0 {
+// 			return offset + i
+// 		}
+// 	}
+// 	unreachable()
+// }
 
-rope_split :: proc(rope: ^Rope, index: int) {
-	
-}
+// rope_split :: proc(rope: ^Rope, index: int) {
+// }
 
 rope_destroy :: proc(rope: Rope) {
 	delete(rope.nodes)
 	delete(rope.leaves)
+}
+
+Rope_Iterator :: struct {
+	rope:   ^Rope,
+	stack:   [dynamic]Rope_Index,
+	leaf:    []u8,
+	reverse: bool,
+}
+
+@(require_results)
+rope_iterator :: proc(rope: ^Rope, offset: int = -1, line: int = -1, reverse: bool = false, allocator := context.temp_allocator) -> (iter: Rope_Iterator) {
+	assert(offset == -1 || line == -1)
+
+	iter.reverse = reverse
+	iter.rope    = rope
+	iter.stack   = make([dynamic]Rope_Index, allocator)
+
+	if offset != -1 {
+		leaf_index, leaf_offset := rope_index(rope^, offset, &iter.stack, reverse)
+		leaf                    := bytes.truncate_to_byte(rope.leaves[leaf_index][:], 0)
+		if reverse {
+			iter.leaf = leaf[:leaf_offset]
+		} else {
+			iter.leaf = leaf[leaf_offset:]
+		}
+		return
+	}
+
+	if line != -1 {
+		leaf_index, leaf_offset := rope_index_line(rope^, line, &iter.stack, reverse)
+		leaf                    := bytes.truncate_to_byte(rope.leaves[leaf_index][:], 0)
+		if reverse {
+			iter.leaf = leaf[:leaf_offset]
+		} else {
+			iter.leaf = leaf[leaf_offset:]
+		}
+		return
+	}
+
+	append(&iter.stack, rope.root)
+	return
+}
+
+@(require_results)
+rope_iter :: proc(iter: ^Rope_Iterator) -> (r: rune, cond: bool) {
+	@(require_results)
+	leaf_advance :: proc(iter: ^Rope_Iterator) -> (r: rune, cond: bool) {
+		assert(len(iter.leaf) != 0)
+
+		n: int
+		if iter.reverse {
+			r, n = utf8.decode_last_rune(iter.leaf)
+			(n != 0) or_return
+			iter.leaf = iter.leaf[:len(iter.leaf) - n]
+		} else {
+			r, n = utf8.decode_rune(iter.leaf)
+			(n != 0) or_return
+			iter.leaf = iter.leaf[n:]
+		}
+
+		cond = true
+		return
+	}
+
+	if len(iter.leaf) != 0 {
+		return leaf_advance(iter)
+	}
+
+	for {
+		index := pop_safe(&iter.stack) or_return
+
+		if index.leaf {
+			iter.leaf = bytes.truncate_to_byte(iter.rope.leaves[index.index][:], 0)
+			return leaf_advance(iter)
+		} else {
+			node := iter.rope.nodes[index.index]
+			if iter.reverse {
+				append(&iter.stack, node.l)
+				append(&iter.stack, node.r)
+			} else {
+				append(&iter.stack, node.r)
+				append(&iter.stack, node.l)
+			}
+		}
+	}
+
+	return
 }
 
 import "core:testing"
@@ -222,4 +364,40 @@ rope_test_round_trip :: proc(t: ^testing.T) {
 	defer delete(decoded)
 
 	assert(decoded == data)
+}
+
+@(test)
+rope_test_iter :: proc(t: ^testing.T) {
+	data := #load(#file, string)
+
+	rope, ok := rope_from_string(data, context.allocator)
+	assert(ok)
+	defer rope_destroy(rope)
+
+	b := strings.builder_make(context.temp_allocator)
+
+	iter := rope_iterator(&rope)
+	for r in rope_iter(&iter) {
+		strings.write_rune(&b, r)
+	}
+
+	assert(strings.to_string(b) == data)
+}
+
+@(test)
+rope_test_iter_reverse :: proc(t: ^testing.T) {
+	data := #load(#file, string)
+
+	rope, ok := rope_from_string(data, context.allocator)
+	assert(ok)
+	defer rope_destroy(rope)
+
+	b := strings.builder_make(context.temp_allocator)
+
+	iter := rope_iterator(&rope, line = strings.count(data, "\n"), reverse = true)
+	for r in rope_iter(&iter) {
+		strings.write_rune(&b, r)
+	}
+
+	assert(strings.reverse(strings.to_string(b), context.temp_allocator) == data)
 }
