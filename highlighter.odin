@@ -89,9 +89,10 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 
 		if h.text[h.pos] == '/' {
 			for h.pos < len(h.text) {
-				h.pos += 1
 				if h.text[h.pos] == '\n' {
 					break
+				} else {
+					h.pos += 1
 				}
 			}
 			return .Comment

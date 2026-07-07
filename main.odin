@@ -62,6 +62,12 @@ Editor :: struct {
 	scroll_anim:   Animation(f32),
 	cursor_anim:   Animation(Rect),
 
+	leader:        struct {
+		sequence: strings.Builder,
+		binds:    Maybe(Keybinds),
+		rect:     Animation(Rect),
+	},
+
 	picker:        struct {
 		mode:  Picker_Mode,
 		input: strings.Builder,
@@ -76,8 +82,6 @@ Editor :: struct {
 	rope:          Rope,
 
 	config:        Config,
-
-	sub_menu:      Maybe(Keybinds), // used for multi key binds, ie. vim "leader" binds
 
 	font:          Font,
 }
@@ -155,9 +159,11 @@ main :: proc() {
 
 	glodin.enable(.Blend)
 
-	S :: #load("/home/znarf/source/odin/src/check_expr.cpp", string)
-	// S :: #load(#file, string)
-	editor.rope = rope_from_string(S, context.allocator) or_else panic("")
+	// S :: #load("/home/znarf/source/odin/src/check_expr.cpp", string)
+	S :: #load(#file, string)
+	N :: 2000 when ODIN_OPTIMIZATION_MODE == .Speed else 1
+	editor.rope = rope_from_string(strings.repeat(S, N, context.temp_allocator), context.allocator) or_else panic("")
+	fmt.println(editor.rope.lines)
 	defer rope_destroy(editor.rope)
 
 	config_ok := load_config(&editor.config)
@@ -195,6 +201,10 @@ main :: proc() {
 					break
 				}
 
+				defer if editor.leader.binds == nil {
+					strings.builder_reset(&editor.leader.sequence)
+				}
+
 				if editor.queued != nil {
 					if e.key == .Escape {
 						editor.queued = nil
@@ -208,9 +218,9 @@ main :: proc() {
 					break
 				}
 
-				binds          := editor.sub_menu.? or_else editor.config.keybinds[editor.mode]
-				editor.sub_menu = nil
-				keybind        := Keybind {
+				binds              := editor.leader.binds.? or_else editor.config.keybinds[editor.mode]
+				editor.leader.binds = nil
+				keybind            := Keybind {
 					modifiers = e.modifiers,
 					key       = e.key,
 				}
@@ -233,7 +243,8 @@ main :: proc() {
 					command_execute(&editor, v)
 					editor.repeat_count = 0
 				case Keybinds:
-					editor.sub_menu = v
+					editor.leader.binds = v
+					strings.write_string(&editor.leader.sequence, keybind_to_string(keybind))
 				}
 			case Event_Input_Codepoint:
 				if e.source == consumed_codepoint_event {
@@ -345,27 +356,38 @@ animation_begin :: proc(anim: ^Animation($T), target: T) {
 render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time: f32) {
 	text_buffer := make([dynamic]Instance, context.temp_allocator)
 
-	text := rope_to_string(editor.rope, context.temp_allocator)
-
-	highlighter: Highlighter = {
-		text     = text,
-		keywords = editor.config.styles,
-	}
-
-	line, column: int
 	cell_size: [2]f32 = {
 		la.round(get_baked_glyph(&editor.font, 0).x_advance),
 		la.round(((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale)),
 	}
 
 	padding: f32 = 10
-	gutter_width := cell_size.x * 6
+	gutter_width := cell_size.x * 10
 
-	editor.visible_lines = int((editor.screen_size.y - FONT_HEIGHT - padding * 2) / cell_size.y)
+	editor.visible_lines = int(la.ceil((editor.screen_size.y - FONT_HEIGHT - padding * 2) / cell_size.y))
 
 	scroll := animation_update(&editor.scroll_anim, delta_time, editor.config.scroll_animation_speed)
 
-	line_number_buf: [32]byte
+	line := int(la.floor(scroll))
+	column: int
+
+	iter := rope_iterator(&editor.rope, line = line)
+
+	b := strings.builder_make(context.temp_allocator)
+
+	for r in rope_iter(&iter) {
+		if iter.line > int(la.ceil(scroll)) + editor.visible_lines {
+			break
+		}
+		strings.write_rune(&b, r)
+	}
+
+	text := strings.to_string(b)
+
+	highlighter: Highlighter = {
+		text     = text,
+		keywords = editor.config.styles,
+	}
 
 	render_text: for {
 		start := highlighter.pos
@@ -388,6 +410,9 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 				if editor.config.relative_line_numbers && editor.cursor.line != line {
 					l = abs(editor.cursor.line - line) - 1
 				}
+
+				@(static)
+				line_number_buf: [32]byte
 				str := strconv.write_int(line_number_buf[:], i64(l + 1), base = 10)
 				w   := measure_text(&editor.font, str)
 				draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { gutter_width - cell_size.x * 2 - w + padding, y, })
@@ -406,7 +431,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 			if line == editor.cursor.line && column == editor.cursor.column {
 				offset := [2]f32{
 					f32(column) * cell_size.x + gutter_width,
-					cell_size.y * (f32(line - 1)) + f32(editor.font.ascender) * editor.font.scale,
+					cell_size.y * (f32(line - 1)) + la.round(f32(editor.font.ascender) * editor.font.scale),
 				} + padding
 
 				target    := offset.xyxy
@@ -473,9 +498,9 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 			append(instance_buffer, Instance {
 				offset        = {
 					f32(start_column) * cell_size.x + gutter_width,
-					cell_size.y * (f32(line - 1) - scroll) + f32(editor.font.ascender) * editor.font.scale,
+					cell_size.y * (f32(line - 1) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale),
 				} + padding,
-				size          = { f32(column - start_column) * cell_size.x, cell_size.y + 0.5, },
+				size          = { f32(column - start_column) * cell_size.x, cell_size.y, },
 				color         = editor.config.theme[style].bg,
 				border_radius = 0,
 			})
@@ -542,10 +567,28 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		}
 	}
 
-	if editor.repeat_count > 0 {
-		str := strconv.write_int(line_number_buf[:], i64(editor.repeat_count), base = 10)
-		w   := measure_text(&editor.font, str)
-		draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { editor.screen_size.x - w, editor.screen_size.y, } - padding)
+	if binds, ok := editor.leader.binds.?; ok {
+		for bind in binds {
+
+		}
+	}
+
+	{
+		x := editor.screen_size.x - padding
+		if strings.builder_len(editor.leader.sequence) != 0 {
+			str := strings.to_string(editor.leader.sequence)
+			x   -= measure_text(&editor.font, str)
+			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
+		}
+
+		if editor.repeat_count > 0 {
+			@(static)
+			buf: [32]byte
+
+			str := strconv.write_int(buf[:], i64(editor.repeat_count), base = 10)
+			x   -= measure_text(&editor.font, str)
+			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
+		}
 	}
 
 	if editor.mode == .Prompt {

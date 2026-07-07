@@ -1,11 +1,11 @@
 #+build linux
 package editor
 
-import "base:runtime"
+import runtime "base:runtime"
 
-import "core:fmt"
-import "core:strings"
-import "core:sys/linux"
+import fmt     "core:fmt"
+import strings "core:strings"
+import linux   "core:sys/linux"
 
 import gl "vendor:OpenGL"
 

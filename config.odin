@@ -1,11 +1,12 @@
 package editor
 
-import "base:runtime"
+import runtime "base:runtime"
 
-import "core:encoding/ini"
-import "core:strconv"
-import "core:strings"
-import vmem "core:mem/virtual"
+import ini     "core:encoding/ini"
+import fmt     "core:fmt"
+import strconv "core:strconv"
+import strings "core:strings"
+import vmem    "core:mem/virtual"
 
 Style_Key :: enum {
 	Invalid = 0,
@@ -152,7 +153,8 @@ load_config :: proc(config: ^Config) -> (ok: bool) {
 	config.keybinds[.Normal][{ key = .L, }] = .Character_Right
 
 	config.keybinds[.Normal][{ key = .W, }] = .Select_Word_Forward
-	config.keybinds[.Normal][{ key = .E, }] = .Select_Word_Backward
+	config.keybinds[.Normal][{ key = .E, }] = .Select_Word_End_Forward
+	config.keybinds[.Normal][{ key = .B, }] = .Select_Word_Backward
 
 	config.keybinds[.Normal][{ key = .R, }] = .Replace
 

@@ -1,7 +1,7 @@
 package editor
 
-import "core:fmt"
-import "core:unicode"
+import fmt     "core:fmt"
+import unicode "core:unicode"
 
 Motion :: enum {
 	Cursor_Page_Up = 1,
@@ -31,6 +31,7 @@ Motion :: enum {
 
 	Select_All,
 	Select_Word_Forward,
+	Select_Word_End_Forward,
 	Select_Word_Backward,
 
 	Search,
@@ -77,6 +78,10 @@ normalize_cursor_position :: proc(editor: ^Editor, vertical_move: bool) {
 
 	if editor.cursor.line < 0 {
 		editor.cursor.line = 0
+	}
+
+	if editor.cursor.line >= editor.rope.lines {
+		editor.cursor.line = editor.rope.lines - 1
 	}
 
 	iter   := rope_iterator(&editor.rope, line = editor.cursor.line)
@@ -179,22 +184,16 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 		editor.scroll += editor.visible_lines
 
 	case .Go_To_Matching:
-		iter   := rope_iterator(&editor.rope, line = editor.cursor.line)
-		column := 0
+		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
 		start: rune
 		for r in rope_iter(&iter) {
-			if column == editor.cursor.column {
+			if iter.column == editor.cursor.column {
 				start = r
 				break
 			}
 
-			if r == '\t' {
-				column = (column + 1 + 3) & -4
-			} else {
-				column += 1
-			}
 			if r == '\n' {
-				break
+				unreachable()
 			}
 		}
 
@@ -229,14 +228,12 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 			back  = true
 		}
 
-		line := editor.cursor.line
 		if back {
 
 		}
 
 		depth := 1
 
-		column += 1
 		for r in rope_iter(&iter) {
 			if r == delim {
 				depth -= 1
@@ -247,19 +244,9 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 			if depth == 0 {
 				break
 			}
-
-			if r == '\t' {
-				column = (column + 1 + 3) & -4
-			} else {
-				column += 1
-			}
-			if r == '\n' {
-				line  += 1
-				column = 0
-			}
 		}
 
-		editor.cursor = { line = line, column = column, }
+		editor.cursor = { line = iter.line, column = iter.column, }
 
 	case .Go_To_Line:
 		editor.cursor = { line = editor.repeat_count - 1, }
@@ -268,19 +255,13 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 	case .Go_To_Line_Start:
 		editor.cursor.column = 0
 	case .Go_To_Line_End:
-		iter   := rope_iterator(&editor.rope, line = editor.cursor.line)
-		column := 0
+		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
 		for r in rope_iter(&iter) {
-			if r == '\t' {
-				column = (column + 1 + 3) & -4
-			} else {
-				column += 1
-			}
 			if r == '\n' {
+				editor.cursor.column = iter.column - 1
 				break
 			}
 		}
-		editor.cursor.column = column - 1
 	case .Go_To_Line_Start_Non_Whitespace:
 		iter   := rope_iterator(&editor.rope, line = editor.cursor.line)
 		column := 0
@@ -308,18 +289,11 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 		editor.cursor.column += editor.repeat_count
 
 	case .Select_All:
-	case .Select_Word_Forward:
-		iter   := rope_iterator(&editor.rope, line = editor.cursor.line)
-		column := 0
+	case .Select_Word_End_Forward:
+		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
 		for r in rope_iter(&iter) {
-			if column == editor.cursor.column {
+			if iter.column == editor.cursor.column {
 				break
-			}
-
-			if r == '\t' {
-				column = (column + 1 + 3) & -4
-			} else {
-				column += 1
 			}
 			if r == '\n' {
 				return
@@ -327,7 +301,6 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 		}
 
 		for r in rope_iter(&iter) {
-			column += 1
 			if !unicode.is_space(r) {
 				break
 			}
@@ -337,10 +310,33 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 			if !unicode.is_letter(r) && !unicode.is_digit(r) && r != '_' {
 				break
 			}
-			column += 1
 		}
 
-		editor.cursor.column = column
+		editor.cursor.column = iter.column
+	case .Select_Word_Forward:
+		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
+		for r in rope_iter(&iter) {
+			if iter.column == editor.cursor.column {
+				break
+			}
+			if r == '\n' {
+				return
+			}
+		}
+
+		for r in rope_iter(&iter) {
+			if !unicode.is_space(r) {
+				break
+			}
+		}
+
+		for r in rope_iter(&iter) {
+			if !unicode.is_letter(r) && !unicode.is_digit(r) && r != '_' {
+				break
+			}
+		}
+
+		editor.cursor.column = iter.column
 	case .Select_Word_Backward:
 
 	case .Search:

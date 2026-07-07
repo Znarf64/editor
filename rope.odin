@@ -1,11 +1,11 @@
 package editor
 
-import "base:runtime"
+import runtime "base:runtime"
 
-import "core:bytes"
-import "core:fmt"
-import "core:strings"
-import "core:unicode/utf8"
+import bytes   "core:bytes"
+import fmt     "core:fmt"
+import strings "core:strings"
+import utf8    "core:unicode/utf8"
 
 Rope_Index :: bit_field int {
 	index: int  | size_of(int) * 8 - 1,
@@ -172,6 +172,10 @@ rope_index_line :: proc(rope: Rope, line: int, stack: ^[dynamic]Rope_Index, reve
 		}
 	}
 
+	if line == 0 {
+		return index.index, 0
+	}
+
 	leaf := &rope.leaves[index.index]
 	for &char, i in leaf {
 		if char == '\n' {
@@ -267,6 +271,9 @@ Rope_Iterator :: struct {
 	rope:   ^Rope,
 	stack:   [dynamic]Rope_Index,
 	leaf:    []u8,
+	line:    int,
+	column:  int,
+	last:    rune,
 	reverse: bool,
 }
 
@@ -279,6 +286,9 @@ rope_iterator :: proc(rope: ^Rope, offset: int = -1, line: int = -1, reverse: bo
 	iter.stack   = make([dynamic]Rope_Index, allocator)
 
 	if offset != -1 {
+		if offset >= rope.len {
+			return
+		}
 		leaf_index, leaf_offset := rope_index(rope^, offset, &iter.stack, reverse)
 		leaf                    := bytes.truncate_to_byte(rope.leaves[leaf_index][:], 0)
 		if reverse {
@@ -290,6 +300,9 @@ rope_iterator :: proc(rope: ^Rope, offset: int = -1, line: int = -1, reverse: bo
 	}
 
 	if line != -1 {
+		if line >= rope.lines {
+			return
+		}
 		leaf_index, leaf_offset := rope_index_line(rope^, line, &iter.stack, reverse)
 		leaf                    := bytes.truncate_to_byte(rope.leaves[leaf_index][:], 0)
 		if reverse {
@@ -297,6 +310,8 @@ rope_iterator :: proc(rope: ^Rope, offset: int = -1, line: int = -1, reverse: bo
 		} else {
 			iter.leaf = leaf[leaf_offset:]
 		}
+		iter.line   = line
+		iter.column = 0
 		return
 	}
 
@@ -306,6 +321,17 @@ rope_iterator :: proc(rope: ^Rope, offset: int = -1, line: int = -1, reverse: bo
 
 @(require_results)
 rope_iter :: proc(iter: ^Rope_Iterator) -> (r: rune, cond: bool) {
+	switch iter.last {
+	case 0:
+	case '\n':
+		iter.line  += 1
+		iter.column = 0
+	case '\t':
+		iter.column = (iter.column + 4) & -4
+	case:
+		iter.column += 1
+	}
+
 	@(require_results)
 	leaf_advance :: proc(iter: ^Rope_Iterator) -> (r: rune, cond: bool) {
 		assert(len(iter.leaf) != 0)
@@ -319,6 +345,7 @@ rope_iter :: proc(iter: ^Rope_Iterator) -> (r: rune, cond: bool) {
 			r, n = utf8.decode_rune(iter.leaf)
 			(n != 0) or_return
 			iter.leaf = iter.leaf[n:]
+			iter.last = r
 		}
 
 		cond = true
@@ -350,7 +377,7 @@ rope_iter :: proc(iter: ^Rope_Iterator) -> (r: rune, cond: bool) {
 	return
 }
 
-import "core:testing"
+import testing "core:testing"
 
 @(test)
 rope_test_round_trip :: proc(t: ^testing.T) {

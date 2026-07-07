@@ -1,4 +1,4 @@
-import "core:sdf"
+import sdf "core:sdf"
 
 @(uniform_buffer, binding = 0)
 vertex_uniforms: #import(Uniforms)
