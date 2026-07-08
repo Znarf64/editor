@@ -7,6 +7,7 @@ import strings "core:strings"
 Key :: enum {
 	Escape,
 	Enter,
+	Space,
 
 	A,
 	B,
@@ -60,8 +61,13 @@ Keybind :: struct {
 	key:       Key,
 }
 
+Leader_Binds :: struct {
+	title: string,
+	binds: Keybinds,
+}
+
 Action :: union {
-	Keybinds,
+	Leader_Binds,
 	Command,
 	Motion,
 }
@@ -77,32 +83,35 @@ modifier_names: [Modifier]string = {
 key_names: [Key]string = {
 	.Escape = "escape",
 	.Enter  = "enter",
-	.A      = "A",
-	.B      = "B",
-	.C      = "C",
-	.D      = "D",
-	.E      = "E",
-	.F      = "F",
-	.G      = "G",
-	.H      = "H",
-	.I      = "I",
-	.J      = "J",
-	.K      = "K",
-	.L      = "L",
-	.M      = "M",
-	.N      = "N",
-	.O      = "O",
-	.P      = "P",
-	.Q      = "Q",
-	.R      = "R",
-	.S      = "S",
-	.T      = "T",
-	.U      = "U",
-	.V      = "V",
-	.W      = "W",
-	.X      = "X",
-	.Y      = "Y",
-	.Z      = "Z",
+	.Space  = "space",
+
+	.A      = "a",
+	.B      = "b",
+	.C      = "c",
+	.D      = "d",
+	.E      = "e",
+	.F      = "f",
+	.G      = "g",
+	.H      = "h",
+	.I      = "i",
+	.J      = "j",
+	.K      = "k",
+	.L      = "l",
+	.M      = "m",
+	.N      = "n",
+	.O      = "o",
+	.P      = "p",
+	.Q      = "q",
+	.R      = "r",
+	.S      = "s",
+	.T      = "t",
+	.U      = "u",
+	.V      = "v",
+	.W      = "w",
+	.X      = "x",
+	.Y      = "y",
+	.Z      = "z",
+
 	._0     = "0",
 	._1     = "1",
 	._2     = "2",
@@ -123,11 +132,8 @@ keybind_to_string :: proc(bind: Keybind) -> string {
 		return key
 	}
 
-	strs: [3 + len(Modifier) * 2]string
+	strs: [1 + len(Modifier) * 2]string
 	i:    int
-
-	strs[i] = "<"
-	i      += 1
 
 	for mod in bind.modifiers {
 		strs[i] = modifier_names[mod]
@@ -138,9 +144,6 @@ keybind_to_string :: proc(bind: Keybind) -> string {
 	}
 
 	strs[i] = key
-	i      += 1
-
-	strs[i] = ">"
 	i      += 1
 
 	return strings.concatenate(strs[:i], context.temp_allocator)
@@ -159,42 +162,47 @@ parse_key :: proc(s: string) -> (key: Key, ok: bool) {
 }
 
 @(require_results)
-parse_keybind :: proc(s: ^string) -> (bind: Keybind, ok: bool) {
-	if len(s^) == 0 {
-		return
-	}
-
-	if s[0] == '<' {
-		n := strings.index(s^, ">")
-		if n == -1 {
+parse_modifier :: proc(s: string) -> (modifier: Modifier, ok: bool) {
+	for name, mod in modifier_names {
+		if strings.equal_fold(name, s) {
+			modifier = mod
+			ok       = true
 			return
 		}
-		x := s[1:n + 1]
+	}
+	return
+}
 
-		defer s^ = s[n + 1:]
+@(require_results)
+parse_keybind :: proc(s: string) -> (bind: Keybind, ok: bool) {
+	s := s
+	for strings.contains(s, "-") {
+		mod: string
+		mod, _, s = strings.partition(s, "-")
 
-		iterate_parts: for part in strings.split_iterator(&x, "-") {
-			if end := strings.index(part, ">"); end != -1 {
-				bind.key = parse_key(part[:end]) or_return
-				ok       = true
-				return
-			} else {
-				for name, mod in modifier_names {
-					if part == name {
-						if mod in bind.modifiers {
-							return
-						}
-						bind.modifiers |= { mod, }
-						continue iterate_parts
-					}
-				}
-				return
-			}
+		m := parse_modifier(mod) or_return
+
+		if m in bind.modifiers {
+			return
 		}
-	} else {
-		bind.key, ok = parse_key(s[:1])
-		return
+
+		bind.modifiers |= { m, }
 	}
 
-	unreachable()
+	bind.key, ok = parse_key(s)
+	return
+}
+
+@(require_results)
+action_to_string :: proc(action: Action) -> string {
+	switch v in action {
+	case Leader_Binds:
+		return v.title
+	case Command:
+		return string(v)
+	case Motion:
+		return motion_descriptions[v]
+	}
+
+	return ""
 }

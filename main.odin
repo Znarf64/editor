@@ -66,6 +66,7 @@ Editor :: struct {
 		active:   bool,
 		sequence: strings.Builder,
 		binds:    Keybinds,
+		title:    string,
 		rect:     Animation(Rect),
 	},
 
@@ -150,6 +151,11 @@ main :: proc() {
 	glodin.set_uniform(program, "fragment_uniforms", uniform_buffer)
 
 	editor: Editor
+	defer {
+		strings.builder_destroy(&editor.leader.sequence)
+		strings.builder_destroy(&editor.picker.input)
+		strings.builder_destroy(&editor.prompt.input)
+	}
 
 	font_ok := font_init(&editor.font, #load("font.ttf"), FONT_HEIGHT, context.allocator)
 	assert(font_ok)
@@ -242,8 +248,9 @@ main :: proc() {
 				case Command:
 					command_execute(&editor, v)
 					editor.repeat_count = 0
-				case Keybinds:
-					editor.leader.binds  = v
+				case Leader_Binds:
+					editor.leader.title = v.title
+					editor.leader.binds  = v.binds
 					editor.leader.active = true
 					strings.write_string(&editor.leader.sequence, keybind_to_string(keybind))
 				}
@@ -615,12 +622,9 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 	leader_target_rect    := (editor.screen_size - 20 - { 0, FONT_HEIGHT + padding * 2, }).xyxy
 	leader_target_rect.xy -= 400
 	if editor.leader.active {
-		for bind, action in editor.leader.binds {
-
-		}
 		animation_set_target(&editor.leader.rect, leader_target_rect)
 	} else {
-		animation_set_target(&editor.leader.rect, leader_target_rect.zwzw)
+		animation_set_target(&editor.leader.rect, rect_center(leader_target_rect).xyxy)
 	}
 
 	leader_rect := animation_update(&editor.leader.rect, delta_time, editor.config.popup_animation_speed)
@@ -633,6 +637,32 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		border_width  = 2,
 		shadow_width  = 16,
 	})
+
+	if editor.leader.active {
+		x := leader_rect.x + padding
+		y := leader_rect.y + padding
+
+		draw_text(&editor.font, instance_buffer, editor.leader.title, editor.config.theme[.Ident].fg, { x, y + FONT_HEIGHT, })
+		y += FONT_HEIGHT + padding
+
+		append(instance_buffer, Instance {
+			offset = { x, y, },
+			size   = { leader_rect.z - leader_rect.x - padding * 2, 2, },
+			color  = color_from_hex_rgba(0x32363DFF),
+		})
+		y += padding + 2
+
+		for bind, action in editor.leader.binds {
+			bind_str   := keybind_to_string(bind)
+			x          := x + draw_text(&editor.font, instance_buffer, bind_str, editor.config.theme[.Ident].fg, { x, y + FONT_HEIGHT, }) + padding
+			x          += draw_text(&editor.font, instance_buffer, "󰁔", editor.config.theme[.Ident].fg, { x, y + FONT_HEIGHT, }) + padding
+
+			action_str := action_to_string(action)
+			draw_text(&editor.font, instance_buffer, action_str, editor.config.theme[.Ident].fg, { x, y + FONT_HEIGHT, })
+
+			y          += FONT_HEIGHT + padding
+		}
+	}
 
 	picker_rect := animation_update(&editor.picker.rect, delta_time, editor.config.popup_animation_speed)
 

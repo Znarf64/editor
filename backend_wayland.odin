@@ -223,6 +223,8 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 					event.key = .Escape
 				case xkb.KEY_Return:
 					event.key = .Enter
+				case xkb.KEY_space:
+					event.key = .Space
 				}
 				append(&data._events, event)
 			}
@@ -322,7 +324,7 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 			}
 		},
 		global_remove = proc "c" (data: rawptr, registry: ^wl.registry, name: uint) {
-			// data := (^Backend_Wayland)(data)
+			// TODO
 		},
 	}
 	wl.registry_add_listener(backend.registry, &registry_listener, backend)

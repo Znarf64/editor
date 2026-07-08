@@ -56,10 +56,11 @@ Language :: struct {
 	types:      []string,
 }
 
-load_config_file :: proc(config: ^Config, src: string) -> (ok: bool) {
+load_config_file :: proc(config: ^Config, src: string, allocator: runtime.Allocator) -> (ok: bool) {
 	it := ini.iterator_from_string(src, {})
 
-	colors := make(map[string][4]f32, context.temp_allocator)
+	colors  := make(map[string][4]f32,       context.temp_allocator)
+	leaders := make(map[string]Leader_Binds, context.temp_allocator)
 
 	@(require_results)
 	parse_color :: proc(str: string) -> (color: [4]f32, ok: bool) {
@@ -93,7 +94,9 @@ load_config_file :: proc(config: ^Config, src: string) -> (ok: bool) {
 		value := unquote(value) or_continue
 		key   := unquote(key)   or_continue
 
-		switch it.section {
+		section, _, subsection := strings.partition(it.section, ".")
+
+		switch section {
 		case "theme":
 			base, _, selector := strings.partition(key, ".")
 			style: Style_Key
@@ -127,13 +130,51 @@ load_config_file :: proc(config: ^Config, src: string) -> (ok: bool) {
 		case "language":
 			// fmt.printfln("%v: %v = %v", section, key, value)
 		case "keybinds":
-			// fmt.printfln("%v: %v = %v", section, key, value)
+			mode: Mode
+			switch subsection {
+			case "normal":
+				mode = .Normal
+			case "insert":
+				mode = .Insert
+			case "visual":
+				mode = .Visual
+			case "prompt":
+				mode = .Prompt
+			case "picker":
+				mode = .Picker
+			}
+			bind   := parse_keybind(key) or_continue
+			action := parse_action(value, leaders) or_continue
+
+			config.keybinds[mode][bind] = action
 		case "colors":
 			colors[key] = parse_color(value) or_continue
+		case "leader":
+			if subsection not_in leaders {
+				leaders[subsection] = {
+					title = subsection,
+					binds = make(Keybinds, allocator),
+				}
+			}
+			bind   := parse_keybind(key) or_continue
+			action := parse_action(value, leaders) or_continue
+			leader := &leaders[subsection]
+			leader.binds[bind] = action
 		}
 	}
 
 	return true
+}
+
+@(require_results)
+parse_action :: proc(s: string, leaders: map[string]Leader_Binds) -> (action: Action, ok: bool) {
+	if leader := strings.trim_prefix(s, "leader."); leader != s {
+		return leaders[leader]
+	}
+	if cmd := strings.trim_prefix(s, ":"); cmd != s {
+		return Command(cmd), true
+	}
+	return parse_motion(s)
 }
 
 @(require_results)
@@ -146,42 +187,6 @@ load_config :: proc(config: ^Config) -> (ok: bool) {
 	for &binds in config.keybinds {
 		binds = make(Keybinds, allocator)
 	}
-
-	config.keybinds[.Normal][{ key = .H, }] = .Character_Left
-	config.keybinds[.Normal][{ key = .J, }] = .Character_Down
-	config.keybinds[.Normal][{ key = .K, }] = .Character_Up
-	config.keybinds[.Normal][{ key = .L, }] = .Character_Right
-
-	config.keybinds[.Normal][{ key = .W, }] = .Select_Word_Forward
-	config.keybinds[.Normal][{ key = .E, }] = .Select_Word_End_Forward
-	config.keybinds[.Normal][{ key = .B, }] = .Select_Word_Backward
-
-	config.keybinds[.Normal][{ key = .R, }] = .Replace
-
-	config.keybinds[.Normal][{ key = .I,                            }] = .Insert
-	config.keybinds[.Normal][{ key = .O,                            }] = .Open_Below
-	config.keybinds[.Normal][{ key = .O, modifiers = { .Shift,   }, }] = .Open_Above
-	config.keybinds[.Normal][{ key = .O, modifiers = { .Control, }, }] = .Open_File
-
-	config.keybinds[.Normal][{ key = .D, modifiers = { .Control, }, }] = .View_Half_Page_Down
-	config.keybinds[.Normal][{ key = .U, modifiers = { .Control, }, }] = .View_Half_Page_Up
-
-	leader_m := make(Keybinds, allocator)
-	leader_m[{ key = .M, }] = .Go_To_Matching
-	config.keybinds[.Normal][{ key = .M, }] = leader_m
-
-	leader_g := make(Keybinds, allocator)
-	leader_g[{ key = .G, }] = .Go_To_Line
-	leader_g[{ key = .E, }] = .Go_To_File_End
-	leader_g[{ key = .H, }] = .Go_To_Line_Start
-	leader_g[{ key = .L, }] = .Go_To_Line_End
-	leader_g[{ key = .S, }] = .Go_To_Line_Start_Non_Whitespace
-
-	config.keybinds[.Normal][{ key = .G, }] = leader_g
-
-	config.keybinds[.Normal][{ key = .F, }] = .Find
-
-	config.keybinds[.Normal][{ key = .V, }] = .Visual
 
 	config.keybinds[.Insert][{ key = .Escape, }] = .Normal
 	config.keybinds[.Visual][{ key = .Escape, }] = .Normal
@@ -210,7 +215,7 @@ load_config :: proc(config: ^Config) -> (ok: bool) {
 	config.cursor_animation_speed = 15
 	config.popup_animation_speed  = 7.5
 
-	load_config_file(config, #load("config.ini"))
+	load_config_file(config, #load("config.ini"), allocator)
 
 	return true
 }

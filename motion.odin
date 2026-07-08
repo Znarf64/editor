@@ -1,6 +1,7 @@
 package editor
 
 import fmt     "core:fmt"
+import strings "core:strings"
 import unicode "core:unicode"
 
 Motion :: enum {
@@ -69,6 +70,102 @@ Motion :: enum {
 	Insert_At_Line_Start,
 	Open_Below,
 	Open_Above,
+}
+
+Motion_Info :: struct {
+	name:        string,
+	description: string,
+}
+
+@(rodata)
+motion_descriptions: [Motion]string = {
+	.Cursor_Page_Up                  = "cursor page up",
+	.Cursor_Page_Down                = "cursor page down",
+	.Cursor_Half_Page_Up             = "cursor half page up",
+	.Cursor_Half_Page_Down           = "cursor half page down",
+
+	.View_Page_Up                    = "view page up",
+	.View_Page_Down                  = "view page down",
+	.View_Half_Page_Up               = "view half page up",
+	.View_Half_Page_Down             = "view half page down",
+
+	.Find                            = "find",
+
+	.Go_To_Matching                  = "go to matching",
+
+	.Go_To_Line                      = "go to line",
+	.Go_To_File_End                  = "go to file end",
+	.Go_To_Line_Start                = "go to line start",
+	.Go_To_Line_End                  = "go to line end",
+	.Go_To_Line_Start_Non_Whitespace = "go to line start non whitespace",
+
+	.Character_Down                  = "character down",
+	.Character_Up                    = "character up",
+	.Character_Left                  = "character left",
+	.Character_Right                 = "character right",
+
+	.Select_All                      = "select all",
+	.Select_Word_Forward             = "select word forward",
+	.Select_Word_End_Forward         = "select word end forward",
+	.Select_Word_Backward            = "select word backward",
+
+	.Search                          = "search",
+	.Command                         = "command",
+
+	.Open_File                       = "open file",
+	.Search_Global                   = "search global",
+	.Search_Symbols                  = "search symbols",
+	.Command_Palette                 = "command palette",
+
+	.Save                            = "save",
+	.Save_As                         = "save as",
+
+	.Close_File                      = "close file",
+
+	.Case_Swap                       = "case swap",
+
+	.Case_To_Lower                   = "case to lower",
+	.Case_To_Upper                   = "case to upper",
+	.Case_To_Caml                    = "case to caml",
+	.Case_To_Pascal                  = "case to pascal",
+	.Case_To_Snake                   = "case to snake",
+	.Case_To_Screaming_Snake         = "case to screaming snake",
+
+	.Replace                         = "replace",
+	.Delete                          = "delete",
+
+	.Paste                           = "paste",
+	.Yank                            = "yank",
+
+	.Insert                          = "insert",
+	.Visual                          = "visual",
+	.Normal                          = "normal",
+
+	.Insert_At_Line_Start            = "insert at line start",
+	.Open_Below                      = "open below",
+	.Open_Above                      = "open above",
+}
+
+@(require_results)
+parse_motion :: proc(s: string) -> (motion: Motion, ok: bool) {
+	b := strings.builder_make(0, len(s), context.temp_allocator, )
+	for r in s {
+		r := unicode.to_lower(r)
+		if r == '-' || r == '_' {
+			r = ' '
+		}
+		strings.write_rune(&b, r)
+	}
+
+	s := strings.to_string(b)
+
+	for name, m in motion_descriptions {
+		if name == s {
+			return m, true
+		}
+	}
+
+	return
 }
 
 normalize_cursor_position :: proc(editor: ^Editor, vertical_move: bool) {
@@ -199,7 +296,7 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 
 		back := false
 
-		delim: rune
+		delim := start
 		switch start {
 		case '(':
 			delim = ')'

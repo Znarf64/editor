@@ -65,9 +65,6 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 		return .Ident
 	}
 
-	// start := h.pos
-	// defer h.column += h.pos - start
-
 	char := h.text[h.pos]
 	switch char {
 	case '0' ..= '9':

@@ -114,6 +114,8 @@ _backend_init_glfw :: proc(backend: ^Backend_Glfw) -> (ok: bool) {
 			event.key = .Escape
 		case glfw.KEY_ENTER:
 			event.key = .Enter
+		case glfw.KEY_SPACE:
+			event.key = .Space
 		case:
 			return
 		}
