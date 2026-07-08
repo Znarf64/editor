@@ -31,7 +31,7 @@ Rope :: struct {
 
 @(require_results)
 rope_to_string :: proc(rope: Rope, allocator: runtime.Allocator) -> string {
-	b := strings.builder_make(allocator)
+	b := strings.builder_make(0, rope.len, allocator)
 
 	_rope_to_string :: proc(b: ^strings.Builder, rope: Rope, index: Rope_Index) {
 		if index.leaf {
@@ -268,18 +268,20 @@ rope_destroy :: proc(rope: Rope) {
 }
 
 Rope_Iterator :: struct {
-	rope:   ^Rope,
-	stack:   [dynamic]Rope_Index,
-	leaf:    []u8,
-	line:    int,
-	column:  int,
-	last:    rune,
-	reverse: bool,
+	rope:          ^Rope,
+	stack:          [dynamic]Rope_Index,
+	leaf:           []u8,
+	using position: Position,
+	last:           rune,
+	reverse:        bool,
 }
 
 @(require_results)
-rope_iterator :: proc(rope: ^Rope, offset: int = -1, line: int = -1, reverse: bool = false, allocator := context.temp_allocator) -> (iter: Rope_Iterator) {
-	assert(offset == -1 || line == -1)
+rope_iterator :: proc(rope: ^Rope, offset: int = -1, line: int = -1, column: int = -1, reverse: bool = false, allocator := context.temp_allocator) -> (iter: Rope_Iterator) {
+	assert(offset == -1 || line   == -1)
+	assert(column == -1 || line   != -1)
+	assert(column == -1 || offset == -1)
+	assert(column == -1 || !reverse)
 
 	iter.reverse = reverse
 	iter.rope    = rope
@@ -312,6 +314,16 @@ rope_iterator :: proc(rope: ^Rope, offset: int = -1, line: int = -1, reverse: bo
 		}
 		iter.line   = line
 		iter.column = 0
+
+		if column != -1 {
+			for _ in rope_iter(&iter) {
+				if iter.column == column {
+					return
+				}
+			}
+			panic("")
+		}
+
 		return
 	}
 

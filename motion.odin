@@ -181,27 +181,24 @@ normalize_cursor_position :: proc(editor: ^Editor, vertical_move: bool) {
 		editor.cursor.line = editor.rope.lines - 1
 	}
 
-	iter   := rope_iterator(&editor.rope, line = editor.cursor.line)
-	column := 0
+	iter := rope_iterator(&editor.rope, line = editor.cursor.line)
 	for r in rope_iter(&iter) {
 		if r == '\t' {
-			next_column := (column + 1 + 3) & -4
-			if editor.cursor.column > column && editor.cursor.column < next_column {
-				editor.cursor.column = column
+			next_column := (iter.column + 1 + 3) & -4
+			if editor.cursor.column > iter.column && editor.cursor.column < next_column {
+				editor.cursor.column = iter.column
+				break
 			}
-			column = next_column
-		} else {
-			column += 1
 		}
 		if r == '\n' {
+			if editor.cursor.column > iter.column {
+				editor.cursor.column = iter.column
+			} else if vertical_move {
+				editor.cursor.column = min(editor.cursor.target_column, iter.column)
+			}
+
 			break
 		}
-	}
-
-	if editor.cursor.column > column - 1 {
-		editor.cursor.column = column - 1
-	} else if vertical_move {
-		editor.cursor.column = min(editor.cursor.target_column, column - 1)
 	}
 
 	if !vertical_move {
@@ -210,44 +207,27 @@ normalize_cursor_position :: proc(editor: ^Editor, vertical_move: bool) {
 }
 
 motion_apply_queued :: proc(editor: ^Editor, motion: Motion, arg: rune) {
+	vertical_move: bool
+	defer normalize_cursor_position(editor, vertical_move)
+
 	#partial switch motion {
 	case .Find:
-		iter   := rope_iterator(&editor.rope, line = editor.cursor.line)
-		column := 0
+		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
 		for r in rope_iter(&iter) {
-			if column == editor.cursor.column {
+			if iter.column == editor.cursor.column {
 				break
-			}
-
-			if r == '\t' {
-				column = (column + 1 + 3) & -4
-			} else {
-				column += 1
 			}
 			if r == '\n' {
 				break
 			}
 		}
 
-		line   := editor.cursor.line
-		column += 1
 		for r in rope_iter(&iter) {
 			if r == arg {
+				editor.cursor = { line = iter.line, column = iter.column, }
 				break
 			}
-
-			if r == '\t' {
-				column = (column + 1 + 3) & -4
-			} else {
-				column += 1
-			}
-			if r == '\n' {
-				line  += 1
-				column = 0
-			}
 		}
-
-		editor.cursor = { line = line, column = column, }
 	}
 }
 
@@ -382,8 +362,27 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 		vertical_move         = true
 	case .Character_Left:
 		editor.cursor.column -= editor.repeat_count
+		for editor.cursor.column < 0 {
+			editor.cursor.line -= 1
+
+			iter := rope_iterator(&editor.rope, line = editor.cursor.line)
+			for r in rope_iter(&iter) {
+				if r == '\n' {
+					break
+				}
+			}
+			editor.cursor.column += iter.column + 1
+		}
 	case .Character_Right:
-		editor.cursor.column += editor.repeat_count
+		iter := rope_iterator(&editor.rope, line = editor.cursor.line, column = editor.cursor.column)
+		n    := editor.repeat_count
+		for _ in rope_iter(&iter) {
+			n -= 1
+			if n == 0 {
+				break
+			}
+		}
+		editor.cursor.position = iter.position
 
 	case .Select_All:
 	case .Select_Word_End_Forward:
