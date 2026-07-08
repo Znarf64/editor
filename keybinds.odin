@@ -60,11 +60,13 @@ Keybind :: struct {
 	key:       Key,
 }
 
-Keybinds :: distinct map[Keybind]union{
+Action :: union {
 	Keybinds,
 	Command,
 	Motion,
 }
+
+Keybinds :: distinct map[Keybind]Action
 
 modifier_names: [Modifier]string = {
 	.Shift   = "S",
@@ -142,4 +144,57 @@ keybind_to_string :: proc(bind: Keybind) -> string {
 	i      += 1
 
 	return strings.concatenate(strs[:i], context.temp_allocator)
+}
+
+@(require_results)
+parse_key :: proc(s: string) -> (key: Key, ok: bool) {
+	for name, k in key_names {
+		if strings.equal_fold(name, s) {
+			key = k
+			ok  = true
+			return
+		}
+	}
+	return
+}
+
+@(require_results)
+parse_keybind :: proc(s: ^string) -> (bind: Keybind, ok: bool) {
+	if len(s^) == 0 {
+		return
+	}
+
+	if s[0] == '<' {
+		n := strings.index(s^, ">")
+		if n == -1 {
+			return
+		}
+		x := s[1:n + 1]
+
+		defer s^ = s[n + 1:]
+
+		iterate_parts: for part in strings.split_iterator(&x, "-") {
+			if end := strings.index(part, ">"); end != -1 {
+				bind.key = parse_key(part[:end]) or_return
+				ok       = true
+				return
+			} else {
+				for name, mod in modifier_names {
+					if part == name {
+						if mod in bind.modifiers {
+							return
+						}
+						bind.modifiers |= { mod, }
+						continue iterate_parts
+					}
+				}
+				return
+			}
+		}
+	} else {
+		bind.key, ok = parse_key(s[:1])
+		return
+	}
+
+	unreachable()
 }

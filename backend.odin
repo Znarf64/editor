@@ -22,7 +22,7 @@ Event_Input_Codepoint :: struct {
 	codepoint: rune,
 }
 
-Action :: enum {
+Input_Action :: enum {
 	Up,
 	Down,
 	Repeat,
@@ -30,7 +30,7 @@ Action :: enum {
 
 Event_Input_Key :: struct {
 	id:        int,
-	action:    Action,
+	action:    Input_Action,
 	key:       Key,
 	scancode:  int,
 	modifiers: Modifiers,
@@ -42,7 +42,7 @@ Event_Input_Mouse_Move :: struct {
 
 Event_Input_Mouse_Button :: struct {
 	index:  int,
-	action: Action,
+	action: Input_Action,
 }
 
 Event_Input_Scroll :: struct {

@@ -63,8 +63,9 @@ Editor :: struct {
 	cursor_anim:   Animation(Rect),
 
 	leader:        struct {
+		active:   bool,
 		sequence: strings.Builder,
-		binds:    Maybe(Keybinds),
+		binds:    Keybinds,
 		rect:     Animation(Rect),
 	},
 
@@ -163,7 +164,6 @@ main :: proc() {
 	S :: #load(#file, string)
 	N :: 2000 when ODIN_OPTIMIZATION_MODE == .Speed else 1
 	editor.rope = rope_from_string(strings.repeat(S, N, context.temp_allocator), context.allocator) or_else panic("")
-	fmt.println(editor.rope.lines)
 	defer rope_destroy(editor.rope)
 
 	config_ok := load_config(&editor.config)
@@ -201,7 +201,7 @@ main :: proc() {
 					break
 				}
 
-				defer if editor.leader.binds == nil {
+				defer if editor.leader.active == false {
 					strings.builder_reset(&editor.leader.sequence)
 				}
 
@@ -218,9 +218,9 @@ main :: proc() {
 					break
 				}
 
-				binds              := editor.leader.binds.? or_else editor.config.keybinds[editor.mode]
-				editor.leader.binds = nil
-				keybind            := Keybind {
+				binds               := editor.leader.binds if editor.leader.active else editor.config.keybinds[editor.mode]
+				editor.leader.active = false
+				keybind             := Keybind {
 					modifiers = e.modifiers,
 					key       = e.key,
 				}
@@ -243,7 +243,8 @@ main :: proc() {
 					command_execute(&editor, v)
 					editor.repeat_count = 0
 				case Keybinds:
-					editor.leader.binds = v
+					editor.leader.binds  = v
+					editor.leader.active = true
 					strings.write_string(&editor.leader.sequence, keybind_to_string(keybind))
 				}
 			case Event_Input_Codepoint:
@@ -288,9 +289,7 @@ main :: proc() {
 		}
 
 		editor.scroll = clamp(editor.scroll, 0, editor.rope.lines - 1)
-		if prev_scroll != editor.scroll {
-			animation_begin(&editor.scroll_anim, f32(editor.scroll))
-		}
+		animation_set_target(&editor.scroll_anim, f32(editor.scroll))
 
 		current_time := time.duration_seconds(time.since(start_time))
 		delta_time   := current_time - prev_time
@@ -341,13 +340,19 @@ Animation :: struct(T: typeid) {
 
 @(require_results)
 animation_update :: proc(anim: ^Animation($T), delta_time, speed: f32) -> T {
+	if speed <= 0 {
+		return anim.target
+	}
 	anim.t      += speed * f32(delta_time)
 	anim.t       = clamp(anim.t, 0, 1)
 	anim.current = la.lerp(anim.origin, anim.target, ease.quartic_out(anim.t))
 	return anim.current
 }
 
-animation_begin :: proc(anim: ^Animation($T), target: T) {
+animation_set_target :: proc(anim: ^Animation($T), target: T) {
+	if anim.target == target {
+		return
+	}
 	anim.origin = anim.current
 	anim.target = target
 	anim.t      = 0
@@ -436,9 +441,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 
 				target    := offset.xyxy
 				target.zw += cell_size
-				if target != editor.cursor_anim.target {
-					animation_begin(&editor.cursor_anim, target)
-				}
+				animation_set_target(&editor.cursor_anim, target)
 
 				style = .Cursor
 			}
@@ -567,12 +570,6 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		}
 	}
 
-	if binds, ok := editor.leader.binds.?; ok {
-		for bind in binds {
-
-		}
-	}
-
 	{
 		x := editor.screen_size.x - padding
 		if strings.builder_len(editor.leader.sequence) != 0 {
@@ -607,19 +604,35 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		})
 	}
 
-	if editor.mode != .Picker {
-		rect := rect_center(rect_from_min_max(40, editor.screen_size - 40)).xyxy
-		if editor.picker.rect.target != rect {
-			animation_begin(&editor.picker.rect, rect)
-		}
-	}
-
 	if editor.mode == .Picker {
 		rect := rect_from_min_max(40, editor.screen_size - 40 - { 0, FONT_HEIGHT + padding * 2, })
-		if editor.picker.rect.target != rect {
-			animation_begin(&editor.picker.rect, rect)
-		}
+		animation_set_target(&editor.picker.rect, rect)
+	} else {
+		rect := rect_center(rect_from_min_max(40, editor.screen_size - 40)).xyxy
+		animation_set_target(&editor.picker.rect, rect)
 	}
+
+	leader_target_rect    := (editor.screen_size - 20 - { 0, FONT_HEIGHT + padding * 2, }).xyxy
+	leader_target_rect.xy -= 400
+	if editor.leader.active {
+		for bind, action in editor.leader.binds {
+
+		}
+		animation_set_target(&editor.leader.rect, leader_target_rect)
+	} else {
+		animation_set_target(&editor.leader.rect, leader_target_rect.zwzw)
+	}
+
+	leader_rect := animation_update(&editor.leader.rect, delta_time, editor.config.popup_animation_speed)
+	append(instance_buffer, Instance {
+		offset        = leader_rect.xy,
+		size          = rect_size(leader_rect),
+		color         = editor.config.theme[.Background].bg,
+		border_color  = color_from_hex_rgba(0x32363DFF),
+		border_radius = 8,
+		border_width  = 2,
+		shadow_width  = 16,
+	})
 
 	picker_rect := animation_update(&editor.picker.rect, delta_time, editor.config.popup_animation_speed)
 
