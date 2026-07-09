@@ -9,6 +9,7 @@ import glfw "vendor:glfw"
 
 Backend_Glfw :: struct {
 	using base:        Backend,
+	opengl_renderer:   Opengl_Renderer,
 	window:            glfw.WindowHandle,
 	current_key_event: int,
 }
@@ -38,19 +39,24 @@ _backend_init_glfw :: proc(backend: ^Backend_Glfw) -> (ok: bool) {
 
 	gl.load_up_to(4, 6, glfw.gl_set_proc_address)
 
+	opengl_renderer_init(&backend.opengl_renderer) or_return
+
 	backend.poll_events = proc(backend: ^Backend_Glfw) -> []Event {
 		glfw.PollEvents()
 		events := backend._events[:]
 		clear(&backend._events)
 		return events
 	}
-	backend.draw = proc(backend: ^Backend_Glfw, instances: []Instance) {
+	backend.draw = proc(backend: ^Backend_Glfw, font: Font, instances: []Instance, background_color: [4]f32) {
+		opengl_renderer_draw(backend.opengl_renderer, font, instances, background_color)
 		glfw.SwapBuffers(backend.window)
 	}
 	backend.set_title = proc(backend: ^Backend_Glfw, title: string) {
 		glfw.SetWindowTitle(backend.window, strings.clone_to_cstring(title, context.temp_allocator))
 	}
 	backend.destroy = proc(backend: ^Backend_Glfw) {
+		opengl_renderer_destroy(backend.opengl_renderer)
+
 		glfw.DestroyWindow(backend.window)
 		glfw.Terminate()
 		free(backend)
@@ -61,10 +67,10 @@ _backend_init_glfw :: proc(backend: ^Backend_Glfw) -> (ok: bool) {
 	glfw.SetFramebufferSizeCallback(backend.window, proc "c" (window: glfw.WindowHandle, width, height: i32) {
 		context = runtime.default_context()
 
-		backend := cast(^Backend)glfw.GetWindowUserPointer(window)
-		append(&backend._events, Event_Window_Resize {
-			size = { int(width), int(height), },
-		})
+		backend := cast(^Backend_Glfw)glfw.GetWindowUserPointer(window)
+		size    := [2]int { int(width), int(height), }
+		append(&backend._events, Event_Window_Resize { size = size, })
+		opengl_renderer_resize(&backend.opengl_renderer, size)
 	})
 
 	glfw.SetWindowCloseCallback(backend.window, proc "c" (window: glfw.WindowHandle) {
@@ -116,6 +122,16 @@ _backend_init_glfw :: proc(backend: ^Backend_Glfw) -> (ok: bool) {
 			event.key = .Enter
 		case glfw.KEY_SPACE:
 			event.key = .Space
+		case glfw.KEY_BACKSPACE:
+			event.key = .Backspace
+		case glfw.KEY_DELETE:
+			event.key = .Delete
+		case glfw.KEY_TAB:
+			event.key = .Tab
+		case glfw.KEY_PERIOD:
+			event.key = .Period
+		case glfw.KEY_COMMA:
+			event.key = .Comma
 		case:
 			return
 		}

@@ -11,6 +11,9 @@ import vmem    "core:mem/virtual"
 Style_Key :: enum {
 	Invalid = 0,
 	Background,
+	Popup,
+	Statusline,
+
 	Whitespace,
 	Ident,
 	Keyword,
@@ -42,6 +45,7 @@ Config :: struct {
 	scroll_animation_speed: f32,
 	cursor_animation_speed: f32,
 	popup_animation_speed:  f32,
+	tab_width:              int,
 	theme:                  Theme,
 	keybinds:               [Mode]Keybinds,
 	styles:                 map[string]Style_Key,
@@ -54,6 +58,14 @@ Language :: struct {
 	keywords:   []string,
 	constants:  []string,
 	types:      []string,
+}
+
+@(require_results)
+color_from_hex_rgba :: proc(hex: u32) -> (rgba: [4]f32) {
+	for i in 0 ..< u32(4) {
+		rgba[i] = f32((hex >> ((3 - i) * 8)) & 0xFF) / 255.999
+	}
+	return
 }
 
 load_config_file :: proc(config: ^Config, src: string, allocator: runtime.Allocator) -> (ok: bool) {
@@ -144,7 +156,7 @@ load_config_file :: proc(config: ^Config, src: string, allocator: runtime.Alloca
 				mode = .Picker
 			}
 			bind   := parse_keybind(key) or_continue
-			action := parse_action(value, leaders) or_continue
+			action := parse_action(value, leaders, allocator) or_continue
 
 			config.keybinds[mode][bind] = action
 		case "colors":
@@ -157,7 +169,7 @@ load_config_file :: proc(config: ^Config, src: string, allocator: runtime.Alloca
 				}
 			}
 			bind   := parse_keybind(key) or_continue
-			action := parse_action(value, leaders) or_continue
+			action := parse_action(value, leaders, allocator) or_continue
 			leader := &leaders[subsection]
 			leader.binds[bind] = action
 		}
@@ -167,12 +179,29 @@ load_config_file :: proc(config: ^Config, src: string, allocator: runtime.Alloca
 }
 
 @(require_results)
-parse_action :: proc(s: string, leaders: map[string]Leader_Binds) -> (action: Action, ok: bool) {
+parse_action :: proc(s: string, leaders: map[string]Leader_Binds, allocator: runtime.Allocator) -> (action: Action, ok: bool) {
+	if commas := strings.count(s, ","); commas != 0 {
+		actions := make([]Action, commas + 1, allocator)
+		s       := s
+		i       := 0
+		for s in strings.split_iterator(&s, ",") {
+			actions[i] = parse_action(s, leaders, allocator) or_return
+			i         += 1
+		}
+
+		action = actions
+		ok     = true
+		return
+	}
+
 	if leader := strings.trim_prefix(s, "leader."); leader != s {
 		return leaders[leader]
 	}
 	if cmd := strings.trim_prefix(s, ":"); cmd != s {
 		return Command(cmd), true
+	}
+	if action, ok = parse_argument_motion(s); ok {
+		return
 	}
 	return parse_motion(s)
 }
@@ -214,6 +243,7 @@ load_config :: proc(config: ^Config) -> (ok: bool) {
 	config.scroll_animation_speed = 7.5
 	config.cursor_animation_speed = 15
 	config.popup_animation_speed  = 7.5
+	config.tab_width              = 4
 
 	load_config_file(config, #load("config.ini"), allocator)
 

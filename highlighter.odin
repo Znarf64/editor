@@ -1,5 +1,8 @@
 package editor
 
+import unicode "core:unicode"
+import utf8    "core:unicode/utf8"
+
 Highlighter :: struct {
 	pos:      int,
 	text:     string,
@@ -15,11 +18,9 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 	advance_token :: proc(h: ^Highlighter) -> Style_Key {
 		start := h.pos
 
-		has_upper: bool
-		has_lower: bool
-		for h.pos < len(h.text) {
-			char := h.text[h.pos]
-			switch char {
+		has_upper, has_lower: bool
+		for r in h.text[h.pos:] {
+			switch r {
 			case '0' ..= '9', '_':
 				h.pos += 1
 				continue
@@ -32,6 +33,27 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 				h.pos    += 1
 				continue
 			}
+
+			if unicode.is_digit(r) {
+				_, n  := utf8.encode_rune(r)
+				h.pos += n
+				continue
+			}
+
+			if unicode.is_upper(r) {
+				_, n     := utf8.encode_rune(r)
+				h.pos    += n
+				has_upper = true
+				continue
+			}
+
+			if unicode.is_lower(r) {
+				_, n     := utf8.encode_rune(r)
+				h.pos    += n
+				has_lower = true
+				continue
+			}
+
 			break
 		}
 
@@ -65,8 +87,8 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 		return .Ident
 	}
 
-	char := h.text[h.pos]
-	switch char {
+	r, n := utf8.decode_rune(h.text[h.pos:])
+	switch r {
 	case '0' ..= '9':
 		advance_token(h)
 		return .Number
@@ -172,7 +194,14 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 		}
 		return .String
 	case:
-		h.pos += 1
+		if unicode.is_letter(r) {
+			return advance_token(h)
+		}
+		if unicode.is_digit(r) {
+			advance_token(h)
+			return .Number
+		}
+		h.pos += n
 		return .Ident
 	}
 }

@@ -8,6 +8,12 @@ Key :: enum {
 	Escape,
 	Enter,
 	Space,
+	Backspace,
+	Delete,
+	Tab,
+
+	Comma,
+	Period,
 
 	A,
 	B,
@@ -67,9 +73,37 @@ Leader_Binds :: struct {
 }
 
 Action :: union {
+	[]Action,
 	Leader_Binds,
 	Command,
 	Motion,
+	Argument_Motion,
+}
+
+action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
+	switch v in action {
+	case Motion:
+		if editor.repeat_count == 0 {
+			editor.repeat_count = 1
+		}
+		motion_apply(editor, v)
+		editor.repeat_count = 0
+	case Command:
+		command_execute(editor, v)
+		editor.repeat_count = 0
+	case Argument_Motion:
+		editor.leader.motion = v
+		strings.write_string(&editor.leader.sequence, keybind_to_string(keybind))
+	case Leader_Binds:
+		editor.leader.title  = v.title
+		editor.leader.binds  = v.binds
+		editor.leader.active = true
+		strings.write_string(&editor.leader.sequence, keybind_to_string(keybind))
+	case []Action:
+		for action in v {
+			action_apply(editor, action, keybind)
+		}
+	}
 }
 
 Keybinds :: distinct map[Keybind]Action
@@ -81,47 +115,52 @@ modifier_names: [Modifier]string = {
 }
 
 key_names: [Key]string = {
-	.Escape = "escape",
-	.Enter  = "enter",
-	.Space  = "space",
+	.Escape     = "escape",
+	.Enter      = "enter",
+	.Space      = "space",
+	.Tab        = "tab",
+	.Backspace  = "backspace",
+	.Delete     = "delete",
+	.Comma      = "comma",
+	.Period     = "period",
 
-	.A      = "a",
-	.B      = "b",
-	.C      = "c",
-	.D      = "d",
-	.E      = "e",
-	.F      = "f",
-	.G      = "g",
-	.H      = "h",
-	.I      = "i",
-	.J      = "j",
-	.K      = "k",
-	.L      = "l",
-	.M      = "m",
-	.N      = "n",
-	.O      = "o",
-	.P      = "p",
-	.Q      = "q",
-	.R      = "r",
-	.S      = "s",
-	.T      = "t",
-	.U      = "u",
-	.V      = "v",
-	.W      = "w",
-	.X      = "x",
-	.Y      = "y",
-	.Z      = "z",
+	.A = "a",
+	.B = "b",
+	.C = "c",
+	.D = "d",
+	.E = "e",
+	.F = "f",
+	.G = "g",
+	.H = "h",
+	.I = "i",
+	.J = "j",
+	.K = "k",
+	.L = "l",
+	.M = "m",
+	.N = "n",
+	.O = "o",
+	.P = "p",
+	.Q = "q",
+	.R = "r",
+	.S = "s",
+	.T = "t",
+	.U = "u",
+	.V = "v",
+	.W = "w",
+	.X = "x",
+	.Y = "y",
+	.Z = "z",
 
-	._0     = "0",
-	._1     = "1",
-	._2     = "2",
-	._3     = "3",
-	._4     = "4",
-	._5     = "5",
-	._6     = "6",
-	._7     = "7",
-	._8     = "8",
-	._9     = "9",
+	._0 = "0",
+	._1 = "1",
+	._2 = "2",
+	._3 = "3",
+	._4 = "4",
+	._5 = "5",
+	._6 = "6",
+	._7 = "7",
+	._8 = "8",
+	._9 = "9",
 }
 
 // may allocate using context.temp_allocator
@@ -193,15 +232,24 @@ parse_keybind :: proc(s: string) -> (bind: Keybind, ok: bool) {
 	return
 }
 
+// may allocate using context.temp_allocator
 @(require_results)
 action_to_string :: proc(action: Action) -> string {
 	switch v in action {
+	case []Action:
+		strs := make([]string, len(v))
+		for &str, i in strs {
+			str = action_to_string(v[i])
+		}
+		return strings.concatenate(strs, context.temp_allocator)
 	case Leader_Binds:
 		return v.title
 	case Command:
 		return string(v)
 	case Motion:
 		return motion_descriptions[v]
+	case Argument_Motion:
+		return argument_motion_descriptions[v]
 	}
 
 	return ""

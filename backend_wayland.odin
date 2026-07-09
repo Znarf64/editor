@@ -41,6 +41,8 @@ Backend_Wayland :: struct {
 	xkb_context:        ^xkb.ctx,
 	xkb_keymap:         ^xkb.keymap,
 	xkb_state:          ^xkb.state,
+
+	opengl_renderer:     Opengl_Renderer,
 }
 
 @(require_results)
@@ -205,6 +207,7 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 			for sym in ([^]xkb.keysym_t)(syms)[:n_syms] {
 				event: Event_Input_Key = {
 					scancode = int(key),
+					id       = int(serial),
 				}
 				switch state {
 				case .released:
@@ -243,6 +246,7 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 
 			if codepoint := xkb.state_key_get_utf32(data.xkb_state, key); codepoint != 0 {
 				append(&data._events, Event_Input_Codepoint {
+					source    = int(serial),
 					codepoint = rune(codepoint),
 				})
 			} else {
@@ -250,6 +254,7 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 				n := xkb.state_key_get_utf8(data.xkb_state, key, &buf[0], size_of(buf))
 				for r in transmute(string)buf[:n] {
 					append(&data._events, Event_Input_Codepoint {
+						source    = int(serial),
 						codepoint = r,
 					})
 				}
@@ -380,6 +385,8 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 
 			if data.egl_initialized {
 				wl.egl_window_resize(data.egl_window, width, height, 0, 0)
+
+				opengl_renderer_resize(&data.opengl_renderer, { width, height, })
 			}
 
 			append(&data._events, Event_Window_Resize {
@@ -475,6 +482,8 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 
 	init_egl(backend) or_return
 
+	opengl_renderer_init(&backend.opengl_renderer) or_return
+
 	backend.poll_events = proc(backend: ^Backend_Wayland) -> []Event {
 		wl.display_flush(backend.display)
 		wl.display_dispatch_pending(backend.display)
@@ -483,16 +492,20 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 		clear(&backend._events)
 		return events
 	}
-	backend.draw = proc(backend: ^Backend_Wayland, instances: []Instance) {
+	backend.draw = proc(backend: ^Backend_Wayland, font: Font, instances: []Instance, background_color: [4]f32) {
+		opengl_renderer_draw(backend.opengl_renderer, font, instances, background_color)
 		egl.SwapBuffers(backend.egl_display, backend.egl_surface)
 	}
 	backend.set_title = proc(backend: ^Backend_Wayland, title: string) {
 		xdg.toplevel_set_title(backend.toplevel, strings.clone_to_cstring(title, context.temp_allocator))
 	}
 	backend.destroy = proc(backend: ^Backend_Wayland) {
+		opengl_renderer_destroy(backend.opengl_renderer)
+
 		xkb.state_unref(backend.xkb_state)
 		xkb.keymap_unref(backend.xkb_keymap)
 		xkb.context_unref(backend.xkb_context)
+
 		free(backend)
 	}
 

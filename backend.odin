@@ -51,7 +51,7 @@ Event_Input_Scroll :: struct {
 
 Backend :: struct {
 	poll_events: proc(backend: ^Backend) -> []Event,
-	draw:        proc(backend: ^Backend, instances: []Instance),
+	draw:        proc(backend: ^Backend, font: Font, instances: []Instance, background_color: [4]f32),
 	set_title:   proc(backend: ^Backend, title: string),
 	destroy:     proc(backend: ^Backend),
 	_events:     [dynamic]Event,

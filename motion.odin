@@ -3,6 +3,7 @@ package editor
 import fmt     "core:fmt"
 import strings "core:strings"
 import unicode "core:unicode"
+import utf8    "core:unicode/utf8"
 
 Motion :: enum {
 	Cursor_Page_Up = 1,
@@ -14,8 +15,6 @@ Motion :: enum {
 	View_Page_Down,
 	View_Half_Page_Up,
 	View_Half_Page_Down,
-
-	Find,
 
 	Go_To_Matching,
 
@@ -57,7 +56,6 @@ Motion :: enum {
 	Case_To_Snake,
 	Case_To_Screaming_Snake,
 
-	Replace,
 	Delete,
 
 	Paste,
@@ -67,7 +65,17 @@ Motion :: enum {
 	Visual,
 	Normal,
 
+	Change,
+
 	Insert_At_Line_Start,
+	Insert_At_Line_End,
+	Insert_After,
+	Insert_Newline,
+	Insert_Tab,
+
+	Indent,
+	Outdent,
+
 	Open_Below,
 	Open_Above,
 }
@@ -88,8 +96,6 @@ motion_descriptions: [Motion]string = {
 	.View_Page_Down                  = "view page down",
 	.View_Half_Page_Up               = "view half page up",
 	.View_Half_Page_Down             = "view half page down",
-
-	.Find                            = "find",
 
 	.Go_To_Matching                  = "go to matching",
 
@@ -131,7 +137,6 @@ motion_descriptions: [Motion]string = {
 	.Case_To_Snake                   = "case to snake",
 	.Case_To_Screaming_Snake         = "case to screaming snake",
 
-	.Replace                         = "replace",
 	.Delete                          = "delete",
 
 	.Paste                           = "paste",
@@ -141,9 +146,54 @@ motion_descriptions: [Motion]string = {
 	.Visual                          = "visual",
 	.Normal                          = "normal",
 
+	.Change                          = "change",
+
 	.Insert_At_Line_Start            = "insert at line start",
+	.Insert_At_Line_End              = "insert at line end",
+	.Insert_After                    = "insert after",
+	.Insert_Newline                  = "insert newline",
+	.Insert_Tab                      = "insert tab",
+
 	.Open_Below                      = "open below",
 	.Open_Above                      = "open above",
+
+	.Indent                          = "indent",
+	.Outdent                         = "outdent",
+}
+
+Argument_Motion :: enum {
+	Replace,
+	Find,
+	Find_Backwards,
+}
+
+@(rodata)
+argument_motion_descriptions: [Argument_Motion]string = {
+	.Find           = "find",
+	.Find_Backwards = "find backwards",
+	.Replace        = "replace",
+}
+
+@(require_results)
+parse_argument_motion :: proc(s: string) -> (motion: Argument_Motion, ok: bool) {
+	b := strings.builder_make(0, len(s), context.temp_allocator)
+	for r in s {
+		r := unicode.to_lower(r)
+		if r == '-' || r == '_' {
+			r = ' '
+		}
+		strings.write_rune(&b, r)
+	}
+
+	s := strings.to_string(b)
+
+	for name, m in argument_motion_descriptions {
+		if name == s {
+			return m, true
+		}
+	}
+
+	return
 }
 
 @(require_results)
@@ -183,8 +233,8 @@ normalize_cursor_position :: proc(editor: ^Editor, vertical_move: bool) {
 
 	iter := rope_iterator(&editor.rope, line = editor.cursor.line)
 	for r in rope_iter(&iter) {
-		if r == '\t' {
-			next_column := (iter.column + 1 + 3) & -4
+		if r == '\t' && !vertical_move {
+			next_column := next_column_after_tab(iter.column, editor.config.tab_width)
 			if editor.cursor.column > iter.column && editor.cursor.column < next_column {
 				editor.cursor.column = iter.column
 				break
@@ -206,11 +256,11 @@ normalize_cursor_position :: proc(editor: ^Editor, vertical_move: bool) {
 	}
 }
 
-motion_apply_queued :: proc(editor: ^Editor, motion: Motion, arg: rune) {
+argument_motion_apply :: proc(editor: ^Editor, motion: Argument_Motion, arg: rune) {
 	vertical_move: bool
 	defer normalize_cursor_position(editor, vertical_move)
 
-	#partial switch motion {
+	switch motion {
 	case .Find:
 		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
 		for r in rope_iter(&iter) {
@@ -228,6 +278,11 @@ motion_apply_queued :: proc(editor: ^Editor, motion: Motion, arg: rune) {
 				break
 			}
 		}
+	case .Find_Backwards:
+		unimplemented()
+	case .Replace:
+		// rope_get_character(editor.rope, rope_line_to_offset(editor.rope, editor.cursor.line))
+		// unimplemented()
 	}
 }
 
@@ -236,8 +291,6 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 	defer normalize_cursor_position(editor, vertical_move)
 
 	switch motion {
-	case .Find:
-		editor.queued = .Find
 	case .Cursor_Half_Page_Up:
 		editor.cursor.line -= editor.visible_lines / 2
 		vertical_move       = true
@@ -340,19 +393,13 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 			}
 		}
 	case .Go_To_Line_Start_Non_Whitespace:
-		iter   := rope_iterator(&editor.rope, line = editor.cursor.line)
-		column := 0
+		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
 		for r in rope_iter(&iter) {
-			if r == '\t' {
-				column = (column + 1 + 3) & -4
-			} else {
-				column += 1
-			}
 			if r == '\n' || !unicode.is_space(r) {
 				break
 			}
 		}
-		editor.cursor.column = column - 1
+		editor.cursor.column = iter.column
 
 	case .Character_Down:
 		editor.cursor.line   += editor.repeat_count
@@ -378,7 +425,7 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 		n    := editor.repeat_count
 		for _ in rope_iter(&iter) {
 			n -= 1
-			if n == 0 {
+			if n <= 0 {
 				break
 			}
 		}
@@ -408,7 +455,7 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 			}
 		}
 
-		editor.cursor.column = iter.column
+		editor.cursor.position = iter.position
 	case .Select_Word_Forward:
 		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
 		for r in rope_iter(&iter) {
@@ -432,7 +479,7 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 			}
 		}
 
-		editor.cursor.column = iter.column
+		editor.cursor.position = iter.position
 	case .Select_Word_Backward:
 
 	case .Search:
@@ -469,26 +516,89 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 	case .Case_To_Snake:
 	case .Case_To_Screaming_Snake:
 
-	case .Replace:
-		// fmt.println(rope_get_character_at_line(editor.rope, editor.cursor.line)^)
-		// fmt.println(rope_line_to_offset(editor.rope, editor.cursor.line))
 	case .Delete:
+		offset := rope_position_to_offset(&editor.rope, editor.cursor.line, editor.cursor.column)
+		iter   := rope_iterator(&editor.rope, offset = offset)
+		r, _   := rope_iter(&iter)
+		_, n   := utf8.encode_rune(r)
+		rope_remove_range(&editor.rope, offset, offset + n)
 
 	case .Paste:
 	case .Yank:
 
 	case .Insert:
 		editor.mode = .Insert
+	case .Insert_After:
+		editor.cursor.column += 1
+		editor.mode           = .Insert
 	case .Visual:
 		editor.mode = .Visual
 	case .Normal:
 		editor.mode = .Normal
 	case .Insert_At_Line_Start:
+		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
+		for r in rope_iter(&iter) {
+			if r == '\n' || !unicode.is_space(r) {
+				break
+			}
+		}
+		editor.cursor.column = iter.column
+		editor.mode          = .Insert
+	case .Insert_At_Line_End:
+		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
+		for r in rope_iter(&iter) {
+			if r == '\n' {
+				editor.cursor.column = iter.column
+				break
+			}
+		}
 		editor.mode = .Insert
+	case .Insert_Newline:
+		offset               := rope_position_to_offset(&editor.rope, editor.cursor.line, editor.cursor.column)
+		rope_insert(&editor.rope, offset, '\n')
+		editor.cursor.column += 1
+	case .Insert_Tab:
+		offset               := rope_position_to_offset(&editor.rope, editor.cursor.line, editor.cursor.column)
+		rope_insert(&editor.rope, offset, '\t')
+		editor.cursor.column += 1
+
 	case .Open_Below:
+		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
+		for r in rope_iter(&iter) {
+			if r == '\n' {
+				editor.cursor.column = iter.column
+				break
+			}
+		}
+
+		offset             := rope_position_to_offset(&editor.rope, editor.cursor.line, editor.cursor.column)
+		rope_insert(&editor.rope, offset, '\n')
+		editor.cursor.line += 1
+
 		editor.mode = .Insert
+
 	case .Open_Above:
 		editor.mode = .Insert
+	case .Change:
+		editor.mode = .Insert
+
+	case .Indent:
+		offset := rope_position_to_offset(&editor.rope, editor.cursor.line, 0)
+		for _ in 0 ..< editor.repeat_count {
+			rope_insert(&editor.rope, offset, '\t')
+		}
+		editor.cursor.column += editor.config.tab_width * editor.repeat_count
+	case .Outdent:
+		offset := rope_position_to_offset(&editor.rope, editor.cursor.line, 0)
+		for _ in 0 ..< editor.repeat_count {
+			r := rope_get_rune(editor.rope, offset)
+			if r == '\t' {
+				rope_remove_range(&editor.rope, offset, offset + 1)
+				editor.cursor.column -= editor.config.tab_width
+			} else {
+				break
+			}
+		}
 
 	case:
 	}
