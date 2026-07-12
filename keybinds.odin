@@ -14,6 +14,8 @@ Key :: enum {
 
 	Comma,
 	Period,
+	Slash,
+	Semicolon,
 
 	A,
 	B,
@@ -121,8 +123,11 @@ key_names: [Key]string = {
 	.Tab        = "tab",
 	.Backspace  = "backspace",
 	.Delete     = "delete",
+
 	.Comma      = "comma",
 	.Period     = "period",
+	.Slash      = "slash",
+	.Semicolon  = "semicolon",
 
 	.A = "a",
 	.B = "b",

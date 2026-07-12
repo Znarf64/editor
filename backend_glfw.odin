@@ -132,6 +132,10 @@ _backend_init_glfw :: proc(backend: ^Backend_Glfw) -> (ok: bool) {
 			event.key = .Period
 		case glfw.KEY_COMMA:
 			event.key = .Comma
+		case glfw.KEY_SLASH:
+			event.key = .Slash
+		case glfw.KEY_SEMICOLON:
+			event.key = .Semicolon
 		case:
 			return
 		}

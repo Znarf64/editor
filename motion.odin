@@ -78,6 +78,9 @@ Motion :: enum {
 
 	Open_Below,
 	Open_Above,
+
+	Show_Hover_Information,
+	Show_Code_Actions,
 }
 
 Motion_Info :: struct {
@@ -159,19 +162,22 @@ motion_descriptions: [Motion]string = {
 
 	.Indent                          = "indent",
 	.Outdent                         = "outdent",
+
+	.Show_Hover_Information          = "show hover information",
+	.Show_Code_Actions               = "show code actions",
 }
 
 Argument_Motion :: enum {
 	Replace,
 	Find,
-	Find_Backwards,
+	Find_Backward,
 }
 
 @(rodata)
 argument_motion_descriptions: [Argument_Motion]string = {
-	.Find           = "find",
-	.Find_Backwards = "find backwards",
-	.Replace        = "replace",
+	.Find          = "find",
+	.Find_Backward = "find backward",
+	.Replace       = "replace",
 }
 
 @(require_results)
@@ -227,12 +233,12 @@ normalize_cursor_position :: proc(editor: ^Editor, vertical_move: bool) {
 		editor.cursor.line = 0
 	}
 
-	if editor.cursor.line >= editor.rope.lines {
-		editor.cursor.line = editor.rope.lines - 1
+	if editor.cursor.line >= int(editor.btree.lines) {
+		editor.cursor.line = int(editor.btree.lines) - 1
 	}
 
-	iter := rope_iterator(&editor.rope, line = editor.cursor.line)
-	for r in rope_iter(&iter) {
+	iter := btree_iterator(&editor.btree, line = editor.cursor.line)
+	for r in btree_iter(&iter) {
 		if r == '\t' && !vertical_move {
 			next_column := next_column_after_tab(iter.column, editor.config.tab_width)
 			if editor.cursor.column > iter.column && editor.cursor.column < next_column {
@@ -262,27 +268,26 @@ argument_motion_apply :: proc(editor: ^Editor, motion: Argument_Motion, arg: run
 
 	switch motion {
 	case .Find:
-		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
-		for r in rope_iter(&iter) {
-			if iter.column == editor.cursor.column {
-				break
-			}
-			if r == '\n' {
-				break
-			}
-		}
-
-		for r in rope_iter(&iter) {
+		iter := btree_iterator(&editor.btree, line = editor.cursor.line, column = editor.cursor.column)
+		_, _  = btree_iter(&iter)
+		for r in btree_iter(&iter) {
 			if r == arg {
-				editor.cursor = { line = iter.line, column = iter.column, }
+				editor.cursor.position = { line = iter.line, column = iter.column, }
 				break
 			}
 		}
-	case .Find_Backwards:
-		unimplemented()
+	case .Find_Backward:
+		iter := btree_iterator(&editor.btree, line = editor.cursor.line, column = editor.cursor.column)
+		_, _  = btree_iter(&iter, back = true)
+		prev := iter.offset
+		for r in btree_iter(&iter, back = true) {
+			if r == arg {
+				editor.cursor.position = btree_offset_to_position(&editor.btree, prev)
+				break
+			}
+			prev = iter.offset
+		}
 	case .Replace:
-		// rope_get_character(editor.rope, rope_line_to_offset(editor.rope, editor.cursor.line))
-		// unimplemented()
 	}
 }
 
@@ -314,9 +319,9 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 		editor.scroll += editor.visible_lines
 
 	case .Go_To_Matching:
-		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
+		iter := btree_iterator(&editor.btree, line = editor.cursor.line)
 		start: rune
-		for r in rope_iter(&iter) {
+		for r in btree_iter(&iter) {
 			if iter.column == editor.cursor.column {
 				start = r
 				break
@@ -358,13 +363,13 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 			back  = true
 		}
 
-		if back {
-
-		}
-
 		depth := 1
 
-		for r in rope_iter(&iter) {
+		if back {
+			_, _ = btree_iter(&iter, back = true)
+		}
+
+		for r in btree_iter(&iter, back) {
 			if r == delim {
 				depth -= 1
 			} else if r == start {
@@ -376,25 +381,25 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 			}
 		}
 
-		editor.cursor = { line = iter.line, column = iter.column, }
+		editor.cursor.position = btree_offset_to_position(&editor.btree, iter.offset)
 
 	case .Go_To_Line:
 		editor.cursor = { line = editor.repeat_count - 1, }
 	case .Go_To_File_End:
-		editor.cursor = { column = 0, line = editor.rope.lines - 1, }
+		editor.cursor = { column = 0, line = int(editor.btree.lines) - 1, }
 	case .Go_To_Line_Start:
 		editor.cursor.column = 0
 	case .Go_To_Line_End:
-		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
-		for r in rope_iter(&iter) {
+		iter := btree_iterator(&editor.btree, line = editor.cursor.line)
+		for r in btree_iter(&iter) {
 			if r == '\n' {
 				editor.cursor.column = iter.column - 1
 				break
 			}
 		}
 	case .Go_To_Line_Start_Non_Whitespace:
-		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
-		for r in rope_iter(&iter) {
+		iter := btree_iterator(&editor.btree, line = editor.cursor.line)
+		for r in btree_iter(&iter) {
 			if r == '\n' || !unicode.is_space(r) {
 				break
 			}
@@ -408,72 +413,55 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 		editor.cursor.line   -= editor.repeat_count
 		vertical_move         = true
 	case .Character_Left:
-		editor.cursor.column -= editor.repeat_count
-		for editor.cursor.column < 0 {
-			editor.cursor.line -= 1
-
-			iter := rope_iterator(&editor.rope, line = editor.cursor.line)
-			for r in rope_iter(&iter) {
-				if r == '\n' {
-					break
-				}
-			}
-			editor.cursor.column += iter.column + 1
+		iter  := btree_iterator(&editor.btree, line = editor.cursor.line, column = editor.cursor.column)
+		if iter.column > editor.cursor.column { // we are "inside" of a tab
+			_ = btree_iter(&iter, back = true) or_break
 		}
+		for _ in 0 ..< editor.repeat_count {
+			_ = btree_iter(&iter, back = true) or_break
+		}
+		editor.cursor.position = btree_offset_to_position(&editor.btree, iter.offset)
 	case .Character_Right:
-		iter := rope_iterator(&editor.rope, line = editor.cursor.line, column = editor.cursor.column)
-		n    := editor.repeat_count
-		for _ in rope_iter(&iter) {
-			n -= 1
-			if n <= 0 {
-				break
-			}
+		iter := btree_iterator(&editor.btree, line = editor.cursor.line, column = editor.cursor.column)
+		for _ in 0 ..= editor.repeat_count {
+			_ = btree_iter(&iter) or_break
 		}
-		editor.cursor.position = iter.position
+		editor.cursor.position = btree_offset_to_position(&editor.btree, iter.offset)
 
 	case .Select_All:
 	case .Select_Word_End_Forward:
-		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
-		for r in rope_iter(&iter) {
-			if iter.column == editor.cursor.column {
-				break
-			}
-			if r == '\n' {
-				return
-			}
-		}
+		iter := btree_iterator(&editor.btree, line = editor.cursor.line, column = editor.cursor.column)
 
-		for r in rope_iter(&iter) {
+		_, _ = btree_iter(&iter)
+
+		for r in btree_iter(&iter) {
 			if !unicode.is_space(r) {
 				break
 			}
 		}
 
-		for r in rope_iter(&iter) {
+		pos := iter.position
+
+		for r in btree_iter(&iter) {
 			if !unicode.is_letter(r) && !unicode.is_digit(r) && r != '_' {
 				break
+			} else {
+				pos = iter.position
 			}
 		}
 
-		editor.cursor.position = iter.position
+		editor.cursor.position = pos
+
 	case .Select_Word_Forward:
-		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
-		for r in rope_iter(&iter) {
-			if iter.column == editor.cursor.column {
-				break
-			}
-			if r == '\n' {
-				return
-			}
-		}
+		iter := btree_iterator(&editor.btree, line = editor.cursor.line, column = editor.cursor.column)
 
-		for r in rope_iter(&iter) {
+		for r in btree_iter(&iter) {
 			if !unicode.is_space(r) {
 				break
 			}
 		}
 
-		for r in rope_iter(&iter) {
+		for r in btree_iter(&iter) {
 			if !unicode.is_letter(r) && !unicode.is_digit(r) && r != '_' {
 				break
 			}
@@ -481,8 +469,29 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 
 		editor.cursor.position = iter.position
 	case .Select_Word_Backward:
+		iter := btree_iterator(&editor.btree, line = editor.cursor.line, column = editor.cursor.column)
+
+		_, _ = btree_iter(&iter, back = true)
+
+		for r in btree_iter(&iter, back = true) {
+			if !unicode.is_space(r) {
+				break
+			}
+		}
+
+		for r in btree_iter(&iter, back = true) {
+			if !unicode.is_letter(r) && !unicode.is_digit(r) && r != '_' {
+				break
+			}
+		}
+
+		_, _ = btree_iter(&iter)
+		_, _ = btree_iter(&iter)
+
+		editor.cursor.position = btree_offset_to_position(&editor.btree, iter.offset)
 
 	case .Search:
+		strings.builder_reset(&editor.prompt.input)
 		editor.mode        = .Prompt
 		editor.prompt.mode = .Search
 	case .Command:
@@ -517,11 +526,11 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 	case .Case_To_Screaming_Snake:
 
 	case .Delete:
-		offset := rope_position_to_offset(&editor.rope, editor.cursor.line, editor.cursor.column)
-		iter   := rope_iterator(&editor.rope, offset = offset)
-		r, _   := rope_iter(&iter)
+		offset := btree_position_to_offset(&editor.btree, editor.cursor)
+		iter   := btree_iterator(&editor.btree, offset = offset)
+		r, _   := btree_iter(&iter)
 		_, n   := utf8.encode_rune(r)
-		rope_remove_range(&editor.rope, offset, offset + n)
+		btree_remove_range(&editor.btree, offset, offset + n)
 
 	case .Paste:
 	case .Yank:
@@ -536,8 +545,8 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 	case .Normal:
 		editor.mode = .Normal
 	case .Insert_At_Line_Start:
-		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
-		for r in rope_iter(&iter) {
+		iter := btree_iterator(&editor.btree, line = editor.cursor.line)
+		for r in btree_iter(&iter) {
 			if r == '\n' || !unicode.is_space(r) {
 				break
 			}
@@ -545,8 +554,8 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 		editor.cursor.column = iter.column
 		editor.mode          = .Insert
 	case .Insert_At_Line_End:
-		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
-		for r in rope_iter(&iter) {
+		iter := btree_iterator(&editor.btree, line = editor.cursor.line)
+		for r in btree_iter(&iter) {
 			if r == '\n' {
 				editor.cursor.column = iter.column
 				break
@@ -554,28 +563,28 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 		}
 		editor.mode = .Insert
 	case .Insert_Newline:
-		offset               := rope_position_to_offset(&editor.rope, editor.cursor.line, editor.cursor.column)
-		rope_insert(&editor.rope, offset, '\n')
+		offset               := btree_position_to_offset(&editor.btree, editor.cursor)
+		btree_insert(&editor.btree, offset, '\n')
 		editor.cursor.column += 1
 	case .Insert_Tab:
-		offset               := rope_position_to_offset(&editor.rope, editor.cursor.line, editor.cursor.column)
-		rope_insert(&editor.rope, offset, '\t')
+		offset               := btree_position_to_offset(&editor.btree, editor.cursor)
+		btree_insert(&editor.btree, offset, '\t')
 		editor.cursor.column += 1
 
 	case .Open_Below:
-		iter := rope_iterator(&editor.rope, line = editor.cursor.line)
-		for r in rope_iter(&iter) {
-			if r == '\n' {
-				editor.cursor.column = iter.column
-				break
-			}
-		}
+		// iter := btree_iterator(&editor.btree, line = editor.cursor.line)
+		// for r in btree_iter(&iter) {
+		// 	if r == '\n' {
+		// 		editor.cursor.column = iter.column
+		// 		break
+		// 	}
+		// }
 
-		offset             := rope_position_to_offset(&editor.rope, editor.cursor.line, editor.cursor.column)
-		rope_insert(&editor.rope, offset, '\n')
-		editor.cursor.line += 1
+		// offset             := btree_position_to_offset(&editor.btree, editor.cursor.line, editor.cursor.column)
+		// btree_insert(&editor.btree, offset, '\n')
+		// editor.cursor.line += 1
 
-		editor.mode = .Insert
+		// editor.mode = .Insert
 
 	case .Open_Above:
 		editor.mode = .Insert
@@ -583,22 +592,27 @@ motion_apply :: proc(editor: ^Editor, motion: Motion) {
 		editor.mode = .Insert
 
 	case .Indent:
-		offset := rope_position_to_offset(&editor.rope, editor.cursor.line, 0)
-		for _ in 0 ..< editor.repeat_count {
-			rope_insert(&editor.rope, offset, '\t')
-		}
-		editor.cursor.column += editor.config.tab_width * editor.repeat_count
+		// offset := btree_position_to_offset(&editor.btree, editor.cursor.line, 0)
+		// for _ in 0 ..< editor.repeat_count {
+		// 	btree_insert(&editor.btree, offset, '\t')
+		// }
+		// editor.cursor.column += editor.config.tab_width * editor.repeat_count
 	case .Outdent:
-		offset := rope_position_to_offset(&editor.rope, editor.cursor.line, 0)
-		for _ in 0 ..< editor.repeat_count {
-			r := rope_get_rune(editor.rope, offset)
-			if r == '\t' {
-				rope_remove_range(&editor.rope, offset, offset + 1)
-				editor.cursor.column -= editor.config.tab_width
-			} else {
-				break
-			}
-		}
+		// offset := btree_position_to_offset(&editor.btree, editor.cursor.line, 0)
+		// for _ in 0 ..< editor.repeat_count {
+		// 	r := btree_get_rune(editor.btree, offset)
+		// 	if r == '\t' {
+		// 		btree_remove_range(&editor.btree, offset, offset + 1)
+		// 		editor.cursor.column -= editor.config.tab_width
+		// 	} else {
+		// 		break
+		// 	}
+		// }
+
+	case .Show_Hover_Information:
+		unimplemented()
+	case .Show_Code_Actions:
+		unimplemented()
 
 	case:
 	}

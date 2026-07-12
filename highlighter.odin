@@ -131,7 +131,7 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 		}
 
 		return .Ident
-	case '+', '*', '=', '~', '&', '|', '^', '@', '>', '<', '!':
+	case '+', '*', '=', '~', '&', '|', '^', '@', '>', '<', '!', '%':
 		h.pos += 1
 		return .Operator
 	case '-':

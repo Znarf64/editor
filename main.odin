@@ -62,6 +62,8 @@ Picker_Mode :: enum {
 Prompt_Mode :: enum {
 	Command,
 	Search,
+	Keep,
+	Select,
 }
 
 Editor :: struct {
@@ -97,7 +99,7 @@ Editor :: struct {
 		input: strings.Builder,
 	},
 
-	rope:          Rope,
+	btree:         BTree,
 
 	config:        Config,
 
@@ -153,12 +155,12 @@ main :: proc() {
 	when true {
 		// S :: #load("/home/znarf/source/odin/src/check_expr.cpp", string)
 		S :: #load(#file, string)
-		N :: 2000 when ODIN_OPTIMIZATION_MODE == .Speed else 100
-		editor.rope = rope_from_string(strings.repeat(S, N, context.temp_allocator), context.allocator, editor.config.tab_width) or_else panic("")
+		N :: 2000 when ODIN_OPTIMIZATION_MODE == .Speed else 500
+		editor.btree = btree_build(strings.repeat(S, N, context.temp_allocator), context.allocator, editor.config.tab_width)
 	} else {
-		editor.rope = rope_from_string("\n", context.allocator, editor.config.tab_width) or_else panic("")
+		editor.btree = btree_build("Hello World!\n\n", context.allocator, editor.config.tab_width)
 	}
-	defer rope_destroy(editor.rope)
+	defer btree_destroy(editor.btree)
 
 	last_print_time    := time.now()
 	frames_since_print := 0
@@ -231,6 +233,7 @@ main :: proc() {
 				if editor.leader.motion != nil {
 					argument_motion_apply(&editor, editor.leader.motion, e.codepoint)
 					editor.leader.motion = nil
+					editor.leader.active = false
 					break
 				}
 				#partial switch editor.mode {
@@ -239,8 +242,8 @@ main :: proc() {
 				case .Picker:
 					strings.write_rune(&editor.picker.input, e.codepoint)
 				case .Insert:
-					offset               := rope_position_to_offset(&editor.rope, editor.cursor.line, editor.cursor.column)
-					rope_insert(&editor.rope, offset, e.codepoint)
+					offset := btree_position_to_offset(&editor.btree, editor.cursor)
+					btree_insert(&editor.btree, offset, e.codepoint)
 					editor.cursor.column += 1
 				}
 			case Event_Input_Mouse_Move:
@@ -267,7 +270,7 @@ main :: proc() {
 			}
 		}
 
-		editor.scroll = clamp(editor.scroll, 0, editor.rope.lines - 1)
+		editor.scroll = clamp(editor.scroll, 0, int(editor.btree.lines - 1))
 		animation_set_target(&editor.scroll_anim, f32(editor.scroll))
 
 		current_time := time.duration_seconds(time.since(start_time))
@@ -341,7 +344,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 	}
 
 	padding: f32 = 10
-	line_digits  := max(1, int(la.ceil(la.log10(f32(editor.rope.lines)))))
+	line_digits  := max(1, int(la.ceil(la.log10(f32(editor.btree.lines)))))
 	lines_width  := cell_size.x * f32(line_digits)
 	gutter_width := lines_width + padding + 2 + padding
 
@@ -352,11 +355,11 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 	line := int(la.floor(scroll))
 	column: int
 
-	iter := rope_iterator(&editor.rope, line = line)
+	iter := btree_iterator(&editor.btree, line = line)
 
 	b := strings.builder_make(context.temp_allocator)
 
-	for r in rope_iter(&iter) {
+	for r in btree_iter(&iter) {
 		if iter.line > int(la.ceil(scroll)) + editor.visible_lines {
 			break
 		}
@@ -414,7 +417,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 				if line == editor.cursor.line && (column <= editor.cursor.column && editor.cursor.column < next_column) {
 					offset := [2]f32 {
 						f32(column) * cell_size.x + gutter_width,
-						cell_size.y * (f32(line - 1)) + la.round(f32(editor.font.ascender) * editor.font.scale),
+						cell_size.y * f32(line - 1) + la.round(f32(editor.font.ascender) * editor.font.scale),
 					} + padding
 
 					target := Rect{ min = offset, max = offset + cell_size * { f32(next_column - column), 1 }, }
@@ -429,7 +432,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 			if line == editor.cursor.line && column == editor.cursor.column {
 				offset := [2]f32 {
 					f32(column) * cell_size.x + gutter_width,
-					cell_size.y * (f32(line - 1)) + la.round(f32(editor.font.ascender) * editor.font.scale),
+					cell_size.y * f32(line - 1) + la.round(f32(editor.font.ascender) * editor.font.scale),
 				} + padding
 
 				target := Rect{ min = offset, max = offset + cell_size, }
@@ -603,6 +606,26 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 	}
 
 	if editor.mode == .Prompt {
+		mode_string: string
+		switch editor.prompt.mode {
+		case .Command:
+			mode_string = ":"
+		case .Search:
+			mode_string = "search: "
+		case .Keep:
+			mode_string = "keep: "
+		case .Select:
+			mode_string = "select: "
+		}
+
+		x := x + draw_text(
+			&editor.font,
+			instance_buffer,
+			mode_string,
+			editor.config.theme[.Ident].fg,
+			{ x, editor.screen_size.y - padding, },
+		)
+
 		w := draw_text(
 			&editor.font,
 			instance_buffer,
@@ -612,8 +635,8 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		)
 
 		append(instance_buffer, Instance {
-			offset = { x + w, editor.screen_size.y - FONT_HEIGHT - padding, },
-			size   = { 2, FONT_HEIGHT, },
+			offset = { x + w, editor.screen_size.y - FONT_HEIGHT - padding + f32(editor.font.descender) * editor.font.scale, },
+			size   = { 2, cell_size.y, },
 			color  = editor.config.theme[.Ident].fg,
 		})
 	}
