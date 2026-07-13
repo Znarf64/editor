@@ -11,11 +11,24 @@ Key :: enum {
 	Backspace,
 	Delete,
 	Tab,
+	Left,
+	Right,
+	Up,
+	Down,
+	Page_Up,
+	Page_Down,
 
+	Apostrophe,
 	Comma,
+	Minus,
 	Period,
 	Slash,
 	Semicolon,
+	Equal,
+	Left_Bracket,
+	Backslash,
+	Right_Bracket,
+	Grave_Accent,
 
 	A,
 	B,
@@ -88,7 +101,9 @@ action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 		if editor.repeat_count == 0 {
 			editor.repeat_count = 1
 		}
-		motion_apply(editor, v)
+		for &selection in editor.selections {
+			motion_apply(editor, &selection, v)
+		}
 		editor.repeat_count = 0
 	case Command:
 		command_execute(editor, v)
@@ -117,17 +132,30 @@ modifier_names: [Modifier]string = {
 }
 
 key_names: [Key]string = {
-	.Escape     = "escape",
-	.Enter      = "enter",
-	.Space      = "space",
-	.Tab        = "tab",
-	.Backspace  = "backspace",
-	.Delete     = "delete",
+	.Escape        = "escape",
+	.Enter         = "enter",
+	.Space         = "space",
+	.Backspace     = "backspace",
+	.Delete        = "delete",
+	.Tab           = "tab",
+	.Left          = "left",
+	.Right         = "right",
+	.Up            = "up",
+	.Down          = "down",
+	.Page_Up       = "page_up",
+	.Page_Down     = "page_down",
 
-	.Comma      = "comma",
-	.Period     = "period",
-	.Slash      = "slash",
-	.Semicolon  = "semicolon",
+	.Apostrophe    = "apostrophe",
+	.Comma         = "comma",
+	.Minus         = "minus",
+	.Period        = "period",
+	.Slash         = "slash",
+	.Semicolon     = "semicolon",
+	.Equal         = "equal",
+	.Left_Bracket  = "left_bracket",
+	.Backslash     = "backslash",
+	.Right_Bracket = "right_bracket",
+	.Grave_Accent  = "grave_accent",
 
 	.A = "a",
 	.B = "b",

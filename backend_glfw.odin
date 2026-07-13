@@ -128,14 +128,40 @@ _backend_init_glfw :: proc(backend: ^Backend_Glfw) -> (ok: bool) {
 			event.key = .Delete
 		case glfw.KEY_TAB:
 			event.key = .Tab
-		case glfw.KEY_PERIOD:
-			event.key = .Period
+		case glfw.KEY_LEFT:
+			event.key = .Left
+		case glfw.KEY_RIGHT:
+			event.key = .Right
+		case glfw.KEY_UP:
+			event.key = .Up
+		case glfw.KEY_DOWN:
+			event.key = .Down
+		case glfw.KEY_PAGE_UP:
+			event.key = .Page_Up
+		case glfw.KEY_PAGE_DOWN:
+			event.key = .Page_Down
+		case glfw.KEY_APOSTROPHE:
+			event.key = .Apostrophe
 		case glfw.KEY_COMMA:
 			event.key = .Comma
+		case glfw.KEY_MINUS:
+			event.key = .Minus
+		case glfw.KEY_PERIOD:
+			event.key = .Period
 		case glfw.KEY_SLASH:
 			event.key = .Slash
 		case glfw.KEY_SEMICOLON:
 			event.key = .Semicolon
+		case glfw.KEY_EQUAL:
+			event.key = .Equal
+		case glfw.KEY_LEFT_BRACKET:
+			event.key = .Left_Bracket
+		case glfw.KEY_BACKSLASH:
+			event.key = .Backslash
+		case glfw.KEY_RIGHT_BRACKET:
+			event.key = .Right_Bracket
+		case glfw.KEY_GRAVE_ACCENT:
+			event.key = .Grave_Accent
 		case:
 			return
 		}

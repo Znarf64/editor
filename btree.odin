@@ -329,7 +329,7 @@ btree_offset_to_position :: proc(btree: ^BTree, offset: int) -> (position: Posit
 @(require_results)
 btree_position_to_offset :: proc(btree: ^BTree, position: Position) -> (offset: int) {
 	iter := btree_iterator(btree, line = position.line, column = position.column)
-	_, _ = btree_iter(&iter)
+	_, _  = btree_iter(&iter)
 	return iter.offset
 }
 
@@ -414,11 +414,23 @@ btree_iterator :: proc(btree: ^BTree, offset := -1, line := -1, column := -1) ->
 }
 
 @(require_results)
+btree_get_rune :: proc(btree: BTree, offset: int) -> rune {
+	index, offset := btree_find_leaf(btree, offset)
+	leaf          := btree.leaves[index]
+	r, _          := utf8.decode_rune(leaf.data[offset:])
+	return r
+}
+
+@(require_results)
 btree_iter :: proc(iter: ^BTree_Iterator, back := false) -> (r: rune, cond: bool) {
 	iter.position = position_after(iter.position, iter.last, iter.btree.tab_width)
 	defer iter.last = r
 
 	iter.offset = iter.next_offset
+
+	defer if ODIN_DEBUG && cond {
+		assert(btree_get_rune(iter.btree^, iter.offset) == r)
+	}
 
 	for {
 		if iter.leaf < 0 {

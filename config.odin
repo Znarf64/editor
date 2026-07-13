@@ -26,6 +26,7 @@ Style_Key :: enum {
 	Constant,
 	Function,
 	Cursor,
+	Cursor_Secondary,
 
 	Indicator_Normal,
 	Indicator_Visual,
