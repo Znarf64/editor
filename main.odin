@@ -491,6 +491,9 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		iter := btree_iterator(&editor.btree, line = selection.cursor.line)
 		for r in btree_iter(&iter) {
 			next := position_after(iter.position, r, editor.config.tab_width)
+			if next.line > selection.line {
+				break
+			}
 			if next.column > selection.column {
 				if r == '\t' {
 					column = iter.column
