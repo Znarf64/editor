@@ -142,10 +142,11 @@ main :: proc() {
 	defer backend->destroy()
 
 	editor: Editor
-	editor.selections = make([dynamic]Selection, 2)
-	editor.selections[1].line = 1
+	editor.selections     = make([dynamic]Selection, 1)
+	editor.new_selections = make([dynamic]Selection)
 	defer {
 		delete(editor.selections)
+		delete(editor.new_selections)
 		strings.builder_destroy(&editor.leader.sequence)
 		strings.builder_destroy(&editor.picker.input)
 		strings.builder_destroy(&editor.prompt.input)
@@ -508,6 +509,13 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		size.x *= f32(width)
 
 		target := Rect{ min = offset, max = offset + size, }
+
+		if selection.anim == {} {
+			center                    := rect_center(target)
+			selection.anim.current.min = center
+			selection.anim.current.max = center
+		}
+
 		animation_set_target(&selection.anim, target)
 
 		style := Style_Key.Cursor_Secondary
@@ -615,6 +623,19 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
 
 			str = strconv.write_int(buf[:], i64(primary.line + 1), base = 10)
+			x  -= measure_text(&editor.font, str)
+			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
+
+			x -= padding
+
+			str = "sel"
+
+			x  -= measure_text(&editor.font, str)
+			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
+
+			x -= padding
+
+			str = strconv.write_int(buf[:], i64(len(editor.selections)), base = 10)
 			x  -= measure_text(&editor.font, str)
 			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
 		}

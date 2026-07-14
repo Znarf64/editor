@@ -101,9 +101,28 @@ action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 		if editor.repeat_count == 0 {
 			editor.repeat_count = 1
 		}
-		for &selection in editor.selections {
-			motion_apply(editor, &selection, v)
+		cursors := make(map[Position]int, context.temp_allocator)
+		for i := 0; i < len(editor.selections); {
+			selection := &editor.selections[i]
+			motion_apply(editor, selection, v)
+
+			if selection^ in cursors {
+				ordered_remove(&editor.selections, i)
+				if i < editor.primary {
+					editor.primary -= 1
+				}
+			} else {
+				cursors[selection^] = i
+				i                  += 1
+			}
 		}
+		for selection in editor.new_selections {
+			if selection in cursors {
+				continue
+			}
+			append(&editor.selections, selection)
+		}
+		clear(&editor.new_selections)
 		editor.repeat_count = 0
 	case Command:
 		command_execute(editor, v)

@@ -81,6 +81,10 @@ Motion :: enum {
 
 	Show_Hover_Information,
 	Show_Code_Actions,
+
+	Collapse_Selection,
+	Keep_Primary_Selection,
+	Create_Selection_Below,
 }
 
 Motion_Info :: struct {
@@ -165,6 +169,11 @@ motion_descriptions: [Motion]string = {
 
 	.Show_Hover_Information          = "show hover information",
 	.Show_Code_Actions               = "show code actions",
+
+	.Collapse_Selection              = "collapse selection",
+	.Keep_Primary_Selection          = "keep primary selection",
+
+	.Create_Selection_Below          = "create selection below",
 }
 
 Argument_Motion :: enum {
@@ -623,6 +632,19 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		unimplemented()
 	case .Show_Code_Actions:
 		unimplemented()
+	case .Collapse_Selection:
+		selection.anchor = selection.cursor
+	case .Keep_Primary_Selection:
+		selection^ = editor.selections[editor.primary]
+	case .Create_Selection_Below:
+		iter := btree_iterator(&editor.btree, line = selection.line, column = selection.column)
+		_     = btree_iter(&iter) or_break
+		for _ in btree_iter(&iter) {
+			if iter.column == selection.column {
+				append(&editor.new_selections, Selection { position = iter.position, })
+				break
+			}
+		}
 
 	case:
 	}
