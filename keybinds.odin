@@ -3,6 +3,7 @@ package editor
 import runtime "base:runtime"
 
 import strings "core:strings"
+import vmem    "core:mem/virtual"
 
 Key :: enum {
 	Escape,
@@ -108,7 +109,7 @@ action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 
 			if selection^ in cursors {
 				ordered_remove(&editor.selections, i)
-				if i < editor.primary {
+				if i <= editor.primary {
 					editor.primary -= 1
 				}
 			} else {
@@ -122,6 +123,9 @@ action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 			}
 			append(&editor.selections, selection)
 		}
+		if len(editor.new_selections) != 0 {
+			editor.primary = len(editor.selections) - 1
+		}
 		clear(&editor.new_selections)
 		editor.repeat_count = 0
 	case Command:
@@ -129,12 +133,12 @@ action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 		editor.repeat_count = 0
 	case Argument_Motion:
 		editor.leader.motion = v
-		strings.write_string(&editor.leader.sequence, keybind_to_string(keybind))
+		strings.write_string(&editor.leader.sequence, keybind_to_string(keybind, &editor.leader.arena))
 	case Leader_Binds:
 		editor.leader.title  = v.title
 		editor.leader.binds  = v.binds
 		editor.leader.active = true
-		strings.write_string(&editor.leader.sequence, keybind_to_string(keybind))
+		strings.write_string(&editor.leader.sequence, keybind_to_string(keybind, &editor.leader.arena))
 	case []Action:
 		for action in v {
 			action_apply(editor, action, keybind)
@@ -215,9 +219,8 @@ key_names: [Key]string = {
 	._9 = "9",
 }
 
-// may allocate using context.temp_allocator
 @(require_results)
-keybind_to_string :: proc(bind: Keybind) -> string {
+keybind_to_string :: proc(bind: Keybind, arena: ^vmem.Arena) -> string {
 	key := key_names[bind.key]
 	if card(bind.modifiers) == 0 {
 		return key
@@ -237,7 +240,7 @@ keybind_to_string :: proc(bind: Keybind) -> string {
 	strs[i] = key
 	i      += 1
 
-	return strings.concatenate(strs[:i], context.temp_allocator)
+	return strings.concatenate(strs[:i], vmem.arena_allocator(arena))
 }
 
 @(require_results)
@@ -284,16 +287,15 @@ parse_keybind :: proc(s: string) -> (bind: Keybind, ok: bool) {
 	return
 }
 
-// may allocate using context.temp_allocator
 @(require_results)
-action_to_string :: proc(action: Action) -> string {
+action_to_string :: proc(action: Action, arena: ^vmem.Arena) -> string {
 	switch v in action {
 	case []Action:
 		strs := make([]string, len(v))
 		for &str, i in strs {
-			str = action_to_string(v[i])
+			str = action_to_string(v[i], arena)
 		}
-		return strings.concatenate(strs, context.temp_allocator)
+		return strings.concatenate(strs, vmem.arena_allocator(arena))
 	case Leader_Binds:
 		return v.title
 	case Command:

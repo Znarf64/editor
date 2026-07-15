@@ -5,10 +5,12 @@ import fmt     "core:fmt"
 import la      "core:math/linalg"
 import mem     "core:mem"
 import os      "core:os"
+import slice   "core:slice"
 import strconv "core:strconv"
 import strings "core:strings"
 import time    "core:time"
 import unicode "core:unicode"
+import vmem    "core:mem/virtual"
 
 Draw_Command_Rect :: struct {
 	rect:          Rect,
@@ -73,6 +75,10 @@ Prompt_Mode :: enum {
 	Select,
 }
 
+Leader_Entry :: struct {
+	bind, action: string,
+}
+
 Editor :: struct {
 	mode:           Mode,
 
@@ -89,12 +95,17 @@ Editor :: struct {
 	scroll_anim:    Animation(f32),
 
 	leader:         struct {
-		active:   bool,
-		sequence: strings.Builder,
-		binds:    Keybinds,
-		motion:   Argument_Motion,
-		title:    string,
-		rect:     Animation(Rect),
+		active:      bool,
+		sequence:    strings.Builder,
+		binds:       Keybinds,
+		motion:      Argument_Motion,
+		title:       string,
+		entries:     []Leader_Entry,
+		size:        [2]f32,
+		binds_width: f32,
+		rect:        Animation(Rect),
+		alpha:       Animation(f32),
+		arena:       vmem.Arena,
 	},
 
 	picker:         struct {
@@ -152,6 +163,9 @@ main :: proc() {
 		strings.builder_destroy(&editor.prompt.input)
 	}
 
+	err := vmem.arena_init_growing(&editor.leader.arena)
+	assert(err == nil)
+
 	font_ok := font_init(&editor.font, #load("font.ttf"), FONT_HEIGHT, context.allocator)
 	assert(font_ok)
 	defer font_destroy(editor.font)
@@ -208,6 +222,8 @@ main :: proc() {
 
 				defer if !editor.leader.active && editor.leader.motion == nil {
 					strings.builder_reset(&editor.leader.sequence)
+					editor.leader.entries = {}
+					vmem.arena_free_all(&editor.leader.arena)
 				}
 
 				if editor.leader.motion != nil {
@@ -224,9 +240,10 @@ main :: proc() {
 					break
 				}
 
-				binds               := editor.leader.binds if editor.leader.active else editor.config.keybinds[editor.mode]
-				editor.leader.active = false
-				keybind             := Keybind {
+				binds                := editor.leader.binds if editor.leader.active else editor.config.keybinds[editor.mode]
+				editor.leader.active  = false
+				editor.leader.entries = {}
+				keybind              := Keybind {
 					modifiers = e.modifiers,
 					key       = e.key,
 				}
@@ -269,7 +286,8 @@ main :: proc() {
 
 		if prev_scroll != editor.scroll {
 			if primary.line < editor.scroll + 5 || primary.line > editor.scroll + editor.visible_lines - 5 {
-				primary.line -= prev_scroll - editor.scroll
+				primary.line  -= prev_scroll - editor.scroll
+				primary.anchor = primary.position
 				normalize_cursor_position(&editor, primary, true)
 			}
 		}
@@ -442,6 +460,45 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 					style = .Cursor
 				} else {
 					style = .Cursor_Secondary
+				}
+			}
+
+			for selection in editor.selections {
+				@(require_results)
+				position_in_selection :: proc(selection: Selection, position: Position) -> bool {
+					@(require_results)
+					position_in_range :: proc(start, end: Position, position: Position) -> bool {
+						if start.line > position.line {
+							return false
+						}
+						if end.line < position.line {
+							return false
+						}
+
+						if start.line == position.line && start.column > position.column {
+							return false
+						}
+
+						if end.line == position.line && end.column < position.column {
+							return false
+						}
+
+						return true
+					}
+					return position_in_range(selection.anchor, selection.cursor, position) || position_in_range(selection.cursor, selection.anchor, position)
+				}
+
+				if position_in_selection(selection, position) {
+					next_column := position_after(position, char, editor.config.tab_width).column
+					append(instance_buffer, Instance {
+						offset        = {
+							f32(position.column) * cell_size.x + gutter_width,
+							cell_size.y * (f32(position.line - 1) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale),
+						} + padding,
+						size          = cell_size * { f32(max(1, next_column - position.column)), 1, },
+						color         = editor.config.theme[.Selection].bg,
+						border_radius = 0,
+					})
 				}
 			}
 
@@ -689,7 +746,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 	}
 
 	leader_target_rect := Rect {
-		min = (editor.screen_size - 20 - { 0, FONT_HEIGHT + padding * 2, }) - 400,
+		min = (editor.screen_size - 20 - { 0, FONT_HEIGHT + padding * 2, }) - editor.leader.size,
 		max = (editor.screen_size - 20 - { 0, FONT_HEIGHT + padding * 2, }),
 	}
 	if editor.leader.active {
@@ -710,30 +767,69 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		shadow_width  = 16,
 	})
 
+	animation_set_target(&editor.leader.alpha, editor.leader.active && editor.leader.rect.t == 1 ? 1 : 0)
+	leader_alpha := animation_update(&editor.leader.alpha, delta_time, editor.config.popup_animation_speed)
+
 	if editor.leader.active {
 		x := leader_rect.min.x + padding
 		y := leader_rect.min.y + padding
 
-		draw_text(&editor.font, instance_buffer, editor.leader.title, editor.config.theme[.Ident].fg, { x, y + FONT_HEIGHT, })
+		text_color := editor.config.theme[.Ident].fg * { 1, 1, 1, leader_alpha, }
+
+		draw_text(&editor.font, instance_buffer, editor.leader.title, text_color, { x, y + FONT_HEIGHT, })
 		y += FONT_HEIGHT + padding
 
 		append(instance_buffer, Instance {
 			offset = { x, y, },
 			size   = { rect_size(leader_rect).x - padding * 2, 2, },
-			color  = color_from_hex_rgba(0x32363DFF),
+			color  = color_from_hex_rgba(0x32363DFF) * { 1, 1, 1, leader_alpha, },
 		})
 		y += padding + 2
 
-		for bind, action in editor.leader.binds {
-			bind_str   := keybind_to_string(bind)
-			x          := x + draw_text(&editor.font, instance_buffer, bind_str, editor.config.theme[.Ident].fg, { x, y + FONT_HEIGHT, }) + padding
-			x          += draw_text(&editor.font, instance_buffer, "󰁔", editor.config.theme[.Ident].fg, { x, y + FONT_HEIGHT, }) + padding
+		if len(editor.leader.entries) == 0 && len(editor.leader.binds) != 0 {
+			allocator            := vmem.arena_allocator(&editor.leader.arena)
+			editor.leader.entries = make([]Leader_Entry, len(editor.leader.binds), allocator)
 
-			action_str := action_to_string(action)
-			draw_text(&editor.font, instance_buffer, action_str, editor.config.theme[.Ident].fg, { x, y + FONT_HEIGHT, })
+			binds_width:   f32
+			actions_width: f32
+
+			i := 0
+			for bind, action in editor.leader.binds {
+				editor.leader.entries[i] = {
+					bind   = keybind_to_string(bind,  &editor.leader.arena),
+					action = action_to_string(action, &editor.leader.arena),
+				}
+				binds_width   = max(binds_width,   measure_text(&editor.font, editor.leader.entries[i].bind  ))
+				actions_width = max(actions_width, measure_text(&editor.font, editor.leader.entries[i].action))
+
+				i += 1
+			}
+
+			editor.leader.binds_width = binds_width
+
+			editor.leader.size = padding + [2]f32 {
+				binds_width + padding + cell_size.x + padding + actions_width,
+				FONT_HEIGHT + padding + 2 + padding + f32(len(editor.leader.entries)) * (FONT_HEIGHT + padding) - padding,
+			} + padding
+
+			slice.sort_by(editor.leader.entries, proc(a, b: Leader_Entry) -> bool {
+				return a.bind < b.bind
+			})
+		}
+
+		for entry in editor.leader.entries {
+			draw_text(&editor.font, instance_buffer, entry.bind, text_color, { x, y + FONT_HEIGHT, })
+			x := x + editor.leader.binds_width + padding
+			x += draw_text(&editor.font, instance_buffer, "󰁔", text_color, { x, y + FONT_HEIGHT, }) + padding
+
+			draw_text(&editor.font, instance_buffer, entry.action, text_color, { x, y + FONT_HEIGHT, })
 
 			y += FONT_HEIGHT + padding
 		}
+	} else {
+		editor.leader.alpha.target  = 0
+		editor.leader.alpha.current = 0
+		editor.leader.alpha.t       = 1
 	}
 
 	picker_rect := animation_update(&editor.picker.rect, delta_time, editor.config.popup_animation_speed)

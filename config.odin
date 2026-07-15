@@ -27,6 +27,7 @@ Style_Key :: enum {
 	Function,
 	Cursor,
 	Cursor_Secondary,
+	Selection,
 
 	Indicator_Normal,
 	Indicator_Visual,
