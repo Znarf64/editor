@@ -263,44 +263,44 @@ parse_motion :: proc(s: string) -> (motion: Motion, ok: bool) {
 	return
 }
 
-normalize_cursor_position :: proc(editor: ^Editor, selection: ^Selection, vertical_move: bool) {
-	if selection.cursor.column < 0 {
-		selection.cursor.column = 0
-	}
+// normalize_cursor_position :: proc(editor: ^Editor, selection: ^Selection, vertical_move: bool) {
+// 	if selection.cursor.column < 0 {
+// 		selection.cursor.column = 0
+// 	}
 
-	if selection.cursor.line < 0 {
-		selection.cursor.line = 0
-	}
+// 	if selection.cursor.line < 0 {
+// 		selection.cursor.line = 0
+// 	}
 
-	if selection.cursor.line >= int(editor.btree.lines) {
-		selection.cursor.line = int(editor.btree.lines) - 1
-	}
+// 	if selection.cursor.line >= int(editor.btree.lines) {
+// 		selection.cursor.line = int(editor.btree.lines) - 1
+// 	}
 
-	iter := btree_iterator(&editor.btree, line = selection.cursor.line)
-	for r in btree_iter(&iter) {
-		if r == '\t' && !vertical_move {
-			next_column := next_column_after_tab(iter.column, editor.config.tab_width)
-			if selection.cursor.column > iter.column && selection.cursor.column < next_column {
-				selection.cursor.column = iter.column
-				break
-			}
-		}
-		if r == '\n' {
-			if selection.cursor.column > iter.column {
-				selection.cursor.column = iter.column
-			} else if vertical_move {
-				selection.cursor.column = min(selection.cursor.target_column, iter.column)
-				selection.anchor        = selection.cursor
-			}
+// 	iter := btree_iterator(&editor.btree, line = selection.cursor.line)
+// 	for r in btree_iter(&iter) {
+// 		if r == '\t' && !vertical_move {
+// 			next_column := next_column_after_tab(iter.column, editor.config.tab_width)
+// 			if selection.cursor.column > iter.column && selection.cursor.column < next_column {
+// 				selection.cursor.column = iter.column
+// 				break
+// 			}
+// 		}
+// 		if r == '\n' {
+// 			if selection.cursor.column > iter.column {
+// 				selection.cursor.column = iter.column
+// 			} else if vertical_move {
+// 				selection.cursor.column = min(selection.cursor.target_column, iter.column)
+// 				selection.anchor        = selection.cursor
+// 			}
 
-			break
-		}
-	}
+// 			break
+// 		}
+// 	}
 
-	if !vertical_move {
-		selection.cursor.target_column = selection.cursor.column
-	}
-}
+// 	if !vertical_move {
+// 		selection.cursor.target_column = selection.cursor.column
+// 	}
+// }
 
 argument_motion_apply :: proc(editor: ^Editor, motion: Argument_Motion, arg: rune) {
 	for &selection in editor.selections {
@@ -310,52 +310,70 @@ argument_motion_apply :: proc(editor: ^Editor, motion: Argument_Motion, arg: run
 
 argument_motion_apply_single :: proc(editor: ^Editor, selection: ^Selection, motion: Argument_Motion, arg: rune) {
 	vertical_move: bool
-	defer normalize_cursor_position(editor, selection, vertical_move)
+	// defer normalize_cursor_position(editor, selection, vertical_move)
 
 	switch motion {
 	case .Find:
-		iter := btree_iterator(&editor.btree, line = selection.cursor.line, column = selection.cursor.column)
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 		_, _  = btree_iter(&iter)
 		for r in btree_iter(&iter) {
 			if r == arg {
-				selection.cursor.position = { line = iter.line, column = iter.column, }
+				selection.cursor = iter.offset
 				break
 			}
 		}
 	case .Find_Backward:
-		iter := btree_iterator(&editor.btree, line = selection.cursor.line, column = selection.cursor.column)
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 		_, _  = btree_iter(&iter, back = true)
 		for r in btree_iter(&iter, back = true) {
 			if r == arg {
-				selection.cursor.position = btree_offset_to_position(&editor.btree, iter.offset)
+				selection.cursor = iter.offset
 				break
 			}
 		}
 	case .Replace:
 	case .Insert_Character:
-		offset := btree_position_to_offset(&editor.btree, selection.position)
-		btree_insert(&editor.btree, offset, arg)
-		selection.column += 1
+		selection.cursor += btree_insert(&editor.btree, selection.cursor, arg)
 	}
 }
 
-motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
-	vertical_move: bool
-	defer normalize_cursor_position(editor, selection, vertical_move)
+@(require_results)
+position_to_offset_normalized :: proc(editor: ^Editor, position: Position, vertical_move: bool) -> int {
+	position := Position {
+		line   = clamp(position.line, 0, int(editor.btree.lines) - 1),
+		column = max(position.column, 0),
+	}
+	iter := btree_iterator(&editor.btree, line = position.line)
+	for r in btree_iter(&iter) {
+		if iter.column >= position.column || r == '\n' {
+			break
+		}
+	}
+	return iter.offset
+}
 
+motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 	switch motion {
 	case .Cursor_Half_Page_Up:
-		selection.cursor.line -= editor.visible_lines / 2
-		vertical_move       = true
+		position        := btree_offset_to_position(&editor.btree, selection.cursor)
+		position.line   -= editor.visible_lines / 2
+		selection.cursor = position_to_offset_normalized(editor, position, true)
+		selection.anchor = selection.cursor
 	case .Cursor_Half_Page_Down:
-		selection.cursor.line += editor.visible_lines / 2
-		vertical_move       = true
+		position        := btree_offset_to_position(&editor.btree, selection.cursor)
+		position.line   += editor.visible_lines / 2
+		selection.cursor = position_to_offset_normalized(editor, position, true)
+		selection.anchor = selection.cursor
 	case .Cursor_Page_Up:
-		selection.cursor.line -= editor.visible_lines
-		vertical_move       = true
+		position        := btree_offset_to_position(&editor.btree, selection.cursor)
+		position.line   -= editor.visible_lines
+		selection.cursor = position_to_offset_normalized(editor, position, true)
+		selection.anchor = selection.cursor
 	case .Cursor_Page_Down:
-		selection.cursor.line += editor.visible_lines
-		vertical_move       = true
+		position        := btree_offset_to_position(&editor.btree, selection.cursor)
+		position.line   += editor.visible_lines
+		selection.cursor = position_to_offset_normalized(editor, position, true)
+		selection.anchor = selection.cursor
 
 	case .View_Half_Page_Up:
 		editor.scroll -= editor.visible_lines / 2
@@ -367,18 +385,8 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		editor.scroll += editor.visible_lines
 
 	case .Go_To_Matching:
-		iter := btree_iterator(&editor.btree, line = selection.cursor.line)
-		start: rune
-		for r in btree_iter(&iter) {
-			if iter.column == selection.cursor.column {
-				start = r
-				break
-			}
-
-			if r == '\n' {
-				unreachable()
-			}
-		}
+		iter  := btree_iterator(&editor.btree, offset = selection.cursor)
+		start := btree_iter(&iter) or_break
 
 		back := false
 
@@ -429,10 +437,11 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 			}
 		}
 
-		selection.cursor.position = btree_offset_to_position(&editor.btree, iter.offset)
+		selection.cursor = iter.offset
+		selection.anchor = selection.cursor
 
 	case .Match_In_Word:
-		start_offset := btree_position_to_offset(&editor.btree, selection.cursor)
+		start_offset := selection.cursor
 
 		back := btree_iterator(&editor.btree, offset = start_offset)
 		iter := btree_iterator(&editor.btree, offset = start_offset)
@@ -444,7 +453,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 			start_offset = back.offset
 		}
 
-		selection.anchor = btree_offset_to_position(&editor.btree, start_offset)
+		selection.anchor = start_offset
 
 		end_offset := iter.offset
 		for r in btree_iter(&iter) {
@@ -454,11 +463,11 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 			end_offset = iter.offset
 		}
 
-		selection.position = btree_offset_to_position(&editor.btree, end_offset)
+		selection.cursor = end_offset
 
 	case .Match_In_Paragraph:
-		back := btree_iterator(&editor.btree, line = selection.cursor.line)
-		iter := btree_iterator(&editor.btree, line = selection.cursor.line)
+		back := btree_iterator(&editor.btree, offset = selection.cursor)
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 
 		last_was_newline: bool
 		for r in btree_iter(&back, back = true) {
@@ -472,7 +481,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 			}
 		}
 
-		selection.anchor = btree_offset_to_position(&editor.btree, back.offset + 2)
+		selection.anchor = back.offset + 2 // this is fine, since the last two characters will have been single-byte newline characters
 
 		last_was_newline = false
 		for r in btree_iter(&iter) {
@@ -486,97 +495,121 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 			}
 		}
 
-		selection.position = btree_offset_to_position(&editor.btree, iter.offset - 1)
+		selection.cursor = iter.offset - 1
 
 	case .Match_In_Change:
 		unimplemented()
 
 	case .Go_To_Line:
-		selection.cursor = { line = editor.repeat_count - 1, }
-		selection.anchor = selection.position
+		selection.cursor = position_to_offset_normalized(editor, { line = editor.repeat_count - 1, }, false)
+		selection.anchor = selection.cursor
 	case .Go_To_File_End:
-		selection.cursor = { column = 0, line = int(editor.btree.lines) - 1, }
-		selection.anchor = selection.position
+		selection.cursor = position_to_offset_normalized(editor, { line = int(editor.btree.lines) - 1, }, false)
+		selection.anchor = selection.cursor
 	case .Go_To_Line_Start:
-		selection.cursor.column = 0
-		selection.anchor        = selection.position
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
+		for r in btree_iter(&iter, back = true) {
+			if r == '\n' {
+				selection.cursor = iter.offset + 1
+				selection.anchor = selection.cursor
+				return
+			}
+		}
+		selection.cursor = 0
+		selection.anchor = 0
 	case .Go_To_Line_End:
-		iter := btree_iterator(&editor.btree, line = selection.cursor.line)
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 		for r in btree_iter(&iter) {
 			if r == '\n' {
-				selection.cursor.column = iter.column - 1
+				selection.cursor = iter.offset - 1
 				break
 			}
 		}
-		selection.anchor = selection.position
+		selection.anchor = selection.cursor
 	case .Go_To_Line_Start_Non_Whitespace:
-		iter := btree_iterator(&editor.btree, line = selection.cursor.line)
-		for r in btree_iter(&iter) {
-			if r == '\n' || !unicode.is_space(r) {
-				break
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
+		space_only := true
+		for r in btree_iter(&iter, back = true) {
+			is_space    := unicode.is_space(r)
+			space_only &&= is_space
+			if !is_space {
+				selection.cursor = iter.offset
+				selection.anchor = selection.cursor
+			}
+			if r == '\n' {
+				if space_only {
+					iter := btree_iterator(&editor.btree, offset = selection.cursor)
+					for r in btree_iter(&iter) {
+						if !unicode.is_space(r) {
+							selection.cursor = iter.offset
+							selection.anchor = selection.cursor
+							return
+						}
+					}
+				}
+				return
 			}
 		}
-		selection.cursor.column = iter.column
-		selection.anchor        = selection.position
+		selection.cursor = 0
+		selection.anchor = 0
 
 	case .Character_Down:
-		selection.line  += editor.repeat_count
-		selection.anchor = selection.position
-		vertical_move    = true
+		position        := btree_offset_to_position(&editor.btree, selection.cursor)
+		position.line   += editor.repeat_count
+		selection.cursor = position_to_offset_normalized(editor, position, true)
+		selection.anchor = selection.cursor
 	case .Character_Up:
-		selection.line  -= editor.repeat_count
-		selection.anchor = selection.position
-		vertical_move    = true
+		position        := btree_offset_to_position(&editor.btree, selection.cursor)
+		position.line   -= editor.repeat_count
+		selection.cursor = position_to_offset_normalized(editor, position, true)
+		selection.anchor = selection.cursor
 	case .Character_Left:
-		iter := btree_iterator(&editor.btree, line = selection.line, column = selection.column)
-		if iter.column > selection.column { // we are "inside" of a tab
-			_ = btree_iter(&iter, back = true) or_break
-		}
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 		for _ in 0 ..< editor.repeat_count {
 			_ = btree_iter(&iter, back = true) or_break
 		}
-		selection.position = btree_offset_to_position(&editor.btree, iter.offset)
-		selection.anchor   = selection.position
+		selection.cursor = iter.offset
+		selection.anchor = selection.cursor
 	case .Character_Right:
-		iter := btree_iterator(&editor.btree, line = selection.line, column = selection.column)
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 		for _ in 0 ..= editor.repeat_count {
 			_ = btree_iter(&iter) or_break
 		}
-		selection.position = btree_offset_to_position(&editor.btree, iter.offset)
-		selection.anchor   = selection.position
+		selection.cursor = iter.offset
+		selection.anchor = selection.cursor
 
 	case .Select_Line:
-		if position_before(selection.position, selection.anchor) {
-			selection.position, selection.anchor = selection.anchor, selection.position
-		}
+		// if position_before(selection.position, selection.anchor) {
+		// 	selection.position, selection.anchor = selection.anchor, selection.position
+		// }
 
-		iter := btree_iterator(&editor.btree, line = selection.cursor.line)
-		for r in btree_iter(&iter) {
-			if r == '\n' {
-				break
-			}
-		}
+		// iter := btree_iterator(&editor.btree, line = selection.cursor.line)
+		// for r in btree_iter(&iter) {
+		// 	if r == '\n' {
+		// 		break
+		// 	}
+		// }
 
-		if selection.anchor.column != 0 || selection.column != iter.column {
-			selection.anchor.column = 0
-			selection.cursor.column = iter.column
-			break
-		}
+		// if selection.anchor.column != 0 || selection.column != iter.column {
+		// 	selection.anchor.column = 0
+		// 	selection.cursor.column = iter.column
+		// 	break
+		// }
 
-		for r in btree_iter(&iter) {
-			if r == '\n' {
-				break
-			}
-		}
+		// for r in btree_iter(&iter) {
+		// 	if r == '\n' {
+		// 		break
+		// 	}
+		// }
 
-		selection.anchor.column = 0
-		selection.position      = iter.position
+		// selection.anchor.column = 0
+		// selection.position      = iter.position
 
 	case .Select_All:
-		selection.anchor = { column = 0, line = 0, }
-		selection.cursor = { column = 0, line = int(editor.btree.lines) - 1, }
+		selection.anchor = 0
+		selection.cursor = position_to_offset_normalized(editor, { line = int(editor.btree.lines) - 1, }, false)
 	case .Select_Word_End_Forward:
-		iter := btree_iterator(&editor.btree, line = selection.line, column = selection.column)
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 		r    := btree_iter(&iter) or_break
 
 		if unicode.is_space(r) {
@@ -586,22 +619,22 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 				}
 			}
 		}
-		selection.anchor = iter.position
+		selection.anchor = iter.offset
 
-		pos := iter.position
+		pos := iter.offset
 
 		for r in btree_iter(&iter) {
 			if !unicode.is_letter(r) && !unicode.is_digit(r) && r != '_' {
 				break
 			} else {
-				pos = iter.position
+				pos = iter.offset
 			}
 		}
 
-		selection.position = pos
+		selection.cursor = pos
 
 	case .Select_Word_Forward:
-		iter := btree_iterator(&editor.btree, line = selection.line, column = selection.column)
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 		r    := btree_iter(&iter) or_break
 
 		if unicode.is_space(r) {
@@ -611,7 +644,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 				}
 			}
 		}
-		selection.anchor = iter.position
+		selection.anchor = iter.offset
 
 		for r in btree_iter(&iter) {
 			if !unicode.is_letter(r) && !unicode.is_digit(r) && r != '_' {
@@ -619,9 +652,9 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 			}
 		}
 
-		selection.position = iter.position
+		selection.cursor = iter.offset
 	case .Select_Word_Backward:
-		iter := btree_iterator(&editor.btree, line = selection.line, column = selection.column)
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 		r    := btree_iter(&iter, back = true) or_break
 
 		if unicode.is_space(r) {
@@ -631,7 +664,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 				}
 			}
 		}
-		selection.anchor = btree_offset_to_position(&editor.btree, iter.offset)
+		selection.anchor = iter.offset
 
 		for r in btree_iter(&iter, back = true) {
 			if !unicode.is_letter(r) && !unicode.is_digit(r) && r != '_' {
@@ -642,7 +675,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		_, _ = btree_iter(&iter)
 		_, _ = btree_iter(&iter)
 
-		selection.position = btree_offset_to_position(&editor.btree, iter.offset)
+		selection.cursor = iter.offset
 
 	case .Search:
 		strings.builder_reset(&editor.prompt.input)
@@ -679,11 +712,10 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 	case .Case_To_Screaming_Snake:
 
 	case .Delete:
-		offset := btree_position_to_offset(&editor.btree, selection)
-		iter   := btree_iterator(&editor.btree, offset = offset)
-		r, _   := btree_iter(&iter)
-		_, n   := utf8.encode_rune(r)
-		btree_remove_range(&editor.btree, offset, offset + n)
+		iter  := btree_iterator(&editor.btree, offset = selection.cursor)
+		r, _  := btree_iter(&iter)
+		_, n  := utf8.encode_rune(r)
+		btree_remove_range(&editor.btree, selection.cursor, selection.cursor + n)
 
 	case .Paste:
 	case .Yank:
@@ -691,38 +723,38 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 	case .Insert:
 		editor.mode = .Insert
 	case .Insert_After:
-		selection.column += 1
-		editor.mode           = .Insert
+		// selection.column += 1
+		// editor.mode       = .Insert
 	case .Visual:
 		editor.mode = .Visual
 	case .Normal:
 		editor.mode = .Normal
 	case .Insert_At_Line_Start:
-		iter := btree_iterator(&editor.btree, line = selection.line)
-		for r in btree_iter(&iter) {
-			if r == '\n' || !unicode.is_space(r) {
-				break
-			}
-		}
-		selection.column = iter.column
-		editor.mode          = .Insert
+		// iter := btree_iterator(&editor.btree, line = selection.line)
+		// for r in btree_iter(&iter) {
+		// 	if r == '\n' || !unicode.is_space(r) {
+		// 		break
+		// 	}
+		// }
+		// selection.column = iter.column
+		// editor.mode          = .Insert
 	case .Insert_At_Line_End:
-		iter := btree_iterator(&editor.btree, line = selection.line)
-		for r in btree_iter(&iter) {
-			if r == '\n' {
-				selection.column = iter.column
-				break
-			}
-		}
-		editor.mode = .Insert
+		// iter := btree_iterator(&editor.btree, line = selection.line)
+		// for r in btree_iter(&iter) {
+		// 	if r == '\n' {
+		// 		selection.column = iter.column
+		// 		break
+		// 	}
+		// }
+		// editor.mode = .Insert
 	case .Insert_Newline:
-		offset               := btree_position_to_offset(&editor.btree, selection)
-		btree_insert(&editor.btree, offset, '\n')
-		selection.column += 1
+		// offset               := btree_position_to_offset(&editor.btree, selection)
+		// btree_insert(&editor.btree, offset, '\n')
+		// selection.column += 1
 	case .Insert_Tab:
-		offset               := btree_position_to_offset(&editor.btree, selection)
-		btree_insert(&editor.btree, offset, '\t')
-		selection.column += 1
+		// offset               := btree_position_to_offset(&editor.btree, selection)
+		// btree_insert(&editor.btree, offset, '\t')
+		// selection.column += 1
 
 	case .Open_Below:
 		// iter := btree_iterator(&editor.btree, line = selection.line)
@@ -771,11 +803,11 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 	case .Keep_Primary_Selection:
 		selection^ = editor.selections[editor.primary]
 	case .Create_Selection_Below:
-		iter := btree_iterator(&editor.btree, line = selection.line, column = selection.column)
-		_     = btree_iter(&iter) or_break
+		position := btree_offset_to_position(&editor.btree, selection.cursor)
+		iter     := btree_iterator(&editor.btree, line = position.line + 1)
 		for _ in btree_iter(&iter) {
-			if iter.column == selection.column {
-				append(&editor.new_selections, Selection { position = iter.position, anchor = iter.position, })
+			if iter.column == position.column {
+				append(&editor.new_selections, Selection { cursor = iter.offset, anchor = iter.offset, })
 				break
 			}
 		}
@@ -790,7 +822,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		unimplemented()
 
 	case .Flip_Selection:
-		selection.anchor, selection.position = selection.position , selection.anchor
+		selection.anchor, selection.cursor = selection.cursor , selection.anchor
 
 	case:
 	}

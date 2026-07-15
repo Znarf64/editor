@@ -43,14 +43,10 @@ Position :: struct {
 }
 
 Selection :: struct {
-	using cursor: Cursor,
-	anchor:       Position,
-	anim:         Animation(Rect),
-}
-
-Cursor :: struct {
-	using position: Position,
-	target_column:  int,
+	cursor:        int,
+	anchor:        int,
+	anim:          Animation(Rect),
+	target_column: int,
 }
 
 Mode :: enum {
@@ -285,20 +281,22 @@ main :: proc() {
 		primary := &editor.selections[editor.primary]
 
 		if prev_scroll != editor.scroll {
-			if primary.line < editor.scroll + 5 || primary.line > editor.scroll + editor.visible_lines - 5 {
-				primary.line  -= prev_scroll - editor.scroll
-				primary.anchor = primary.position
-				normalize_cursor_position(&editor, primary, true)
+			primary_position := btree_offset_to_position(&editor.btree, primary.cursor)
+			if primary_position.line < editor.scroll + 5 || primary_position.line > editor.scroll + editor.visible_lines - 5 {
+				primary_position.line -= prev_scroll - editor.scroll
+				primary.cursor         = position_to_offset_normalized(&editor, primary_position, true)
+				primary.anchor         = primary.cursor
 			}
 		}
 
 		if prev_primary != primary^ {
-			if editor.scroll < primary.line - editor.visible_lines + 5 {
-				editor.scroll = primary.line - editor.visible_lines + 5
+			primary_line := btree_offset_to_line(&editor.btree, primary.cursor)
+			if editor.scroll < primary_line - editor.visible_lines + 5 {
+				editor.scroll = primary_line - editor.visible_lines + 5
 			}
 
-			if editor.scroll > primary.line - 5 {
-				editor.scroll = primary.line - 5
+			if editor.scroll > primary_line - 5 {
+				editor.scroll = primary_line - 5
 			}
 		}
 
@@ -391,6 +389,8 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 
 	iter := btree_iterator(&editor.btree, line = position.line)
 
+	offset := iter.next_offset
+
 	b := strings.builder_make(context.temp_allocator)
 
 	for r in btree_iter(&iter) {
@@ -400,7 +400,8 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		strings.write_rune(&b, r)
 	}
 
-	primary := editor.selections[editor.primary]
+	primary          := editor.selections[editor.primary]
+	primary_position := btree_offset_to_position(&editor.btree, primary.cursor)
 
 	text := strings.to_string(b)
 
@@ -409,7 +410,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		keywords = editor.config.styles,
 	}
 
-	cursors := make(map[Position]int, context.temp_allocator)
+	cursors := make(map[int]int, context.temp_allocator)
 	for selection, i in editor.selections {
 		cursors[selection.cursor] = i
 	}
@@ -423,8 +424,10 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 
 		start_column := position.column
 
-		for char in text[start:highlighter.pos] {
+		for char, sub_offset in text[start:highlighter.pos] {
 			defer position = position_after(position, char, editor.config.tab_width)
+
+			offset := offset + start + sub_offset
 
 			draw_gutter: if position.column == 0 {
 				y := cell_size.y * (f32(position.line) - scroll) + FONT_HEIGHT + padding
@@ -434,8 +437,8 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 				}
 
 				l := position.line
-				if editor.config.relative_line_numbers && primary.line != position.line {
-					l = abs(primary.line - position.line) - 1
+				if editor.config.relative_line_numbers && primary_position.line != position.line {
+					l = abs(primary_position.line - position.line) - 1
 				}
 
 				@(static)
@@ -455,7 +458,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 			}
 
 			style := style
-			if id, ok := cursors[position]; ok {
+			if id, ok := cursors[offset]; ok {
 				if id == editor.primary {
 					style = .Cursor
 				} else {
@@ -465,30 +468,15 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 
 			for selection in editor.selections {
 				@(require_results)
-				position_in_selection :: proc(selection: Selection, position: Position) -> bool {
+				offset_in_selection :: proc(selection: Selection, offset: int) -> bool {
 					@(require_results)
-					position_in_range :: proc(start, end: Position, position: Position) -> bool {
-						if start.line > position.line {
-							return false
-						}
-						if end.line < position.line {
-							return false
-						}
-
-						if start.line == position.line && start.column > position.column {
-							return false
-						}
-
-						if end.line == position.line && end.column < position.column {
-							return false
-						}
-
-						return true
+					offset_in_range :: proc(start, end: int, offset: int) -> bool {
+						return start < offset && offset < end
 					}
-					return position_in_range(selection.anchor, selection.cursor, position) || position_in_range(selection.cursor, selection.anchor, position)
+					return offset_in_range(selection.anchor - 1, selection.cursor, offset) || offset_in_range(selection.cursor, selection.anchor + 1, offset)
 				}
 
-				if position_in_selection(selection, position) {
+				if offset_in_selection(selection, offset) {
 					next_column := position_after(position, char, editor.config.tab_width).column
 					append(instance_buffer, Instance {
 						offset        = {
@@ -541,28 +529,29 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 	}
 
 	for &selection, i in editor.selections {
-		column := selection.column
-		line   := selection.line
+		position := btree_offset_to_position(&editor.btree, selection.cursor)
+		// column := selection.column
+		// line   := selection.line
 		width  := 1
 
-		iter := btree_iterator(&editor.btree, line = selection.cursor.line)
-		for r in btree_iter(&iter) {
-			next := position_after(iter.position, r, editor.config.tab_width)
-			if next.line > selection.line {
-				break
-			}
-			if next.column > selection.column {
-				if r == '\t' {
-					column = iter.column
-					width  = next_column_after_tab(selection.column, editor.config.tab_width) - iter.column
-				}
-				break
-			}
-		}
+		// iter := btree_iterator(&editor.btree, line = selection.cursor.line)
+		// for r in btree_iter(&iter) {
+		// 	next := position_after(iter.position, r, editor.config.tab_width)
+		// 	if next.line > selection.line {
+		// 		break
+		// 	}
+		// 	if next.column > selection.column {
+		// 		if r == '\t' {
+		// 			column = iter.column
+		// 			width  = next_column_after_tab(selection.column, editor.config.tab_width) - iter.column
+		// 		}
+		// 		break
+		// 	}
+		// }
 
 		offset := [2]f32 {
-			f32(column) * cell_size.x + gutter_width,
-			cell_size.y * f32(line - 1) + la.round(f32(editor.font.ascender) * editor.font.scale),
+			f32(position.column) * cell_size.x + gutter_width,
+			cell_size.y * f32(position.line - 1) + la.round(f32(editor.font.ascender) * editor.font.scale),
 		} + padding
 
 		size   := cell_size
@@ -673,7 +662,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 			buf: [32]byte
 			str: string
 
-			str = strconv.write_int(buf[:], i64(primary.column + 1), base = 10)
+			str = strconv.write_int(buf[:], i64(primary_position.column + 1), base = 10)
 			x  -= measure_text(&editor.font, str)
 			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
 
@@ -682,7 +671,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 			x -= measure_text(&editor.font, str)
 			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
 
-			str = strconv.write_int(buf[:], i64(primary.line + 1), base = 10)
+			str = strconv.write_int(buf[:], i64(primary_position.line + 1), base = 10)
 			x  -= measure_text(&editor.font, str)
 			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
 

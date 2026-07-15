@@ -149,10 +149,11 @@ btree_insert :: proc {
 	btree_insert_rune,
 }
 
-btree_insert_string :: proc(btree: ^BTree, offset: int, data: string) {
+btree_insert_string :: proc(btree: ^BTree, offset: int, data: string) -> (n: int) {
 	#reverse for r in data {
-		btree_insert_rune(btree, offset, r)
+		n += btree_insert_rune(btree, offset, r)
 	}
+	return n
 }
 
 @(require_results)
@@ -164,7 +165,7 @@ btree_info_add :: proc(a, b: BTree_Info) -> BTree_Info {
 	}
 }
 
-btree_insert_rune :: proc(btree: ^BTree, offset: int, r: rune) {
+btree_insert_rune :: proc(btree: ^BTree, offset: int, r: rune) -> int {
 	@(require_results)
 	insert :: proc(btree: ^BTree, index: BTree_Index, offset: int, data: []u8, info: BTree_Info) -> (new_info: BTree_Info, new_node: BTree_Index, new: bool) {
 		if index.leaf {
@@ -229,6 +230,8 @@ btree_insert_rune :: proc(btree: ^BTree, offset: int, r: rune) {
 		btree.root = new_node
 		assert(new_info == btree.info)
 	}
+
+	return n
 }
 
 @(require_results)
