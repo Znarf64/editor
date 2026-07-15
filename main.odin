@@ -5,6 +5,7 @@ import fmt     "core:fmt"
 import la      "core:math/linalg"
 import mem     "core:mem"
 import os      "core:os"
+import regex   "core:text/regex"
 import slice   "core:slice"
 import strconv "core:strconv"
 import strings "core:strings"
@@ -216,6 +217,45 @@ main :: proc() {
 					break
 				}
 
+				if editor.mode == .Prompt {
+					#partial switch e.key {
+					case .Escape:
+						editor.mode = .Normal
+						strings.builder_reset(&editor.prompt.input)
+					case .Enter:
+						pattern, err := regex.create(strings.to_string(editor.prompt.input), flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
+
+						b := strings.builder_make(context.temp_allocator)
+						for selection in editor.selections {
+							start := min(selection.cursor, selection.anchor)
+							end   := max(selection.cursor, selection.anchor)
+
+							iter := btree_iterator(&editor.btree, offset = start)
+							for r in btree_iter(&iter) {
+								if iter.offset > end {
+									break
+								}
+								strings.write_rune(&b, r)
+							}
+
+							capture, ok := regex.match(pattern, strings.to_string(b), context.temp_allocator)
+							fmt.println(capture, ok)
+							strings.builder_reset(&b)
+						}
+
+						if err != nil {
+							fmt.println(err)
+							break
+						}
+
+						editor.mode = .Normal
+						strings.builder_reset(&editor.prompt.input)
+					case .Backspace:
+						strings.pop_rune(&editor.prompt.input)
+					}
+					break
+				}
+
 				defer if !editor.leader.active && editor.leader.motion == nil {
 					strings.builder_reset(&editor.leader.sequence)
 					editor.leader.entries = {}
@@ -284,7 +324,7 @@ main :: proc() {
 			primary_position := btree_offset_to_position(&editor.btree, primary.cursor)
 			if primary_position.line < editor.scroll + 5 || primary_position.line > editor.scroll + editor.visible_lines - 5 {
 				primary_position.line -= prev_scroll - editor.scroll
-				primary.cursor         = position_to_offset_normalized(&editor, primary_position, true)
+				position_to_offset_normalized(&editor, primary_position, true, primary)
 				primary.anchor         = primary.cursor
 			}
 		}
