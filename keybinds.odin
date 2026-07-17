@@ -102,7 +102,7 @@ action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 		if editor.repeat_count == 0 {
 			editor.repeat_count = 1
 		}
-		cursors := make(map[int]int, context.temp_allocator)
+		cursors := make(map[Offset]int, context.temp_allocator)
 		for i := 0; i < len(editor.selections); {
 			selection := &editor.selections[i]
 			motion_apply(editor, selection, v)

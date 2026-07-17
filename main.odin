@@ -28,6 +28,11 @@ Draw_Command_Text :: struct {
 	color:    [4]f32,
 }
 
+Draw_Command :: union {
+	Draw_Command_Rect,
+	Draw_Command_Text,
+}
+
 Instance :: struct {
 	offset:        [2]f32,
 	size:          [2]f32,
@@ -44,10 +49,10 @@ Position :: struct {
 }
 
 Selection :: struct {
-	cursor:        int,
-	anchor:        int,
+	cursor:        Offset,
+	anchor:        Offset,
 	anim:          Animation(Rect),
-	target_column: int,
+	target_cursor: Offset, // The offset of the position that dicatates the visual target column, so effective the offset that resulted from the last horizontal movement
 }
 
 Mode :: enum {
@@ -324,7 +329,7 @@ main :: proc() {
 			primary_position := btree_offset_to_position(&editor.btree, primary.cursor)
 			if primary_position.line < editor.scroll + 5 || primary_position.line > editor.scroll + editor.visible_lines - 5 {
 				primary_position.line -= prev_scroll - editor.scroll
-				position_to_offset_normalized(&editor, primary_position, true, primary)
+				_                      = position_to_offset_normalized(&editor, primary_position, true, primary)
 				primary.anchor         = primary.cursor
 			}
 		}
@@ -450,7 +455,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		keywords = editor.config.styles,
 	}
 
-	cursors := make(map[int]int, context.temp_allocator)
+	cursors := make(map[Offset]int, context.temp_allocator)
 	for selection, i in editor.selections {
 		cursors[selection.cursor] = i
 	}
@@ -467,7 +472,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		for char, sub_offset in text[start:highlighter.pos] {
 			defer position = position_after(position, char, editor.config.tab_width)
 
-			offset := offset + start + sub_offset
+			offset := offset + Offset(start + sub_offset)
 
 			draw_gutter: if position.column == 0 {
 				y := cell_size.y * (f32(position.line) - scroll) + FONT_HEIGHT + padding
@@ -508,9 +513,9 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 
 			for selection in editor.selections {
 				@(require_results)
-				offset_in_selection :: proc(selection: Selection, offset: int) -> bool {
+				offset_in_selection :: proc(selection: Selection, offset: Offset) -> bool {
 					@(require_results)
-					offset_in_range :: proc(start, end: int, offset: int) -> bool {
+					offset_in_range :: proc(start, end, offset: Offset) -> bool {
 						return start < offset && offset < end
 					}
 					return offset_in_range(selection.anchor - 1, selection.cursor, offset) || offset_in_range(selection.cursor, selection.anchor + 1, offset)

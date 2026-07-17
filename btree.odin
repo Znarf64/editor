@@ -14,6 +14,8 @@ BTREE_MIN_NODES :: (BTREE_MAX_NODES + 1) / 2
 
 #assert(BTREE_LEAF_SIZE >= 4)
 
+Offset :: distinct i32
+
 BTree :: struct {
 	using info: BTree_Info,
 	tab_width:  int,
@@ -149,7 +151,7 @@ btree_insert :: proc {
 	btree_insert_rune,
 }
 
-btree_insert_string :: proc(btree: ^BTree, offset: int, data: string) -> (n: int) {
+btree_insert_string :: proc(btree: ^BTree, offset: Offset, data: string) -> (n: Offset) {
 	#reverse for r in data {
 		n += btree_insert_rune(btree, offset, r)
 	}
@@ -165,15 +167,15 @@ btree_info_add :: proc(a, b: BTree_Info) -> BTree_Info {
 	}
 }
 
-btree_insert_rune :: proc(btree: ^BTree, offset: int, r: rune) -> int {
+btree_insert_rune :: proc(btree: ^BTree, offset: Offset, r: rune) -> Offset {
 	@(require_results)
-	insert :: proc(btree: ^BTree, index: BTree_Index, offset: int, data: []u8, info: BTree_Info) -> (new_info: BTree_Info, new_node: BTree_Index, new: bool) {
+	insert :: proc(btree: ^BTree, index: BTree_Index, offset: Offset, data: []u8, info: BTree_Info) -> (new_info: BTree_Info, new_node: BTree_Index, new: bool) {
 		if index.leaf {
 			leaf  := &btree.leaves[index.index]
 			space := BTREE_LEAF_SIZE - len(bytes.truncate_to_byte(leaf.data[:], 0))
 
 			if len(data) <= space {
-				copy(leaf.data[offset + len(data):], leaf.data[offset:])
+				copy(leaf.data[offset + Offset(len(data)):], leaf.data[offset:])
 				copy(leaf.data[offset:], data)
 
 				return
@@ -201,13 +203,13 @@ btree_insert_rune :: proc(btree: ^BTree, offset: int, r: rune) -> int {
 				break
 			}
 
-			if int(node_info.bytes) > offset {
+			if Offset(node_info.bytes) > offset {
 				node_info               = btree_info_add(node_info, info)
 				child_info, child_node := insert(btree, node.children[i], offset, data, info) or_return // if there is no new node we are done
 				unimplemented()
 			}
 
-			offset -= int(node_info.bytes)
+			offset -= Offset(node_info.bytes)
 		}
 
 		child_info, child_node := insert(btree, node.children[n_nodes], offset, data, info) or_return
@@ -231,11 +233,11 @@ btree_insert_rune :: proc(btree: ^BTree, offset: int, r: rune) -> int {
 		assert(new_info == btree.info)
 	}
 
-	return n
+	return Offset(n)
 }
 
 @(require_results)
-btree_line_to_offset :: proc(btree: ^BTree, line: int) -> (offset: int) {
+btree_line_to_offset :: proc(btree: ^BTree, line: int) -> (offset: Offset) {
 	index := btree.root
 	line  := line
 
@@ -252,7 +254,7 @@ btree_line_to_offset :: proc(btree: ^BTree, line: int) -> (offset: int) {
 				index = node.children[i]
 				continue find_leaf
 			}
-			offset += int(info.bytes)
+			offset += Offset(info.bytes)
 			line   -= int(info.lines)
 		}
 		index = node.children[n]
@@ -268,7 +270,7 @@ btree_line_to_offset :: proc(btree: ^BTree, line: int) -> (offset: int) {
 
 		r, n   := utf8.decode_rune(data)
 		data    = data[n:]
-		offset += n
+		offset += Offset(n)
 		if r == '\n' {
 			line -= 1
 		}
@@ -278,7 +280,7 @@ btree_line_to_offset :: proc(btree: ^BTree, line: int) -> (offset: int) {
 }
 
 @(require_results)
-btree_offset_to_line :: proc(btree: ^BTree, offset: int) -> (line: int) {
+btree_offset_to_line :: proc(btree: ^BTree, offset: Offset) -> (line: int) {
 	index  := btree.root
 	offset := offset
 
@@ -291,12 +293,12 @@ btree_offset_to_line :: proc(btree: ^BTree, offset: int) -> (line: int) {
 			}
 			n += 1
 
-			if int(info.bytes) >= offset {
+			if Offset(info.bytes) >= offset {
 				index = node.children[i]
 				continue find_leaf
 			}
 			line   += int(info.lines)
-			offset -= int(info.bytes)
+			offset -= Offset(info.bytes)
 		}
 		index = node.children[n]
 	}
@@ -310,15 +312,11 @@ btree_offset_to_line :: proc(btree: ^BTree, offset: int) -> (line: int) {
 		}
 	}
 
-	if offset > 0 && data[offset - 1] == '\n' {
-		line -= 1
-	}
-
 	return
 }
 
 @(require_results)
-btree_offset_to_position :: proc(btree: ^BTree, offset: int) -> (position: Position) {
+btree_offset_to_position :: proc(btree: ^BTree, offset: Offset) -> (position: Position) {
 	line := btree_offset_to_line(btree, offset)
 	iter := btree_iterator(btree, line = line)
 
@@ -330,18 +328,18 @@ btree_offset_to_position :: proc(btree: ^BTree, offset: int) -> (position: Posit
 }
 
 @(require_results)
-btree_position_to_offset :: proc(btree: ^BTree, position: Position) -> (offset: int) {
+btree_position_to_offset :: proc(btree: ^BTree, position: Position) -> (offset: Offset) {
 	iter := btree_iterator(btree, line = position.line, column = position.column)
 	_, _  = btree_iter(&iter)
 	return iter.offset
 }
 
-btree_remove_range :: proc(btree: ^BTree, start, end: int) {
+btree_remove_range :: proc(btree: ^BTree, start, end: Offset) {
 	unimplemented()
 }
 
 @(require_results)
-btree_find_leaf :: proc(btree: BTree, offset: int) -> (leaf_index: int, leaf_offset: int) {
+btree_find_leaf :: proc(btree: BTree, offset: Offset) -> (leaf_index: int, leaf_offset: int) {
 	index  := btree.root
 	offset := offset
 
@@ -354,16 +352,16 @@ btree_find_leaf :: proc(btree: BTree, offset: int) -> (leaf_index: int, leaf_off
 			}
 			n += 1
 
-			if int(info.bytes) > offset {
+			if Offset(info.bytes) > offset {
 				index = node.children[i]
 				continue find_leaf
 			}
-			offset -= int(info.bytes)
+			offset -= Offset(info.bytes)
 		}
 		index = node.children[n]
 	}
 
-	return int(index.index), offset
+	return int(index.index), int(offset)
 }
 
 btree_destroy :: proc(btree: BTree) {
@@ -378,13 +376,13 @@ BTree_Iterator :: struct {
 
 	last:           rune,
 
-	next_offset:    int,
-	offset:         int,
+	next_offset:    Offset,
+	offset:         Offset,
 	using position: Position,
 }
 
 @(require_results)
-btree_iterator :: proc(btree: ^BTree, offset := -1, line := -1, column := -1) -> (iter: BTree_Iterator) {
+btree_iterator :: proc(btree: ^BTree, offset: Offset = -1, line := -1, column := -1) -> (iter: BTree_Iterator) {
 	assert(offset == -1 || line == -1)
 	assert(column == -1 || line != -1)
 
@@ -417,7 +415,7 @@ btree_iterator :: proc(btree: ^BTree, offset := -1, line := -1, column := -1) ->
 }
 
 @(require_results)
-btree_get_rune :: proc(btree: BTree, offset: int) -> rune {
+btree_get_rune :: proc(btree: BTree, offset: Offset) -> rune {
 	index, offset := btree_find_leaf(btree, offset)
 	leaf          := btree.leaves[index]
 	r, _          := utf8.decode_rune(leaf.data[offset:])
@@ -457,7 +455,7 @@ btree_iter :: proc(iter: ^BTree_Iterator, back := false) -> (r: rune, cond: bool
 			r, n = utf8.decode_last_rune(data)
 			assert(r != utf8.RUNE_ERROR, "failed to decode utf8 rune")
 
-			iter.next_offset  = iter.offset - n
+			iter.next_offset  = iter.offset - Offset(n)
 			iter.leaf_offset -= n
 			iter.offset       = iter.next_offset
 			assert(iter.leaf_offset >= 0)
@@ -474,7 +472,7 @@ btree_iter :: proc(iter: ^BTree_Iterator, back := false) -> (r: rune, cond: bool
 			r, n = utf8.decode_rune(data)
 			assert(r != utf8.RUNE_ERROR, "failed to decode utf8 rune")
 
-			iter.next_offset  = iter.offset + n
+			iter.next_offset  = iter.offset + Offset(n)
 			iter.leaf_offset += n
 		}
 
@@ -523,7 +521,7 @@ btree_test_iter :: proc(t: ^testing.T) {
 	data  := #load(#file, string)
 	btree := btree_build(data, context.temp_allocator, 4)
 
-	iter := btree_iterator(&btree, len(data) / 2)
+	iter := btree_iterator(&btree, Offset(len(data) / 2))
 
 	b := strings.builder_make(context.temp_allocator)
 	for r in btree_iter(&iter) {

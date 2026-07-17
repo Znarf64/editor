@@ -3,7 +3,6 @@ package editor
 import fmt     "core:fmt"
 import strings "core:strings"
 import unicode "core:unicode"
-import utf8    "core:unicode/utf8"
 
 Motion :: enum {
 	Cursor_Page_Up = 1,
@@ -337,50 +336,52 @@ argument_motion_apply_single :: proc(editor: ^Editor, selection: ^Selection, mot
 	}
 }
 
-position_to_offset_normalized :: proc(editor: ^Editor, position: Position, vertical_move: bool, selection: ^Selection) {
+@(require_results)
+position_to_offset_normalized :: proc(editor: ^Editor, position: Position, vertical_move: bool, selection: ^Selection) -> bool {
 	position := Position {
 		line   = clamp(position.line, 0, int(editor.btree.lines) - 1),
 		column = max(position.column, 0),
 	}
 	if vertical_move {
-		position.column = selection.target_column
+		position.column = btree_offset_to_position(&editor.btree, selection.target_cursor).column
 	}
 	iter := btree_iterator(&editor.btree, line = position.line)
 	for r in btree_iter(&iter) {
-		if iter.column >= position.column {
-			if !vertical_move {
-				selection.target_column = position.column
-			}
-			break
-		}
-		if r == '\n' {
+		if iter.column >= position.column || r == '\n' {
 			break
 		}
 	}
 	selection.cursor = iter.offset
+
+	return vertical_move
 }
 
 motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
+	vertical_move: bool
+	defer if !vertical_move {
+		selection.target_cursor = selection.cursor
+	}
+
 	switch motion {
 	case .Cursor_Half_Page_Up:
 		position        := btree_offset_to_position(&editor.btree, selection.cursor)
 		position.line   -= editor.visible_lines / 2
-		position_to_offset_normalized(editor, position, true, selection)
+		vertical_move = position_to_offset_normalized(editor, position, true, selection)
 		selection.anchor = selection.cursor
 	case .Cursor_Half_Page_Down:
 		position        := btree_offset_to_position(&editor.btree, selection.cursor)
 		position.line   += editor.visible_lines / 2
-		position_to_offset_normalized(editor, position, true, selection)
+		vertical_move    = position_to_offset_normalized(editor, position, true, selection)
 		selection.anchor = selection.cursor
 	case .Cursor_Page_Up:
 		position        := btree_offset_to_position(&editor.btree, selection.cursor)
 		position.line   -= editor.visible_lines
-		position_to_offset_normalized(editor, position, true, selection)
+		vertical_move    = position_to_offset_normalized(editor, position, true, selection)
 		selection.anchor = selection.cursor
 	case .Cursor_Page_Down:
 		position        := btree_offset_to_position(&editor.btree, selection.cursor)
 		position.line   += editor.visible_lines
-		position_to_offset_normalized(editor, position, true, selection)
+		vertical_move    = position_to_offset_normalized(editor, position, true, selection)
 		selection.anchor = selection.cursor
 
 	case .View_Half_Page_Up:
@@ -509,10 +510,10 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		unimplemented()
 
 	case .Go_To_Line:
-		position_to_offset_normalized(editor, { line = editor.repeat_count - 1, }, false, selection)
+		vertical_move    = position_to_offset_normalized(editor, { line = editor.repeat_count - 1, }, false, selection)
 		selection.anchor = selection.cursor
 	case .Go_To_File_End:
-		position_to_offset_normalized(editor, { line = int(editor.btree.lines) - 1, }, false, selection)
+		vertical_move    = position_to_offset_normalized(editor, { line = int(editor.btree.lines) - 1, }, false, selection)
 		selection.anchor = selection.cursor
 	case .Go_To_Line_Start:
 		iter := btree_iterator(&editor.btree, offset = selection.cursor)
@@ -564,12 +565,12 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 	case .Character_Down:
 		position        := btree_offset_to_position(&editor.btree, selection.cursor)
 		position.line   += editor.repeat_count
-		position_to_offset_normalized(editor, position, true, selection)
+		vertical_move    = position_to_offset_normalized(editor, position, true, selection)
 		selection.anchor = selection.cursor
 	case .Character_Up:
 		position        := btree_offset_to_position(&editor.btree, selection.cursor)
 		position.line   -= editor.repeat_count
-		position_to_offset_normalized(editor, position, true, selection)
+		vertical_move    = position_to_offset_normalized(editor, position, true, selection)
 		selection.anchor = selection.cursor
 	case .Character_Left:
 		iter := btree_iterator(&editor.btree, offset = selection.cursor)
@@ -626,7 +627,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 
 	case .Select_All:
 		selection.anchor = 0
-		position_to_offset_normalized(editor, { line = int(editor.btree.lines) - 1, }, false, selection)
+		vertical_move    = position_to_offset_normalized(editor, { line = int(editor.btree.lines) - 1, }, false, selection)
 	case .Select_Word_End_Forward:
 		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 		r    := btree_iter(&iter) or_break
@@ -676,6 +677,8 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 		r    := btree_iter(&iter, back = true) or_break
 
+		selection.anchor = selection.cursor
+
 		if unicode.is_space(r) {
 			for r in btree_iter(&iter, back = true) {
 				if !unicode.is_space(r) {
@@ -683,7 +686,6 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 				}
 			}
 		}
-		selection.anchor = iter.offset
 
 		for r in btree_iter(&iter, back = true) {
 			if !unicode.is_letter(r) && !unicode.is_digit(r) && r != '_' {
@@ -731,10 +733,10 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 	case .Case_To_Screaming_Snake:
 
 	case .Delete:
-		iter  := btree_iterator(&editor.btree, offset = selection.cursor)
-		r, _  := btree_iter(&iter)
-		_, n  := utf8.encode_rune(r)
-		btree_remove_range(&editor.btree, selection.cursor, selection.cursor + n)
+		start, end := min(selection.anchor, selection.cursor), max(selection.anchor, selection.cursor)
+		iter       := btree_iterator(&editor.btree, offset = end)
+		_, _        = btree_iter(&iter)
+		btree_remove_range(&editor.btree, start, iter.next_offset)
 
 	case .Paste:
 	case .Yank:
@@ -841,7 +843,8 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		editor.mode        = .Prompt
 		editor.prompt.mode = .Keep
 	case .Select:
-		unimplemented()
+		editor.mode        = .Prompt
+		editor.prompt.mode = .Select
 
 	case .Flip_Selection:
 		selection.anchor, selection.cursor = selection.cursor , selection.anchor
