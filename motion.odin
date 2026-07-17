@@ -70,9 +70,6 @@ Motion :: enum {
 
 	Change,
 
-	Insert_At_Line_Start,
-	Insert_At_Line_End,
-	Insert_After,
 	Insert_Newline,
 	Insert_Tab,
 
@@ -172,9 +169,6 @@ motion_descriptions: [Motion]string = {
 
 	.Change                          = "change",
 
-	.Insert_At_Line_Start            = "insert at line start",
-	.Insert_At_Line_End              = "insert at line end",
-	.Insert_After                    = "insert after",
 	.Insert_Newline                  = "insert newline",
 	.Insert_Tab                      = "insert tab",
 
@@ -262,45 +256,6 @@ parse_motion :: proc(s: string) -> (motion: Motion, ok: bool) {
 	return
 }
 
-// normalize_cursor_position :: proc(editor: ^Editor, selection: ^Selection, vertical_move: bool) {
-// 	if selection.cursor.column < 0 {
-// 		selection.cursor.column = 0
-// 	}
-
-// 	if selection.cursor.line < 0 {
-// 		selection.cursor.line = 0
-// 	}
-
-// 	if selection.cursor.line >= int(editor.btree.lines) {
-// 		selection.cursor.line = int(editor.btree.lines) - 1
-// 	}
-
-// 	iter := btree_iterator(&editor.btree, line = selection.cursor.line)
-// 	for r in btree_iter(&iter) {
-// 		if r == '\t' && !vertical_move {
-// 			next_column := next_column_after_tab(iter.column, editor.config.tab_width)
-// 			if selection.cursor.column > iter.column && selection.cursor.column < next_column {
-// 				selection.cursor.column = iter.column
-// 				break
-// 			}
-// 		}
-// 		if r == '\n' {
-// 			if selection.cursor.column > iter.column {
-// 				selection.cursor.column = iter.column
-// 			} else if vertical_move {
-// 				selection.cursor.column = min(selection.cursor.target_column, iter.column)
-// 				selection.anchor        = selection.cursor
-// 			}
-
-// 			break
-// 		}
-// 	}
-
-// 	if !vertical_move {
-// 		selection.cursor.target_column = selection.cursor.column
-// 	}
-// }
-
 argument_motion_apply :: proc(editor: ^Editor, motion: Argument_Motion, arg: rune) {
 	for &selection in editor.selections {
 		argument_motion_apply_single(editor, &selection, motion, arg)
@@ -308,8 +263,10 @@ argument_motion_apply :: proc(editor: ^Editor, motion: Argument_Motion, arg: run
 }
 
 argument_motion_apply_single :: proc(editor: ^Editor, selection: ^Selection, motion: Argument_Motion, arg: rune) {
-	// vertical_move: bool
-	// defer normalize_cursor_position(editor, selection, vertical_move)
+	vertical_move: bool
+	defer if !vertical_move {
+		selection.target_cursor = selection.cursor
+	}
 
 	switch motion {
 	case .Find:
@@ -347,7 +304,7 @@ position_to_offset_normalized :: proc(editor: ^Editor, position: Position, verti
 	}
 	iter := btree_iterator(&editor.btree, line = position.line)
 	for r in btree_iter(&iter) {
-		if iter.column >= position.column || r == '\n' {
+		if position_after(iter.position, r, editor.config.tab_width).column > position.column || r == '\n' {
 			break
 		}
 	}
@@ -743,54 +700,28 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 
 	case .Insert:
 		editor.mode = .Insert
-	case .Insert_After:
-		// selection.column += 1
-		// editor.mode       = .Insert
 	case .Visual:
 		editor.mode = .Visual
 	case .Normal:
 		editor.mode = .Normal
-	case .Insert_At_Line_Start:
-		// iter := btree_iterator(&editor.btree, line = selection.line)
-		// for r in btree_iter(&iter) {
-		// 	if r == '\n' || !unicode.is_space(r) {
-		// 		break
-		// 	}
-		// }
-		// selection.column = iter.column
-		// editor.mode          = .Insert
-	case .Insert_At_Line_End:
-		// iter := btree_iterator(&editor.btree, line = selection.line)
-		// for r in btree_iter(&iter) {
-		// 	if r == '\n' {
-		// 		selection.column = iter.column
-		// 		break
-		// 	}
-		// }
-		// editor.mode = .Insert
 	case .Insert_Newline:
-		// offset               := btree_position_to_offset(&editor.btree, selection)
-		// btree_insert(&editor.btree, offset, '\n')
-		// selection.column += 1
+		btree_insert(&editor.btree, selection.cursor, '\n')
 	case .Insert_Tab:
-		// offset               := btree_position_to_offset(&editor.btree, selection)
-		// btree_insert(&editor.btree, offset, '\t')
-		// selection.column += 1
+		btree_insert(&editor.btree, selection.cursor, '\t')
 
 	case .Open_Below:
-		// iter := btree_iterator(&editor.btree, line = selection.line)
-		// for r in btree_iter(&iter) {
-		// 	if r == '\n' {
-		// 		selection.column = iter.column
-		// 		break
-		// 	}
-		// }
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
+		for r in btree_iter(&iter) {
+			if r == '\n' {
+				break
+			}
+		}
 
-		// offset             := btree_position_to_offset(&editor.btree, selection.line, selection.column)
-		// btree_insert(&editor.btree, offset, '\n')
-		// selection.line += 1
+		btree_insert(&editor.btree, iter.offset, '\n')
+		selection.cursor = iter.offset + 1
+		selection.anchor = selection.cursor
 
-		// editor.mode = .Insert
+		editor.mode = .Insert
 
 	case .Open_Above:
 		editor.mode = .Insert
@@ -798,11 +729,18 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		editor.mode = .Insert
 
 	case .Indent:
-		// offset := btree_position_to_offset(&editor.btree, selection.line, 0)
-		// for _ in 0 ..< editor.repeat_count {
-		// 	btree_insert(&editor.btree, offset, '\t')
-		// }
-		// selection.column += editor.config.tab_width * editor.repeat_count
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
+		offset: Offset
+		for r in btree_iter(&iter, back = true) {
+			if r == '\n' {
+				offset = iter.offset + 1
+				break
+			}
+		}
+		for _ in 0 ..< editor.repeat_count {
+			btree_insert(&editor.btree, offset, '\t')
+		}
+		selection.cursor += Offset(editor.repeat_count)
 	case .Outdent:
 		// offset := btree_position_to_offset(&editor.btree, selection.line, 0)
 		// for _ in 0 ..< editor.repeat_count {

@@ -516,9 +516,9 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 				offset_in_selection :: proc(selection: Selection, offset: Offset) -> bool {
 					@(require_results)
 					offset_in_range :: proc(start, end, offset: Offset) -> bool {
-						return start < offset && offset < end
+						return start <= offset && offset <= end
 					}
-					return offset_in_range(selection.anchor - 1, selection.cursor, offset) || offset_in_range(selection.cursor, selection.anchor + 1, offset)
+					return offset_in_range(selection.anchor, selection.cursor, offset) || offset_in_range(selection.cursor, selection.anchor, offset)
 				}
 
 				if offset_in_selection(selection, offset) {
@@ -574,25 +574,17 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 	}
 
 	for &selection, i in editor.selections {
-		position := btree_offset_to_position(&editor.btree, selection.cursor)
-		// column := selection.column
-		// line   := selection.line
-		width  := 1
+		line := btree_offset_to_line(&editor.btree, offset = selection.cursor)
+		iter := btree_iterator(&editor.btree, line = line)
 
-		// iter := btree_iterator(&editor.btree, line = selection.cursor.line)
-		// for r in btree_iter(&iter) {
-		// 	next := position_after(iter.position, r, editor.config.tab_width)
-		// 	if next.line > selection.line {
-		// 		break
-		// 	}
-		// 	if next.column > selection.column {
-		// 		if r == '\t' {
-		// 			column = iter.column
-		// 			width  = next_column_after_tab(selection.column, editor.config.tab_width) - iter.column
-		// 		}
-		// 		break
-		// 	}
-		// }
+		for iter.offset != selection.cursor {
+			_ = btree_iter(&iter) or_else panic("offset out of range")
+		}
+
+		position    := iter.position
+		_, _         = btree_iter(&iter)
+		next_column := iter.column
+		width       := max(next_column - position.column, 1)
 
 		offset := [2]f32 {
 			f32(position.column) * cell_size.x + gutter_width,
