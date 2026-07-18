@@ -402,31 +402,24 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 	lines_width  := cell_size.x * f32(line_digits)
 	gutter_width := lines_width + padding + 2 + padding
 
-	editor.visible_lines = int(la.ceil((editor.screen_size.y - FONT_HEIGHT - padding * 2) / cell_size.y))
+	editor.visible_lines = max(1, int(la.ceil((editor.screen_size.y - FONT_HEIGHT - padding * 2) / cell_size.y)))
 
 	scroll := animation_update(&editor.scroll_anim, delta_time, editor.config.scroll_animation_speed)
-
-	position: Position = {
-		line   = int(la.floor(scroll)),
-		column = 0,
-	}
-
-	iter := btree_iterator(&editor.btree, line = position.line)
-
-	offset := iter.next_offset
-
-	b := strings.builder_make(context.temp_allocator)
-
-	for r in btree_iter(&iter) {
-		if iter.line > int(la.ceil(scroll)) + editor.visible_lines {
-			break
-		}
-		strings.write_rune(&b, r)
-	}
 
 	primary          := editor.selections[editor.primary]
 	primary_position := btree_offset_to_position(&editor.btree, primary.cursor)
 
+	first_visble_line := int(la.floor(scroll))
+	last_visible_line := min(int(editor.btree.lines), first_visble_line + editor.visible_lines)
+
+	position: Position = {
+		line = first_visble_line,
+	}
+	start_offset := btree_position_to_offset(&editor.btree, position)
+	end_offset   := btree_position_to_offset(&editor.btree, { line = last_visible_line, })
+
+	b := strings.builder_make(0, int(end_offset - start_offset), context.temp_allocator)
+	btree_to_string(&editor.btree, &b, start_offset, end_offset)
 	text := strings.to_string(b)
 
 	highlighter: Highlighter = {
@@ -451,7 +444,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		for char, sub_offset in text[start:highlighter.pos] {
 			defer position = position_after(position, char, editor.config.tab_width)
 
-			offset := offset + Offset(start + sub_offset)
+			offset := start_offset + Offset(start + sub_offset)
 
 			draw_gutter: if position.column == 0 {
 				y := cell_size.y * (f32(position.line) - scroll) + FONT_HEIGHT + padding
@@ -883,18 +876,9 @@ prompt_apply :: proc(editor: ^Editor) {
 			start := min(selection.cursor, selection.anchor)
 			end   := max(selection.cursor, selection.anchor)
 
-			strings.builder_grow(&b, int(end - start))
-
 			start_time := time.now()
-
-			iter := btree_iterator(&editor.btree, offset = start)
-			for r in btree_iter(&iter) {
-				if iter.offset > end {
-					break
-				}
-				strings.write_rune(&b, r)
-			}
-
+			strings.builder_grow(&b, int(end - start))
+			btree_to_string(&editor.btree, &b, start, end)
 			fmt.println("Selection to string:", time.since(start_time))
 
 			start_time = time.now()
@@ -914,20 +898,15 @@ prompt_apply :: proc(editor: ^Editor) {
 			break
 		}
 
-		b          := strings.builder_make(0, int(editor.btree.bytes), context.temp_allocator)
 		start_time := time.now()
-
-		iter := btree_iterator(&editor.btree)
-		for r in btree_iter(&iter) {
-			strings.write_rune(&b, r)
-		}
-
+		b          := strings.builder_make(0, int(editor.btree.bytes), context.temp_allocator)
+		btree_to_string(&editor.btree, &b)
 		fmt.println("File to string:", time.since(start_time))
 
-		start_time = time.now()
-
+		start_time   = time.now()
 		capture, ok := regex.match(pattern, strings.to_string(b), context.temp_allocator)
 		fmt.println("Search:", time.since(start_time))
+
 		if ok {
 			selection              := &editor.selections[editor.primary]
 			_, n                   := utf8.decode_last_rune(capture.groups[0])
@@ -938,4 +917,21 @@ prompt_apply :: proc(editor: ^Editor) {
 	case .Command:
 		unimplemented()
 	}
+}
+
+@(require_results)
+position_after :: proc(position: Position, r: rune, tab_width: int) -> Position {
+	position := position
+	switch r {
+	case 0:
+	case '\n':
+		position.line  += 1
+		position.column = 0
+	case '\t':
+		position.column = next_column_after_tab(position.column, tab_width)
+	case:
+		position.column += 1
+	}
+
+	return position
 }

@@ -339,7 +339,7 @@ btree_remove_range :: proc(btree: ^BTree, start, end: Offset) {
 }
 
 @(require_results)
-btree_find_leaf :: proc(btree: BTree, offset: Offset) -> (leaf_index: int, leaf_offset: int) {
+btree_find_leaf :: proc(btree: BTree, offset: Offset) -> (leaf_index: i32, leaf_offset: Offset) {
 	index  := btree.root
 	offset := offset
 
@@ -361,7 +361,7 @@ btree_find_leaf :: proc(btree: BTree, offset: Offset) -> (leaf_index: int, leaf_
 		index = node.children[n]
 	}
 
-	return int(index.index), int(offset)
+	return index.index, offset
 }
 
 btree_destroy :: proc(btree: BTree) {
@@ -371,8 +371,8 @@ btree_destroy :: proc(btree: BTree) {
 
 BTree_Iterator :: struct {
 	btree:         ^BTree,
-	leaf:           int,
-	leaf_offset:    int,
+	leaf:           i32,
+	leaf_offset:    Offset,
 
 	last:           rune,
 
@@ -442,11 +442,11 @@ btree_iter :: proc(iter: ^BTree_Iterator, back := false) -> (r: rune, cond: bool
 
 		if back {
 			data            := bytes.truncate_to_byte(leaf.data[:], 0)
-			iter.leaf_offset = min(iter.leaf_offset, len(data))
+			iter.leaf_offset = min(iter.leaf_offset, Offset(len(data)))
 			data             = data[:iter.leaf_offset]
 
 			if len(data) == 0 {
-				iter.leaf        = int(leaf.prev)
+				iter.leaf        = leaf.prev
 				iter.leaf_offset = BTREE_LEAF_SIZE
 				continue
 			}
@@ -456,14 +456,14 @@ btree_iter :: proc(iter: ^BTree_Iterator, back := false) -> (r: rune, cond: bool
 			assert(r != utf8.RUNE_ERROR, "failed to decode utf8 rune")
 
 			iter.next_offset  = iter.offset - Offset(n)
-			iter.leaf_offset -= n
+			iter.leaf_offset -= Offset(n)
 			iter.offset       = iter.next_offset
 			assert(iter.leaf_offset >= 0)
 		} else {
 			data := bytes.truncate_to_byte(leaf.data[iter.leaf_offset:], 0)
 
 			if len(data) == 0 {
-				iter.leaf        = int(leaf.next)
+				iter.leaf        = leaf.next
 				iter.leaf_offset = 0
 				continue
 			}
@@ -473,7 +473,7 @@ btree_iter :: proc(iter: ^BTree_Iterator, back := false) -> (r: rune, cond: bool
 			assert(r != utf8.RUNE_ERROR, "failed to decode utf8 rune")
 
 			iter.next_offset  = iter.offset + Offset(n)
-			iter.leaf_offset += n
+			iter.leaf_offset += Offset(n)
 		}
 
 		return r, true
@@ -512,6 +512,27 @@ graph_dot :: proc(btree: BTree, allocator := context.allocator) -> string {
 	fmt.sbprintln(&b, "}")
 
 	return strings.to_string(b)
+}
+
+btree_to_string :: proc(btree: ^BTree, b: ^strings.Builder, start: Offset = 0, end: Offset = -1) {
+	end := end
+	if end == -1 {
+		end = Offset(btree.bytes)
+	}
+
+	offset := start
+	leaf_index, leaf_offset := btree_find_leaf(btree^, start)
+
+	for offset < end {
+		leaf       := btree.leaves[leaf_index]
+		data       := strings.truncate_to_byte(string(leaf.data[leaf_offset:]), 0)
+		n          := min(end - offset, Offset(len(data)))
+		strings.write_string(b, data[:n])
+		offset     += n
+		leaf_index  = leaf.next
+		leaf_offset = 0
+	}
+	assert(offset == end)
 }
 
 @(test)
@@ -556,19 +577,13 @@ LINE 8
 	// assert(strings.to_string(b) == )
 }
 
-@(require_results)
-position_after :: proc(position: Position, r: rune, tab_width: int) -> Position {
-	position := position
-	switch r {
-	case 0:
-	case '\n':
-		position.line  += 1
-		position.column = 0
-	case '\t':
-		position.column = next_column_after_tab(position.column, tab_width)
-	case:
-		position.column += 1
-	}
+@(test)
+btree_test_to_string :: proc(t: ^testing.T) {
+	data  := #load(#file, string)
+	btree := btree_build(data, context.temp_allocator, 4)
 
-	return position
+	b := strings.builder_make(context.temp_allocator)
+	btree_to_string(&btree, &b)
+
+	assert(strings.to_string(b) == data)
 }
