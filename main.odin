@@ -11,6 +11,7 @@ import strconv "core:strconv"
 import strings "core:strings"
 import time    "core:time"
 import unicode "core:unicode"
+import utf8    "core:unicode/utf8"
 import vmem    "core:mem/virtual"
 
 Draw_Command_Rect :: struct {
@@ -116,16 +117,18 @@ Editor :: struct {
 		rect:  Animation(Rect),
 	},
 
-	prompt:         struct {
-		mode:  Prompt_Mode,
-		input: strings.Builder,
-	},
+	prompt:         Prompt,
 
 	btree:          BTree,
 
 	config:         Config,
 
 	font:           Font,
+}
+
+Prompt :: struct {
+	mode:  Prompt_Mode,
+	input: strings.Builder,
 }
 
 FONT_HEIGHT :: 12
@@ -184,7 +187,7 @@ main :: proc() {
 	when true {
 		// S :: #load("/home/znarf/source/odin/src/check_expr.cpp", string)
 		S :: #load(#file, string)
-		N :: 2000 when ODIN_OPTIMIZATION_MODE == .Speed else 500
+		N :: 200 when ODIN_OPTIMIZATION_MODE == .Speed else 50
 		editor.btree = btree_build(strings.repeat(S, N, context.temp_allocator), context.allocator, editor.config.tab_width)
 	} else {
 		editor.btree = btree_build("Hello World!\n\n", context.allocator, editor.config.tab_width)
@@ -228,31 +231,7 @@ main :: proc() {
 						editor.mode = .Normal
 						strings.builder_reset(&editor.prompt.input)
 					case .Enter:
-						pattern, err := regex.create(strings.to_string(editor.prompt.input), flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
-
-						b := strings.builder_make(context.temp_allocator)
-						for selection in editor.selections {
-							start := min(selection.cursor, selection.anchor)
-							end   := max(selection.cursor, selection.anchor)
-
-							iter := btree_iterator(&editor.btree, offset = start)
-							for r in btree_iter(&iter) {
-								if iter.offset > end {
-									break
-								}
-								strings.write_rune(&b, r)
-							}
-
-							capture, ok := regex.match(pattern, strings.to_string(b), context.temp_allocator)
-							fmt.println(capture, ok)
-							strings.builder_reset(&b)
-						}
-
-						if err != nil {
-							fmt.println(err)
-							break
-						}
-
+						prompt_apply(&editor)
 						editor.mode = .Normal
 						strings.builder_reset(&editor.prompt.input)
 					case .Backspace:
@@ -888,4 +867,75 @@ next_column_after_tab :: proc(column, tab_width: int) -> int {
 		column += 1
 	}
 	return column
+}
+
+prompt_apply :: proc(editor: ^Editor) {
+	switch editor.prompt.mode {
+	case .Keep, .Select:
+		pattern, err := regex.create(strings.to_string(editor.prompt.input), flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
+		if err != nil {
+			fmt.println(err)
+			break
+		}
+
+		b := strings.builder_make(context.temp_allocator)
+		for selection in editor.selections {
+			start := min(selection.cursor, selection.anchor)
+			end   := max(selection.cursor, selection.anchor)
+
+			strings.builder_grow(&b, int(end - start))
+
+			start_time := time.now()
+
+			iter := btree_iterator(&editor.btree, offset = start)
+			for r in btree_iter(&iter) {
+				if iter.offset > end {
+					break
+				}
+				strings.write_rune(&b, r)
+			}
+
+			fmt.println("Selection to string:", time.since(start_time))
+
+			start_time = time.now()
+
+			capture, ok := regex.match(pattern, strings.to_string(b), context.temp_allocator)
+			fmt.println(capture, ok, time.since(start_time))
+			strings.builder_reset(&b)
+		}
+
+		if err != nil {
+			fmt.println(err)
+		}
+	case .Search:
+		pattern, err := regex.create(strings.to_string(editor.prompt.input), flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
+		if err != nil {
+			fmt.println(err)
+			break
+		}
+
+		b          := strings.builder_make(0, int(editor.btree.bytes), context.temp_allocator)
+		start_time := time.now()
+
+		iter := btree_iterator(&editor.btree)
+		for r in btree_iter(&iter) {
+			strings.write_rune(&b, r)
+		}
+
+		fmt.println("File to string:", time.since(start_time))
+
+		start_time = time.now()
+
+		capture, ok := regex.match(pattern, strings.to_string(b), context.temp_allocator)
+		fmt.println("Search:", time.since(start_time))
+		if ok {
+			selection              := &editor.selections[editor.primary]
+			_, n                   := utf8.decode_last_rune(capture.groups[0])
+			selection.anchor        = Offset(capture.pos[0][0])
+			selection.cursor        = Offset(capture.pos[0][1] - n)
+			selection.target_cursor = selection.cursor
+		}
+	case .Command:
+		unimplemented()
+	}
 }

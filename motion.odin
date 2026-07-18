@@ -65,6 +65,7 @@ Motion :: enum {
 	Yank,
 
 	Insert,
+	Append,
 	Visual,
 	Normal,
 
@@ -164,6 +165,7 @@ motion_descriptions: [Motion]string = {
 	.Yank                            = "yank",
 
 	.Insert                          = "insert",
+	.Append                          = "append",
 	.Visual                          = "visual",
 	.Normal                          = "normal",
 
@@ -699,7 +701,21 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 	case .Yank:
 
 	case .Insert:
+		if selection.cursor > selection.anchor {
+			selection.cursor, selection.anchor = selection.anchor, selection.cursor
+		}
 		editor.mode = .Insert
+	case .Append:
+		if selection.cursor < selection.anchor {
+			selection.cursor, selection.anchor = selection.anchor, selection.cursor
+		}
+
+		iter            := btree_iterator(&editor.btree, offset = selection.cursor)
+		_                = btree_iter(&iter) or_break
+		_                = btree_iter(&iter) or_break
+		selection.cursor = iter.offset
+
+		editor.mode      = .Insert
 	case .Visual:
 		editor.mode = .Visual
 	case .Normal:
