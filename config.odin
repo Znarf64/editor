@@ -242,8 +242,8 @@ load_config :: proc(config: ^Config) -> (ok: bool) {
 
 	config.animations             = true
 	config.relative_line_numbers  = true
-	config.scroll_animation_speed = 7.5
-	config.cursor_animation_speed = 15
+	config.scroll_animation_speed = 10
+	config.cursor_animation_speed = 10
 	config.popup_animation_speed  = 7.5
 	config.tab_width              = 4
 

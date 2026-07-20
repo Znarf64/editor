@@ -17,6 +17,7 @@ Motion :: enum {
 
 	Go_To_Matching,
 	Match_In_Word,
+	Match_In_Long_Word,
 	Match_In_Paragraph,
 	Match_In_Change,
 
@@ -31,11 +32,14 @@ Motion :: enum {
 	Character_Left,
 	Character_Right,
 
-	Select_Line,
 	Select_All,
+	Select_Line,
 	Select_Word_Forward,
 	Select_Word_End_Forward,
 	Select_Word_Backward,
+	Select_Long_Word_Forward,
+	Select_Long_Word_End_Forward,
+	Select_Long_Word_Backward,
 
 	Search,
 	Command,
@@ -117,6 +121,7 @@ motion_descriptions: [Motion]string = {
 	.Go_To_Matching                  = "go to matching",
 
 	.Match_In_Word                   = "match in word",
+	.Match_In_Long_Word              = "match in long word",
 	.Match_In_Paragraph              = "match in paragraph",
 	.Match_In_Change                 = "match in change",
 
@@ -131,11 +136,14 @@ motion_descriptions: [Motion]string = {
 	.Character_Left                  = "character left",
 	.Character_Right                 = "character right",
 
-	.Select_Line                     = "select line",
 	.Select_All                      = "select all",
+	.Select_Line                     = "select line",
 	.Select_Word_Forward             = "select word forward",
 	.Select_Word_End_Forward         = "select word end forward",
 	.Select_Word_Backward            = "select word backward",
+	.Select_Long_Word_Forward        = "select long word forward",
+	.Select_Long_Word_End_Forward    = "select long word end forward",
+	.Select_Long_Word_Backward       = "select long word backward",
 
 	.Search                          = "search",
 	.Command                         = "command",
@@ -272,6 +280,8 @@ argument_motion_apply_single :: proc(editor: ^Editor, selection: ^Selection, mot
 
 	switch motion {
 	case .Find:
+		selection.anchor = selection.cursor
+
 		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 		_, _  = btree_iter(&iter)
 		for r in btree_iter(&iter) {
@@ -281,6 +291,8 @@ argument_motion_apply_single :: proc(editor: ^Editor, selection: ^Selection, mot
 			}
 		}
 	case .Find_Backward:
+		selection.anchor = selection.cursor
+
 		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 		_, _  = btree_iter(&iter, back = true)
 		for r in btree_iter(&iter, back = true) {
@@ -345,12 +357,16 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 
 	case .View_Half_Page_Up:
 		editor.scroll -= editor.visible_lines / 2
+		vertical_move  = true
 	case .View_Half_Page_Down:
 		editor.scroll += editor.visible_lines / 2
+		vertical_move  = true
 	case .View_Page_Up:
 		editor.scroll -= editor.visible_lines
+		vertical_move  = true
 	case .View_Page_Down:
 		editor.scroll += editor.visible_lines
+		vertical_move  = true
 
 	case .Go_To_Matching:
 		iter  := btree_iterator(&editor.btree, offset = selection.cursor)
@@ -423,9 +439,34 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 
 		selection.anchor = start_offset
 
-		end_offset := iter.offset
+		end_offset := start_offset
 		for r in btree_iter(&iter) {
 			if !unicode.is_letter(r) && !unicode.is_number(r) && r != '_' {
+				break
+			}
+			end_offset = iter.offset
+		}
+
+		selection.cursor = end_offset
+
+	case .Match_In_Long_Word:
+		start_offset := selection.cursor
+
+		back := btree_iterator(&editor.btree, offset = start_offset)
+		iter := btree_iterator(&editor.btree, offset = start_offset)
+
+		for r in btree_iter(&back, back = true) {
+			if unicode.is_space(r) {
+				break
+			}
+			start_offset = back.offset
+		}
+
+		selection.anchor = start_offset
+
+		end_offset := start_offset
+		for r in btree_iter(&iter) {
+			if unicode.is_space(r) {
 				break
 			}
 			end_offset = iter.offset
@@ -657,6 +698,77 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 
 		selection.cursor = iter.offset
 
+	case .Select_Long_Word_Forward:
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
+		r    := btree_iter(&iter) or_break
+
+		if unicode.is_space(r) {
+			for r in btree_iter(&iter) {
+				if !unicode.is_space(r) {
+					break
+				}
+			}
+		}
+		selection.anchor = iter.offset
+
+		for r in btree_iter(&iter) {
+			if unicode.is_space(r) {
+				break
+			}
+		}
+
+		selection.cursor = iter.offset
+
+	case .Select_Long_Word_End_Forward:
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
+		r    := btree_iter(&iter) or_break
+
+		if unicode.is_space(r) {
+			for r in btree_iter(&iter) {
+				if !unicode.is_space(r) {
+					break
+				}
+			}
+		}
+		selection.anchor = iter.offset
+
+		pos := iter.offset
+
+		for r in btree_iter(&iter) {
+			if unicode.is_space(r) {
+				break
+			} else {
+				pos = iter.offset
+			}
+		}
+
+		selection.cursor = pos
+
+	case .Select_Long_Word_Backward:
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
+		r    := btree_iter(&iter, back = true) or_break
+
+		selection.anchor = selection.cursor
+
+		if unicode.is_space(r) {
+			for r in btree_iter(&iter, back = true) {
+				if !unicode.is_space(r) {
+					break
+				}
+			}
+		}
+
+		for r in btree_iter(&iter, back = true) {
+			if unicode.is_space(r) {
+				break
+			}
+		}
+
+		_, _ = btree_iter(&iter)
+		_, _ = btree_iter(&iter)
+
+		selection.cursor = iter.offset
+
 	case .Search:
 		strings.builder_reset(&editor.prompt.input)
 		editor.mode        = .Prompt
@@ -676,20 +788,30 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		editor.picker.mode = .Commands
 
 	case .Save:
+		unimplemented()
 	case .Save_As:
+		unimplemented()
 
 	case .Open_File:
 		editor.mode        = .Picker
 		editor.picker.mode = .Files
 	case .Close_File:
+		unimplemented()
 
 	case .Case_Swap:
+		unimplemented()
 	case .Case_To_Lower:
+		unimplemented()
 	case .Case_To_Upper:
+		unimplemented()
 	case .Case_To_Caml:
+		unimplemented()
 	case .Case_To_Pascal:
+		unimplemented()
 	case .Case_To_Snake:
+		unimplemented()
 	case .Case_To_Screaming_Snake:
+		unimplemented()
 
 	case .Delete:
 		start, end := min(selection.anchor, selection.cursor), max(selection.anchor, selection.cursor)
@@ -698,7 +820,9 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		btree_remove_range(&editor.btree, start, iter.next_offset)
 
 	case .Paste:
+		unimplemented()
 	case .Yank:
+		unimplemented()
 
 	case .Insert:
 		if selection.cursor > selection.anchor {
@@ -758,16 +882,24 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		}
 		selection.cursor += Offset(editor.repeat_count)
 	case .Outdent:
-		// offset := btree_position_to_offset(&editor.btree, selection.line, 0)
-		// for _ in 0 ..< editor.repeat_count {
-		// 	r := btree_get_rune(editor.btree, offset)
-		// 	if r == '\t' {
-		// 		btree_remove_range(&editor.btree, offset, offset + 1)
-		// 		selection.column -= editor.config.tab_width
-		// 	} else {
-		// 		break
-		// 	}
-		// }
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
+		offset: Offset
+		for r in btree_iter(&iter, back = true) {
+			if r == '\n' {
+				offset = iter.offset + 1
+				break
+			}
+		}
+		for _ in 0 ..< editor.repeat_count {
+			r := btree_get_rune(editor.btree, offset)
+			if r == '\t' {
+				btree_remove_range(&editor.btree, offset, offset + 1)
+				selection.cursor -= 1
+				selection.anchor -= 1
+			} else {
+				break
+			}
+		}
 
 	case .Show_Hover_Information:
 		unimplemented()

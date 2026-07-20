@@ -187,7 +187,7 @@ main :: proc() {
 	when true {
 		// S :: #load("/home/znarf/source/odin/src/check_expr.cpp", string)
 		S :: #load(#file, string)
-		N :: 200 when ODIN_OPTIMIZATION_MODE == .Speed else 50
+		N :: 200 when ODIN_OPTIMIZATION_MODE == .Speed else 1
 		editor.btree = btree_build(strings.repeat(S, N, context.temp_allocator), context.allocator, editor.config.tab_width)
 	} else {
 		editor.btree = btree_build("Hello World!\n\n", context.allocator, editor.config.tab_width)
@@ -484,27 +484,20 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 			}
 
 			for selection in editor.selections {
-				@(require_results)
-				offset_in_selection :: proc(selection: Selection, offset: Offset) -> bool {
-					@(require_results)
-					offset_in_range :: proc(start, end, offset: Offset) -> bool {
-						return start <= offset && offset <= end
-					}
-					return offset_in_range(selection.anchor, selection.cursor, offset) || offset_in_range(selection.cursor, selection.anchor, offset)
+				if !selection_contains(selection, offset) {
+					continue
 				}
 
-				if offset_in_selection(selection, offset) {
-					next_column := position_after(position, char, editor.config.tab_width).column
-					append(instance_buffer, Instance {
-						offset        = {
-							f32(position.column) * cell_size.x + gutter_width,
-							cell_size.y * (f32(position.line - 1) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale),
-						} + padding,
-						size          = cell_size * { f32(max(1, next_column - position.column)), 1, },
-						color         = editor.config.theme[.Selection].bg,
-						border_radius = 0,
-					})
-				}
+				next_column := position_after(position, char, editor.config.tab_width).column
+				append(instance_buffer, Instance {
+					offset        = {
+						f32(position.column) * cell_size.x + gutter_width,
+						cell_size.y * (f32(position.line - 1) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale),
+					} + padding,
+					size          = cell_size * { f32(max(1, next_column - position.column)), 1, },
+					color         = editor.config.theme[.Selection].bg,
+					border_radius = 0,
+				})
 			}
 
 			if unicode.is_space(char) {
@@ -934,4 +927,9 @@ position_after :: proc(position: Position, r: rune, tab_width: int) -> Position 
 	}
 
 	return position
+}
+
+@(require_results)
+selection_contains :: proc(selection: Selection, offset: Offset) -> bool {
+	return min(selection.anchor, selection.cursor) <= offset && offset <= max(selection.anchor, selection.cursor)
 }
