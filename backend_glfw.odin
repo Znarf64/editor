@@ -47,8 +47,8 @@ _backend_init_glfw :: proc(backend: ^Backend_Glfw) -> (ok: bool) {
 		clear(&backend._events)
 		return events
 	}
-	backend.draw = proc(backend: ^Backend_Glfw, font: Font, instances: []Instance, background_color: [4]f32) {
-		opengl_renderer_draw(backend.opengl_renderer, font, instances, background_color)
+	backend.draw = proc(backend: ^Backend_Glfw, font: Font, commands: []Draw_Command, background_color: [4]f32) {
+		opengl_renderer_draw(&backend.opengl_renderer, font, commands, background_color)
 		glfw.SwapBuffers(backend.window)
 	}
 	backend.set_title = proc(backend: ^Backend_Glfw, title: string) {

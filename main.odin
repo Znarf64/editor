@@ -23,26 +23,15 @@ Draw_Command_Rect :: struct {
 	shadow_width:  f32,
 }
 
-Draw_Command_Text :: struct {
+Draw_Command_Char :: struct {
 	position: [2]f32,
-	text:     string,
+	char:     rune,
 	color:    [4]f32,
 }
 
 Draw_Command :: union {
 	Draw_Command_Rect,
-	Draw_Command_Text,
-}
-
-Instance :: struct {
-	offset:        [2]f32,
-	size:          [2]f32,
-	texture:       [3]f32,
-	color:         [4]f32,
-	border_radius: f32,
-	border_width:  f32,
-	border_color:  [4]f32,
-	shadow_width:  f32,
+	Draw_Command_Char,
 }
 
 Position :: struct {
@@ -185,7 +174,6 @@ main :: proc() {
 	defer config_destroy(&editor.config)
 
 	when true {
-		// S :: #load("/home/znarf/source/odin/src/check_expr.cpp", string)
 		S :: #load(#file, string)
 		N :: 200 when ODIN_OPTIMIZATION_MODE == .Speed else 1
 		editor.btree = btree_build(strings.repeat(S, N, context.temp_allocator), context.allocator, editor.config.tab_width)
@@ -197,8 +185,8 @@ main :: proc() {
 	last_print_time    := time.now()
 	frames_since_print := 0
 
-	instance_buffer := make([dynamic]Instance, context.allocator)
-	defer delete(instance_buffer)
+	draw_commands := make([dynamic]Draw_Command, context.allocator)
+	defer delete(draw_commands)
 
 	main_loop: for {
 		frames_since_print += 1
@@ -331,11 +319,11 @@ main :: proc() {
 		delta_time   := current_time - prev_time
 		prev_time     = current_time
 
-		clear(&instance_buffer)
+		clear(&draw_commands)
 
-		render(&editor, &instance_buffer, f32(delta_time))
+		render(&editor, &draw_commands, f32(delta_time))
 
-		backend->draw(editor.font, instance_buffer[:], editor.config.theme[.Background].bg)
+		backend->draw(editor.font, draw_commands[:], editor.config.theme[.Background].bg)
 		free_all(context.temp_allocator)
 	}
 }
@@ -389,11 +377,11 @@ animation_set_target :: proc(anim: ^Animation($T), target: T) {
 	anim.t      = 0
 }
 
-render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time: f32) {
-	text_buffer := make([dynamic]Instance, context.temp_allocator)
+render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f32) {
+	text_commands := make([dynamic]Draw_Command, context.temp_allocator)
 
 	cell_size: [2]f32 = {
-		la.round(get_baked_glyph(&editor.font, 0).x_advance),
+		la.round(get_glyph_info(&editor.font, 0).x_advance),
 		la.round(((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale)),
 	}
 
@@ -421,6 +409,51 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 	b := strings.builder_make(0, int(end_offset - start_offset), context.temp_allocator)
 	btree_to_string(&editor.btree, &b, start_offset, end_offset)
 	text := strings.to_string(b)
+
+	primary_match: Offset = -1
+	find_primary_match: {
+		iter  := btree_iterator(&editor.btree, editor.selections[editor.primary].cursor)
+		start := btree_iter(&iter) or_break find_primary_match
+
+		back := false
+		delim: rune
+		switch start {
+		case '{':
+			delim = '}'
+		case '[':
+			delim = ']'
+		case '(':
+			delim = ')'
+
+		case '}':
+			delim = '{'
+			back  = true
+		case ']':
+			delim = '['
+			back  = true
+		case ')':
+			delim = '('
+			back  = true
+		case:
+			break find_primary_match
+		}
+
+		balance := 1
+		for r in btree_iter(&iter, back = back) {
+			if iter.offset < start_offset || iter.offset > end_offset {
+				break
+			}
+			if r == delim {
+				balance -= 1
+			} else if r == start {
+				balance += 1
+			}
+			if balance == 0 {
+				primary_match = iter.offset
+				break
+			}
+		}
+	}
 
 	highlighter: Highlighter = {
 		text     = text,
@@ -462,16 +495,16 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 				line_number_buf: [32]byte
 				str := strconv.write_int(line_number_buf[:], i64(l + 1), base = 10)
 				w   := measure_text(&editor.font, str)
-				draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { lines_width - w + padding, y, })
+				draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { lines_width - w + padding, y, })
 
-				append(instance_buffer, Instance {
+				draw_rect(commands,
 					offset = {
 						gutter_width - cell_size.x + padding,
 						cell_size.y * (f32(position.line) - scroll) - la.round(f32(editor.font.descender) * editor.font.scale),
 					},
 					size   = { 2, cell_size.y, },
 					color  = editor.config.theme[.Ident].fg,
-				})
+				)
 			}
 
 			style := style
@@ -489,15 +522,18 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 				}
 
 				next_column := position_after(position, char, editor.config.tab_width).column
-				append(instance_buffer, Instance {
-					offset        = {
+				draw_rect(commands,
+					offset = {
 						f32(position.column) * cell_size.x + gutter_width,
 						cell_size.y * (f32(position.line - 1) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale),
 					} + padding,
-					size          = cell_size * { f32(max(1, next_column - position.column)), 1, },
-					color         = editor.config.theme[.Selection].bg,
-					border_radius = 0,
-				})
+					size   = cell_size * { f32(max(1, next_column - position.column)), 1, },
+					color  = editor.config.theme[.Selection].bg,
+				)
+			}
+
+			if offset == primary_match {
+				style = .Cursor_Secondary
 			}
 
 			if unicode.is_space(char) {
@@ -513,28 +549,24 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 				break render_text
 			}
 
-			g := get_baked_glyph(&editor.font, char)
-
-			append(&text_buffer, Instance {
-				offset  = { x, y, } + ([2]f32)(g.offset),
-				size    = ([2]f32)(g.max - g.min),
-				texture = { **([2]f32)(g.min), 1, },
-				color   = editor.config.theme[style].fg,
+			append(&text_commands, Draw_Command_Char {
+				position = { x, y, },
+				color    = editor.config.theme[style].fg,
+				char     = char,
 			})
 
 			// TODO: line wrapping
 		}
 
 		if editor.config.theme[style].bg != 0 {
-			append(instance_buffer, Instance {
-				offset        = {
+			draw_rect(commands,
+				offset = {
 					f32(start_column) * cell_size.x + gutter_width,
 					cell_size.y * (f32(position.line - 1) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale),
 				} + padding,
-				size          = { f32(position.column - start_column) * cell_size.x, cell_size.y, },
-				color         = editor.config.theme[style].bg,
-				border_radius = 0,
-			})
+				size   = { f32(position.column - start_column) * cell_size.x, cell_size.y, },
+				color  = editor.config.theme[style].bg,
+			)
 		}
 	}
 
@@ -575,27 +607,27 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		}
 
 		cursor_rect := animation_update(&selection.anim, delta_time, editor.config.cursor_animation_speed)
-		append(instance_buffer, Instance {
+		draw_rect(commands,
 			offset        = cursor_rect.min - { 0, scroll * cell_size.y, },
 			size          = rect_size(cursor_rect),
 			color         = editor.config.theme[style].bg,
 			border_radius = 2,
-		})
+		)
 	}
 
-	append(instance_buffer, ..text_buffer[:])
-	clear(&text_buffer)
+	append(commands, ..text_commands[:])
+	clear(&text_commands)
 
-	append(instance_buffer, Instance {
+	draw_rect(commands,
 		offset = { 0, editor.screen_size.y - FONT_HEIGHT - padding * 2, },
 		size   = { editor.screen_size.x, FONT_HEIGHT + padding * 2, },
 		color  = editor.config.theme[.Background].bg,
-	})
-	append(instance_buffer, Instance {
+	)
+	draw_rect(commands,
 		offset = { 0, editor.screen_size.y - FONT_HEIGHT - padding * 2 - 2, },
 		size   = { editor.screen_size.x, 2, },
 		color  = color_from_hex_rgba(0x32363DFF),
-	})
+	)
 
 	mode_text: string
 	mode_style: Style_Key
@@ -617,15 +649,15 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		w     := measure_text(&editor.font, mode_text)
 		style := editor.config.theme[mode_style]
 		if style.bg != 0 {
-			append(instance_buffer, Instance {
+			draw_rect(commands,
 				offset = { x - padding, editor.screen_size.y - FONT_HEIGHT - padding * 2, },
 				size   = { w, FONT_HEIGHT, } + padding * 2,
 				color  = style.bg,
-			})
+			)
 		}
 		draw_text(
 			&editor.font,
-			instance_buffer,
+			commands,
 			mode_text,
 			editor.config.theme[mode_style].fg,
 			{ x, editor.screen_size.y - padding, },
@@ -643,7 +675,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		if strings.builder_len(editor.leader.sequence) != 0 {
 			str := strings.to_string(editor.leader.sequence)
 			x   -= measure_text(&editor.font, str)
-			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
+			draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
 		}
 
 		if editor.repeat_count > 0 {
@@ -652,7 +684,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 
 			str := strconv.write_int(buf[:], i64(editor.repeat_count), base = 10)
 			x   -= measure_text(&editor.font, str)
-			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
+			draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
 		}
 
 		if x != editor.screen_size.x - padding {
@@ -666,29 +698,29 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 
 			str = strconv.write_int(buf[:], i64(primary_position.column + 1), base = 10)
 			x  -= measure_text(&editor.font, str)
-			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
+			draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
 
 			str = ":"
 
 			x -= measure_text(&editor.font, str)
-			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
+			draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
 
 			str = strconv.write_int(buf[:], i64(primary_position.line + 1), base = 10)
 			x  -= measure_text(&editor.font, str)
-			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
+			draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
 
 			x -= padding
 
 			str = "sel"
 
 			x  -= measure_text(&editor.font, str)
-			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
+			draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
 
 			x -= padding
 
 			str = strconv.write_int(buf[:], i64(len(editor.selections)), base = 10)
 			x  -= measure_text(&editor.font, str)
-			draw_text(&editor.font, instance_buffer, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
+			draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
 		}
 	}
 
@@ -707,7 +739,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 
 		x := x + draw_text(
 			&editor.font,
-			instance_buffer,
+			commands,
 			mode_string,
 			editor.config.theme[.Ident].fg,
 			{ x, editor.screen_size.y - padding, },
@@ -715,17 +747,17 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 
 		w := draw_text(
 			&editor.font,
-			instance_buffer,
+			commands,
 			strings.to_string(editor.prompt.input),
 			editor.config.theme[.Ident].fg,
 			{ x, editor.screen_size.y - padding, },
 		)
 
-		append(instance_buffer, Instance {
+		draw_rect(commands,
 			offset = { x + w, editor.screen_size.y - FONT_HEIGHT - padding + f32(editor.font.descender) * editor.font.scale, },
 			size   = { 2, cell_size.y, },
 			color  = editor.config.theme[.Ident].fg,
-		})
+		)
 	}
 
 	if editor.mode == .Picker {
@@ -748,7 +780,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 	}
 
 	leader_rect := animation_update(&editor.leader.rect, delta_time, editor.config.popup_animation_speed)
-	append(instance_buffer, Instance {
+	draw_rect(commands,
 		offset        = leader_rect.min,
 		size          = rect_size(leader_rect),
 		color         = editor.config.theme[.Background].bg,
@@ -756,7 +788,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		border_radius = 8,
 		border_width  = 2,
 		shadow_width  = 16,
-	})
+	)
 
 	animation_set_target(&editor.leader.alpha, editor.leader.active && editor.leader.rect.t == 1 ? 1 : 0)
 	leader_alpha := animation_update(&editor.leader.alpha, delta_time, editor.config.popup_animation_speed)
@@ -767,14 +799,14 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 
 		text_color := editor.config.theme[.Ident].fg * { 1, 1, 1, leader_alpha, }
 
-		draw_text(&editor.font, instance_buffer, editor.leader.title, text_color, { x, y + FONT_HEIGHT, })
+		draw_text(&editor.font, commands, editor.leader.title, text_color, { x, y + FONT_HEIGHT, })
 		y += FONT_HEIGHT + padding
 
-		append(instance_buffer, Instance {
+		draw_rect(commands,
 			offset = { x, y, },
 			size   = { rect_size(leader_rect).x - padding * 2, 2, },
 			color  = color_from_hex_rgba(0x32363DFF) * { 1, 1, 1, leader_alpha, },
-		})
+		)
 		y += padding + 2
 
 		if len(editor.leader.entries) == 0 && len(editor.leader.binds) != 0 {
@@ -809,11 +841,11 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		}
 
 		for entry in editor.leader.entries {
-			draw_text(&editor.font, instance_buffer, entry.bind, text_color, { x, y + FONT_HEIGHT, })
+			draw_text(&editor.font, commands, entry.bind, text_color, { x, y + FONT_HEIGHT, })
 			x := x + editor.leader.binds_width + padding
-			x += draw_text(&editor.font, instance_buffer, "󰁔", text_color, { x, y + FONT_HEIGHT, }) + padding
+			x += draw_text(&editor.font, commands, "󰁔", text_color, { x, y + FONT_HEIGHT, }) + padding
 
-			draw_text(&editor.font, instance_buffer, entry.action, text_color, { x, y + FONT_HEIGHT, })
+			draw_text(&editor.font, commands, entry.action, text_color, { x, y + FONT_HEIGHT, })
 
 			y += FONT_HEIGHT + padding
 		}
@@ -825,7 +857,7 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 
 	picker_rect := animation_update(&editor.picker.rect, delta_time, editor.config.popup_animation_speed)
 
-	append(instance_buffer, Instance {
+	draw_rect(commands,
 		offset        = picker_rect.min,
 		size          = rect_size(picker_rect),
 		color         = color_from_hex_rgba(0x1E2128FF),
@@ -833,12 +865,12 @@ render :: proc(editor: ^Editor, instance_buffer: ^[dynamic]Instance, delta_time:
 		border_radius = 8,
 		border_width  = 2,
 		shadow_width  = 16,
-	})
+	)
 
 	if editor.mode == .Picker {
 		draw_text(
 			&editor.font,
-			instance_buffer,
+			commands,
 			strings.to_string(editor.picker.input),
 			editor.config.theme[.Ident].fg,
 			picker_rect.min + padding + { 0, FONT_HEIGHT, },
@@ -932,4 +964,24 @@ position_after :: proc(position: Position, r: rune, tab_width: int) -> Position 
 @(require_results)
 selection_contains :: proc(selection: Selection, offset: Offset) -> bool {
 	return min(selection.anchor, selection.cursor) <= offset && offset <= max(selection.anchor, selection.cursor)
+}
+
+draw_rect :: proc(
+	commands:     ^[dynamic]Draw_Command,
+	offset:        [2]f32,
+	size:          [2]f32,
+	color:         [4]f32,
+	border_radius: f32    = 0,
+	border_width:  f32    = 0,
+	border_color:  [4]f32 = 0,
+	shadow_width:  f32    = 0,
+) {
+	append(commands, Draw_Command_Rect {
+		rect          = rect_from_min_max(offset, offset + size),
+		color         = color,
+		border_radius = border_radius,
+		border_width  = border_width,
+		border_color  = border_color,
+		shadow_width  = shadow_width,
+	})
 }

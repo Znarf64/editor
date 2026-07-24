@@ -597,12 +597,13 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		back := btree_iterator(&editor.btree, offset = selection.anchor)
 		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 
+		selection.anchor = 0
 		for r in btree_iter(&back, back = true) {
 			if r == '\n' {
+				selection.anchor = back.offset + 1
 				break
 			}
 		}
-		selection.anchor = back.offset + 1
 
 		for r in btree_iter(&iter) {
 			if r == '\n' {

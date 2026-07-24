@@ -1,103 +1,70 @@
 package editor
 
-import "base:runtime"
+import runtime "base:runtime"
 
-import "core:slice"
+import ttf "vendor/ttf_odin"
 
-import glodin "vendor/glodin"
-import ttf    "vendor/ttf_odin"
-
-Baked_Glyph :: struct {
-	min, max:  [2]int,
-	offset:    [2]int,
-	x_advance: f32,
+Glyph_Info :: struct {
+	size, offset: [2]int,
+	x_advance:    f32,
 }
 
 Font :: struct {
 	using ttf_font: ttf.Font,
-	atlas:          glodin.Texture,
-	baked:          map[rune]Baked_Glyph,
-	skyline:        [dynamic]int,
+	glyphs:         map[rune]Glyph_Info,
 	scale:          f32,
 }
 
 @(require_results)
-get_baked_glyph :: proc(font: ^Font, r: rune) -> Baked_Glyph {
-	if b, ok := font.baked[r]; ok {
-		return b
+get_glyph_info :: proc(font: ^Font, r: rune) -> Glyph_Info {
+	if info, ok := font.glyphs[r]; ok {
+		return info
 	}
 
-	glyph  := ttf.get_codepoint_glyph(font.ttf_font, r)
-	shape  := ttf.get_glyph_shape(font, glyph, context.temp_allocator)
-	rect   := ttf.get_bitmap_rect(font, shape, font.scale)
-	size   := rect.max - rect.min
-	pixels := make([][1]u8, size.x * size.y, context.temp_allocator)
-	ttf.render_shape_bitmap(font, shape, font.scale, slice.to_bytes(pixels), subpixel = false)
+	glyph  := ttf.get_codepoint_glyph(font, r)
+	header := ttf.get_glyph_header(font, glyph)
 
-	@(require_results)
-	pack_rect :: proc(font: ^Font, size: [2]int) -> (pos: [2]int = max(int)) {
-		find_spot: for x in 0 ..< len(font.skyline) - size.x {
-			if font.skyline[x] >= pos.y || font.skyline[x] + size.y >= len(font.skyline) {
-				continue
-			}
-			for x2 in x ..< x + size.x {
-				if font.skyline[x2] > font.skyline[x] {
-					continue find_spot
-				}
-			}
+	info: Glyph_Info
 
-			pos.x = x
-			pos.y = font.skyline[x]
-		}
+	if header != nil {
+		min, max: [2]int
+		min.x = int(header.xMin)
+		max.x = int(header.xMax)
+		min.y = int(header.yMin)
+		max.y = int(header.yMax)
 
-		if pos != -1 {
-			for x in pos.x ..< pos.x + size.x {
-				font.skyline[x] = pos.y + size.y
-			}
-		}
-
-		return pos
+		info.size   = max - min
+		info.offset = min
 	}
 
-	pos := pack_rect(font, size + 1)
-	glodin.set_texture_data(font.atlas, pixels, pos.x, pos.y, size.x, size.y)
+	x_advance, _  := ttf.get_glyph_horizontal_metrics(font, glyph)
+	info.x_advance = f32(x_advance) * font.scale
 
-	x_advance, _ := ttf.get_glyph_horizontal_metrics(font, glyph)
-
-	b := Baked_Glyph {
-		min       = pos,
-		max       = pos + size,
-		offset    = { rect.min.x, -rect.max.y, },
-		x_advance = f32(x_advance) * font.scale,
-	}
-
-	font.baked[r] = b
-	return b
+	font.glyphs[r] = info
+	return info
 }
 
 @(require_results)
 measure_text :: proc(font: ^Font, text: string) -> (w: f32) {
 	for r in text {
-		w += get_baked_glyph(font, r).x_advance
+		w += get_glyph_info(font, r).x_advance
 	}
 
 	return w
 }
 
-draw_text :: proc(font: ^Font, instance_buffer: ^[dynamic]Instance, text: string, color: [4]f32, position: [2]f32) -> (width: f32) {
+draw_text :: proc(font: ^Font, commands: ^[dynamic]Draw_Command, text: string, color: [4]f32, position: [2]f32) -> (width: f32) {
 	pos := position
-
 	for r in text {
-		g := get_baked_glyph(font, r)
+		info := get_glyph_info(font, r)
 
-		append(instance_buffer, Instance {
-			offset  = pos + ([2]f32)(g.offset),
-			size    = ([2]f32)(g.max - g.min),
-			texture = { **([2]f32)(g.min), 1, },
-			color   = color,
+		append(commands, Draw_Command_Char {
+			position = pos,
+			char     = r,
+			color    = color,
 		})
 
-		pos.x += g.x_advance
+		pos.x += info.x_advance
 	}
 
 	return pos.x - position.x
@@ -106,15 +73,11 @@ draw_text :: proc(font: ^Font, instance_buffer: ^[dynamic]Instance, text: string
 @(require_results)
 font_init :: proc(font: ^Font, data: []byte, font_height: int, allocator: runtime.Allocator) -> bool {
 	font.ttf_font = ttf.load(data) or_return
-	font.atlas    = glodin.create_texture(1024, 1024, format = .RGB8, mag_filter = .Nearest, min_filter = .Nearest)
-	font.skyline  = make([dynamic]int, 1024, allocator)
 	font.scale    = ttf.font_height_to_scale(font^, f32(font_height))
-	font.baked    = make(map[rune]Baked_Glyph, allocator)
+	font.glyphs   = make(map[rune]Glyph_Info, allocator)
 	return true
 }
 
 font_destroy :: proc(font: Font) {
-	delete(font.baked)
-	delete(font.skyline)
-	glodin.destroy(font.atlas)
+	delete(font.glyphs)
 }
