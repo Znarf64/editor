@@ -438,7 +438,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 			break find_primary_match
 		}
 
-		balance := 1
+		balance := 0 if back else 1
 		for r in btree_iter(&iter, back = back) {
 			if iter.offset < start_offset || iter.offset > end_offset {
 				break
@@ -516,12 +516,12 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 				}
 			}
 
+			next_column := position_after(position, char, editor.config.tab_width).column
 			for selection in editor.selections {
 				if !selection_contains(selection, offset) {
 					continue
 				}
 
-				next_column := position_after(position, char, editor.config.tab_width).column
 				draw_rect(commands,
 					offset = {
 						f32(position.column) * cell_size.x + gutter_width,
@@ -533,7 +533,14 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 			}
 
 			if offset == primary_match {
-				style = .Cursor_Secondary
+				draw_rect(commands,
+					offset = {
+						f32(position.column) * cell_size.x + gutter_width,
+						cell_size.y * (f32(position.line) - scroll) + FONT_HEIGHT - la.round(f32(editor.font.descender) * editor.font.scale) - 1,
+					} + padding,
+					size   = { cell_size.x * f32(max(1, next_column - position.column)), 1, },
+					color  = editor.config.theme[.Cursor].bg,
+				)
 			}
 
 			if unicode.is_space(char) {
