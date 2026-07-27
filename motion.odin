@@ -20,6 +20,14 @@ Motion :: enum {
 	Match_In_Long_Word,
 	Match_In_Paragraph,
 	Match_In_Change,
+	Match_In_Curly,
+	Match_In_Paren,
+	Match_In_Bracket,
+	Match_In_Angled,
+	Match_Around_Curly,
+	Match_Around_Paren,
+	Match_Around_Bracket,
+	Match_Around_Angled,
 
 	Go_To_Line,
 	Go_To_File_End,
@@ -42,6 +50,7 @@ Motion :: enum {
 	Select_Long_Word_Backward,
 
 	Search,
+	Search_Next,
 	Command,
 
 	Open_File,
@@ -124,6 +133,14 @@ motion_descriptions: [Motion]string = {
 	.Match_In_Long_Word              = "match in long word",
 	.Match_In_Paragraph              = "match in paragraph",
 	.Match_In_Change                 = "match in change",
+	.Match_In_Curly                  = "match in curly",
+	.Match_In_Paren                  = "match in paren",
+	.Match_In_Bracket                = "match in bracket",
+	.Match_In_Angled                 = "match in angled",
+	.Match_Around_Curly              = "match around curly",
+	.Match_Around_Paren              = "match around paren",
+	.Match_Around_Bracket            = "match around bracket",
+	.Match_Around_Angled             = "match around angled",
 
 	.Go_To_Line                      = "go to line",
 	.Go_To_File_End                  = "go to file end",
@@ -146,6 +163,7 @@ motion_descriptions: [Motion]string = {
 	.Select_Long_Word_Backward       = "select long word backward",
 
 	.Search                          = "search",
+	.Search_Next                     = "search next",
 	.Command                         = "command",
 
 	.Open_File                       = "open file",
@@ -506,6 +524,59 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 
 		selection.cursor = iter.offset - 1
 
+	case .Match_In_Curly, .Match_In_Paren, .Match_In_Bracket, .Match_In_Angled:
+		motion_apply(editor, selection, motion + .Match_Around_Paren - .Match_In_Paren)
+		selection.cursor -= 1
+		selection.anchor += 1
+
+	case .Match_Around_Curly, .Match_Around_Paren, .Match_Around_Bracket, .Match_Around_Angled:
+		back := btree_iterator(&editor.btree, offset = selection.cursor)
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
+
+		start, end: rune
+		#partial switch motion {
+		case .Match_Around_Curly:
+			start, end = '{', '}'
+		case .Match_Around_Paren:
+			start, end = '(', ')'
+		case .Match_Around_Bracket:
+			start, end = '[', ']'
+		case .Match_Around_Angled:
+			start, end = '<', '>'
+		case:
+			unreachable()
+		}
+
+		balance := 1
+		for r in btree_iter(&back, back = true) {
+			if r == start {
+				balance -= 1
+			}
+			if r == end {
+				balance += 1
+			}
+			if balance == 0 {
+				break
+			}
+		}
+
+		selection.anchor = back.offset
+
+		balance = 1
+		for r in btree_iter(&iter) {
+			if r == start {
+				balance += 1
+			}
+			if r == end {
+				balance -= 1
+			}
+			if balance == 0 {
+				break
+			}
+		}
+
+		selection.cursor = iter.offset
+
 	case .Match_In_Change:
 		unimplemented()
 
@@ -770,11 +841,18 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 
 		selection.cursor = iter.offset
 
+	case .Search_Next:
+		history := editor.prompt.history[.Search]
+		if len(history) == 0 {
+			break
+		}
+		regex_search(editor, history[len(history) - 1])
 	case .Search:
 		strings.builder_reset(&editor.prompt.input)
 		editor.mode        = .Prompt
 		editor.prompt.mode = .Search
 	case .Command:
+		strings.builder_reset(&editor.prompt.input)
 		editor.mode        = .Prompt
 		editor.prompt.mode = .Command
 

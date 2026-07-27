@@ -32,7 +32,7 @@ BTree_Index :: bit_field i32 {
 BTree_Info :: struct {
 	lines: i32,
 	chars: i32,
-	bytes: i32,
+	bytes: Offset,
 }
 
 BTree_Node :: struct {
@@ -93,7 +93,7 @@ btree_build :: proc(data: string, allocator: runtime.Allocator, tab_width: int) 
 		leaf := leaf
 		str  := strings.truncate_to_byte(string(leaf.data[:]), 0)
 
-		info.bytes = i32(len(str))
+		info.bytes = Offset(len(str))
 
 		for r in str {
 			info.chars += 1
@@ -220,7 +220,7 @@ btree_insert_rune :: proc(btree: ^BTree, offset: Offset, r: rune) -> Offset {
 	data   := buf[:n]
 	info   := BTree_Info {
 		lines = i32(bytes.count(data, { '\n', })),
-		bytes = i32(len(data)),
+		bytes = Offset(len(data)),
 		chars = 1,
 	}
 

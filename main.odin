@@ -116,8 +116,10 @@ Editor :: struct {
 }
 
 Prompt :: struct {
-	mode:  Prompt_Mode,
-	input: strings.Builder,
+	mode:    Prompt_Mode,
+	input:   strings.Builder,
+	history: [Prompt_Mode][dynamic]string,
+	arena:   vmem.Arena,
 }
 
 FONT_HEIGHT :: 12
@@ -149,16 +151,24 @@ main :: proc() {
 	editor: Editor
 	editor.selections     = make([dynamic]Selection, 1)
 	editor.new_selections = make([dynamic]Selection)
+
+	err := vmem.arena_init_growing(&editor.prompt.arena)
+	assert(err == nil)
+	err = vmem.arena_init_growing(&editor.leader.arena)
+	assert(err == nil)
+
 	defer {
+		for h in editor.prompt.history {
+			delete(h)
+		}
+		vmem.arena_destroy(&editor.prompt.arena)
+		vmem.arena_destroy(&editor.leader.arena)
 		delete(editor.selections)
 		delete(editor.new_selections)
 		strings.builder_destroy(&editor.leader.sequence)
 		strings.builder_destroy(&editor.picker.input)
 		strings.builder_destroy(&editor.prompt.input)
 	}
-
-	err := vmem.arena_init_growing(&editor.leader.arena)
-	assert(err == nil)
 
 	font_ok := font_init(&editor.font, #load("font.ttf"), FONT_HEIGHT, context.allocator)
 	assert(font_ok)
@@ -217,11 +227,9 @@ main :: proc() {
 					#partial switch e.key {
 					case .Escape:
 						editor.mode = .Normal
-						strings.builder_reset(&editor.prompt.input)
 					case .Enter:
 						prompt_apply(&editor)
 						editor.mode = .Normal
-						strings.builder_reset(&editor.prompt.input)
 					case .Backspace:
 						strings.pop_rune(&editor.prompt.input)
 					}
@@ -388,7 +396,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 	padding: f32 = 10
 	line_digits  := max(1, int(la.ceil(la.log10(f32(editor.btree.lines)))))
 	lines_width  := cell_size.x * f32(line_digits)
-	gutter_width := lines_width + padding + 2 + padding
+	gutter_width := lines_width + padding + 1 + padding
 
 	editor.visible_lines = max(1, int(la.ceil((editor.screen_size.y - FONT_HEIGHT - padding * 2) / cell_size.y)))
 
@@ -502,7 +510,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 						gutter_width - cell_size.x + padding,
 						cell_size.y * (f32(position.line) - scroll) - la.round(f32(editor.font.descender) * editor.font.scale),
 					},
-					size   = { 2, cell_size.y, },
+					size   = { 1, cell_size.y, },
 					color  = editor.config.theme[.Ident].fg,
 				)
 			}
@@ -752,14 +760,24 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 			{ x, editor.screen_size.y - padding, },
 		)
 
+		text := strings.to_string(editor.prompt.input)
+		if text == "" {
+			history := editor.prompt.history[editor.prompt.mode]
+			if len(history) != 0 {
+				text = history[len(history) - 1]
+			}
+		}
 		w := draw_text(
 			&editor.font,
 			commands,
-			strings.to_string(editor.prompt.input),
+			text,
 			editor.config.theme[.Ident].fg,
 			{ x, editor.screen_size.y - padding, },
 		)
 
+		if strings.builder_len(editor.prompt.input) == 0 {
+			w = 0
+		}
 		draw_rect(commands,
 			offset = { x + w, editor.screen_size.y - FONT_HEIGHT - padding + f32(editor.font.descender) * editor.font.scale, },
 			size   = { 2, cell_size.y, },
@@ -894,7 +912,39 @@ next_column_after_tab :: proc(column, tab_width: int) -> int {
 	return column
 }
 
+regex_search :: proc(editor: ^Editor, pattern: string) -> (ok: bool) {
+	pattern, err := regex.create(pattern, flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
+	if err != nil {
+		fmt.println(err)
+		return
+	}
+
+	start_time := time.now()
+	selection  := &editor.selections[editor.primary]
+	start      := selection.cursor
+	b          := strings.builder_make(0, int(editor.btree.bytes - start), context.temp_allocator)
+	btree_to_string(&editor.btree, &b, start)
+
+	start_time = time.now()
+	capture   := regex.match(pattern, strings.to_string(b), context.temp_allocator) or_return
+
+	_, n                   := utf8.decode_last_rune(capture.groups[0])
+	selection.anchor        = Offset(capture.pos[0][0])     + start
+	selection.cursor        = Offset(capture.pos[0][1] - n) + start
+	selection.target_cursor = selection.cursor
+
+	return true
+}
+
 prompt_apply :: proc(editor: ^Editor) {
+	history := &editor.prompt.history[editor.prompt.mode]
+	if strings.builder_len(editor.prompt.input) == 0 {
+		if len(history) != 0 {
+			strings.write_string(&editor.prompt.input, history[len(history) - 1])
+		}
+	} else {
+		append(history, strings.clone(strings.to_string(editor.prompt.input), vmem.arena_allocator(&editor.prompt.arena)))
+	}
 	switch editor.prompt.mode {
 	case .Keep, .Select:
 		pattern, err := regex.create(strings.to_string(editor.prompt.input), flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
@@ -924,31 +974,11 @@ prompt_apply :: proc(editor: ^Editor) {
 			fmt.println(err)
 		}
 	case .Search:
-		pattern, err := regex.create(strings.to_string(editor.prompt.input), flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
-		if err != nil {
-			fmt.println(err)
-			break
-		}
-
-		start_time := time.now()
-		b          := strings.builder_make(0, int(editor.btree.bytes), context.temp_allocator)
-		btree_to_string(&editor.btree, &b)
-		fmt.println("File to string:", time.since(start_time))
-
-		start_time   = time.now()
-		capture, ok := regex.match(pattern, strings.to_string(b), context.temp_allocator)
-		fmt.println("Search:", time.since(start_time))
-
-		if ok {
-			selection              := &editor.selections[editor.primary]
-			_, n                   := utf8.decode_last_rune(capture.groups[0])
-			selection.anchor        = Offset(capture.pos[0][0])
-			selection.cursor        = Offset(capture.pos[0][1] - n)
-			selection.target_cursor = selection.cursor
-		}
+		regex_search(editor, strings.to_string(editor.prompt.input))
 	case .Command:
 		unimplemented()
 	}
+	strings.builder_reset(&editor.prompt.input)
 }
 
 @(require_results)
