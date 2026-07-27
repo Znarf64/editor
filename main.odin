@@ -5,7 +5,6 @@ import fmt     "core:fmt"
 import la      "core:math/linalg"
 import mem     "core:mem"
 import os      "core:os"
-import regex   "core:text/regex"
 import slice   "core:slice"
 import strconv "core:strconv"
 import strings "core:strings"
@@ -13,6 +12,8 @@ import time    "core:time"
 import unicode "core:unicode"
 import utf8    "core:unicode/utf8"
 import vmem    "core:mem/virtual"
+
+import regex   "vendor/regex"
 
 Draw_Command_Rect :: struct {
 	rect:          Rect,
@@ -912,25 +913,79 @@ next_column_after_tab :: proc(column, tab_width: int) -> int {
 	return column
 }
 
-regex_search :: proc(editor: ^Editor, pattern: string) -> (ok: bool) {
-	pattern, err := regex.create(pattern, flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
+regex_search :: proc(editor: ^Editor, pattern_string: string) -> (ok: bool) {
+	pattern, err := regex.create(pattern_string, flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
 	if err != nil {
 		fmt.println(err)
 		return
 	}
 
-	start_time := time.now()
 	selection  := &editor.selections[editor.primary]
-	start      := selection.cursor
+	start      := max(selection.cursor, selection.anchor)
 	b          := strings.builder_make(0, int(editor.btree.bytes - start), context.temp_allocator)
 	btree_to_string(&editor.btree, &b, start)
 
-	start_time = time.now()
-	capture   := regex.match(pattern, strings.to_string(b), context.temp_allocator) or_return
+	capture: regex.Capture
+	capture, ok = regex.match(pattern, strings.to_string(b), context.temp_allocator)
+
+	if ok {
+		_, n                   := utf8.decode_last_rune(capture.groups[0])
+		selection.anchor        = Offset(capture.pos[0][0])     + start
+		selection.cursor        = Offset(capture.pos[0][1] - n) + start
+		selection.target_cursor = selection.cursor
+		return
+	}
+
+	if start == 0 {
+		return
+	}
+
+	strings.builder_reset(&b)
+	strings.builder_grow(&b, int(start))
+	btree_to_string(&editor.btree, &b, end = start)
+
+	capture = regex.match(pattern, strings.to_string(b), context.temp_allocator) or_return
 
 	_, n                   := utf8.decode_last_rune(capture.groups[0])
-	selection.anchor        = Offset(capture.pos[0][0])     + start
-	selection.cursor        = Offset(capture.pos[0][1] - n) + start
+	selection.anchor        = Offset(capture.pos[0][0])
+	selection.cursor        = Offset(capture.pos[0][1] - n)
+	selection.target_cursor = selection.cursor
+
+	return true
+}
+
+regex_search_reverse :: proc(editor: ^Editor, pattern_string: string) -> (ok: bool) {
+	pattern, err := regex.create(pattern_string, flags = { .Unicode, .Reverse_Pattern, }, permanent_allocator = context.temp_allocator)
+	if err != nil {
+		fmt.println(err)
+		return
+	}
+
+	selection  := &editor.selections[editor.primary]
+	start      := min(selection.cursor, selection.anchor)
+	b          := strings.builder_make(0, int(editor.btree.bytes - start), context.temp_allocator)
+	btree_to_string(&editor.btree, &b, end = start, reverse = true)
+
+	capture: regex.Capture
+	capture, ok = regex.match(pattern, strings.to_string(b), context.temp_allocator)
+
+	if ok {
+		_, n                   := utf8.decode_rune(capture.groups[0])
+		selection.cursor        = start - Offset(capture.pos[0][0] + n)
+		selection.anchor        = start - Offset(capture.pos[0][1])
+		selection.target_cursor = selection.cursor
+		return
+	}
+
+	strings.builder_reset(&b)
+	strings.builder_grow(&b, int(start))
+	btree_to_string(&editor.btree, &b, start = start, reverse = true)
+
+	capture = regex.match(pattern, strings.to_string(b), context.temp_allocator) or_return
+
+	_, n                   := utf8.decode_last_rune(capture.groups[0])
+	selection.anchor        = editor.btree.bytes - Offset(capture.pos[0][1])
+	selection.cursor        = editor.btree.bytes - Offset(capture.pos[0][0] + n)
 	selection.target_cursor = selection.cursor
 
 	return true

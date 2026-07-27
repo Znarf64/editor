@@ -6,6 +6,7 @@ import bytes   "core:bytes"
 import fmt     "core:fmt"
 import utf8    "core:unicode/utf8"
 import strings "core:strings"
+import slice   "core:slice"
 import testing "core:testing"
 
 BTREE_LEAF_SIZE :: 64 - size_of(i32) * 2
@@ -514,7 +515,14 @@ graph_dot :: proc(btree: BTree, allocator := context.allocator) -> string {
 	return strings.to_string(b)
 }
 
-btree_to_string :: proc(btree: ^BTree, b: ^strings.Builder, start: Offset = 0, end: Offset = -1) {
+btree_to_string :: proc(btree: ^BTree, b: ^strings.Builder, start: Offset = 0, end: Offset = -1, reverse := false) {
+	if reverse {
+		rb := strings.builder_make(context.temp_allocator)
+		btree_to_string(btree, &rb, start, end)
+		strings.write_string(b, strings.reverse(strings.to_string(rb), context.temp_allocator))
+		return
+	}
+
 	end := end
 	if end == -1 {
 		end = Offset(btree.bytes)

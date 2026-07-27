@@ -3,6 +3,7 @@ package editor
 import fmt     "core:fmt"
 import strings "core:strings"
 import unicode "core:unicode"
+import vmem    "core:mem/virtual"
 
 Motion :: enum {
 	Cursor_Page_Up = 1,
@@ -51,6 +52,8 @@ Motion :: enum {
 
 	Search,
 	Search_Next,
+	Search_Previous,
+	Set_Search,
 	Command,
 
 	Open_File,
@@ -164,6 +167,8 @@ motion_descriptions: [Motion]string = {
 
 	.Search                          = "search",
 	.Search_Next                     = "search next",
+	.Search_Previous                 = "search previous",
+	.Set_Search                      = "set search",
 	.Command                         = "command",
 
 	.Open_File                       = "open file",
@@ -847,6 +852,28 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 			break
 		}
 		regex_search(editor, history[len(history) - 1])
+	case .Search_Previous:
+		history := editor.prompt.history[.Search]
+		if len(history) == 0 {
+			break
+		}
+		regex_search_reverse(editor, history[len(history) - 1])
+	case .Set_Search:
+		if selection != &editor.selections[editor.primary] {
+			break
+		}
+		b := strings.builder_make(context.temp_allocator)
+		btree_to_string(&editor.btree, &b, min(selection.anchor, selection.cursor), max(selection.anchor, selection.cursor))
+		strings.write_rune(&b, btree_get_rune(editor.btree, max(selection.anchor, selection.cursor))) // this is a bit stupid
+		s := strings.to_string(b)
+
+		// TODO: escape
+
+		history := &editor.prompt.history[.Search]
+		if len(history) != 0 && history[len(history) - 1] == s {
+			break
+		}
+		append(history, strings.clone(s, vmem.arena_allocator(&editor.prompt.arena)))
 	case .Search:
 		strings.builder_reset(&editor.prompt.input)
 		editor.mode        = .Prompt
