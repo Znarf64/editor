@@ -45,6 +45,7 @@ iterate_opcodes :: proc(iter: ^Opcode_Iterator) -> (opcode: Opcode, pc: int, ok:
 	case .Wait_For_Rune_Class:         iter.pc += size_of(Opcode) + size_of(u8)
 	case .Wait_For_Rune_Class_Negated: iter.pc += size_of(Opcode) + size_of(u8)
 	case .Match_All_And_Escape:        iter.pc += size_of(Opcode)
+	case .Wildcard_No_Newline:         iter.pc += size_of(Opcode)
 	case:
 		panic("Invalid opcode found in RegEx program.")
 	}
@@ -76,6 +77,7 @@ opcode_to_name :: proc(opcode: Opcode) -> (str: string) {
 	case .Wait_For_Rune_Class:         str = "Wait_For_Rune_Class"
 	case .Wait_For_Rune_Class_Negated: str = "Wait_For_Rune_Class_Negated"
 	case .Match_All_And_Escape:        str = "Match_All_And_Escape"
+	case .Wildcard_No_Newline:         str = "Wildcard_No_Newline"
 	case:                              str = "<UNKNOWN>"
 	}
 

@@ -197,7 +197,7 @@ generate_code :: proc(c: ^Compiler, node: Node) -> (code: Program) {
 		append(&code, Opcode(index))
 
 	case ^Node_Wildcard:
-		append(&code, Opcode.Wildcard)
+		append(&code, Opcode.Wildcard_No_Newline)
 
 	case ^Node_Anchor:
 		if .Multiline in c.flags {

@@ -862,12 +862,44 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		if selection != &editor.selections[editor.primary] {
 			break
 		}
-		b := strings.builder_make(context.temp_allocator)
-		btree_to_string(&editor.btree, &b, min(selection.anchor, selection.cursor), max(selection.anchor, selection.cursor))
-		strings.write_rune(&b, btree_get_rune(editor.btree, max(selection.anchor, selection.cursor))) // this is a bit stupid
-		s := strings.to_string(b)
+		start := min(selection.anchor, selection.cursor)
+		end   := max(selection.anchor, selection.cursor)
+		b     := strings.builder_make(0, int(end - start), context.temp_allocator)
+		iter  := btree_iterator(&editor.btree, offset = min(selection.anchor, selection.cursor))
 
-		// TODO: escape
+		@(require_results)
+		is_word_class :: #force_inline proc "contextless" (r: rune) -> bool {
+			switch r {
+			case '0'..='9', 'A'..='Z', '_', 'a'..='z':
+				return true
+			case:
+				return false
+			}
+		}
+
+		if prev, ok := btree_iter(&iter, back = true); ok {
+			_, _      = btree_iter(&iter)
+			first, _ := btree_iter(&iter)
+			_, _      = btree_iter(&iter, back = true)
+
+			if is_word_class(first) != is_word_class(prev) {
+				strings.write_string(&b, "\\b")
+			}
+		}
+
+		prev: rune
+		for r in btree_iter(&iter) {
+			if iter.offset > max(selection.anchor, selection.cursor) {
+				if is_word_class(r) != is_word_class(prev) {
+					strings.write_string(&b, "\\b")
+				}
+				break
+			}
+			strings.write_escaped_rune(&b, r, '\\')
+			prev = r
+		}
+
+		s := strings.to_string(b)
 
 		history := &editor.prompt.history[.Search]
 		if len(history) != 0 && history[len(history) - 1] == s {

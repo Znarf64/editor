@@ -10,6 +10,8 @@ package regex
 
 import "base:runtime"
 
+import "core:fmt"
+import "core:os"
 import "core:slice"
 
 import "common"

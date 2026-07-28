@@ -50,6 +50,7 @@ Opcode :: enum u8 {
 	Wait_For_Rune_Class         = 0x13, // | u8
 	Wait_For_Rune_Class_Negated = 0x14, // | u8
 	Match_All_And_Escape        = 0x15, // |
+	Wildcard_No_Newline         = 0x16, // |
 }
 Jump :: struct #packed {
 	opcode: Opcode,
@@ -481,6 +482,11 @@ run :: proc(vm: ^Machine, $UNICODE_MODE: bool) -> (saved: ^[2 * common.MAX_CAPTU
 
 			case .Wildcard:
 				add_thread(vm, t.saved, t.pc + size_of(Opcode))
+
+			case .Wildcard_No_Newline:
+				if current_rune != '\n' {
+					add_thread(vm, t.saved, t.pc + size_of(Opcode))
+				}
 
 			case .Multiline_Open:
 				if current_rune == '\n' {
