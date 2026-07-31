@@ -21,14 +21,20 @@ Motion :: enum {
 	Match_In_Long_Word,
 	Match_In_Paragraph,
 	Match_In_Change,
+	Match_Around_Paragraph,
+
 	Match_In_Curly,
 	Match_In_Paren,
 	Match_In_Bracket,
 	Match_In_Angled,
+	Match_In_Quote,
+	Match_In_Single_Quote,
 	Match_Around_Curly,
 	Match_Around_Paren,
 	Match_Around_Bracket,
 	Match_Around_Angled,
+	Match_Around_Quote,
+	Match_Around_Single_Quote,
 
 	Go_To_Line,
 	Go_To_File_End,
@@ -93,6 +99,8 @@ Motion :: enum {
 	Indent,
 	Outdent,
 
+	Selections_Align,
+
 	Open_Below,
 	Open_Above,
 
@@ -135,15 +143,21 @@ motion_descriptions: [Motion]string = {
 	.Match_In_Word                   = "match in word",
 	.Match_In_Long_Word              = "match in long word",
 	.Match_In_Paragraph              = "match in paragraph",
+	.Match_Around_Paragraph          = "match around paragraph",
+
 	.Match_In_Change                 = "match in change",
 	.Match_In_Curly                  = "match in curly",
 	.Match_In_Paren                  = "match in paren",
 	.Match_In_Bracket                = "match in bracket",
 	.Match_In_Angled                 = "match in angled",
+	.Match_In_Quote                  = "match in quote",
+	.Match_In_Single_Quote           = "match in single quote",
 	.Match_Around_Curly              = "match around curly",
 	.Match_Around_Paren              = "match around paren",
 	.Match_Around_Bracket            = "match around bracket",
 	.Match_Around_Angled             = "match around angled",
+	.Match_Around_Quote              = "match around quote",
+	.Match_Around_Single_Quote       = "match around single quote",
 
 	.Go_To_Line                      = "go to line",
 	.Go_To_File_End                  = "go to file end",
@@ -210,6 +224,8 @@ motion_descriptions: [Motion]string = {
 
 	.Indent                          = "indent",
 	.Outdent                         = "outdent",
+
+	.Selections_Align                = "selections align",
 
 	.Show_Hover_Information          = "show hover information",
 	.Show_Code_Actions               = "show code actions",
@@ -326,8 +342,34 @@ argument_motion_apply_single :: proc(editor: ^Editor, selection: ^Selection, mot
 		}
 	case .Replace:
 	case .Insert_Character:
-		selection.cursor += btree_insert(&editor.btree, selection.cursor, arg)
+		editor_insert(editor, selection.cursor, arg)
 	}
+}
+
+editor_insert :: proc {
+	editor_insert_rune,
+	editor_insert_string,
+}
+
+_editor_insert :: proc(editor: ^Editor, arg: $T, offset: Offset) -> Offset {
+	n := btree_insert(&editor.btree, offset, arg)
+	for &selection in editor.selections {
+		if selection.cursor >= offset {
+			selection.cursor += n
+		}
+		if selection.anchor >= offset {
+			selection.anchor += n
+		}
+	}
+	return n
+}
+
+editor_insert_rune   :: proc(editor: ^Editor, offset: Offset, r: rune)   -> Offset {
+	return _editor_insert(editor, r, offset)
+}
+
+editor_insert_string :: proc(editor: ^Editor, offset: Offset, s: string) -> Offset {
+	return _editor_insert(editor, s, offset)
 }
 
 @(require_results)
@@ -497,7 +539,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 
 		selection.cursor = end_offset
 
-	case .Match_In_Paragraph:
+	case .Match_In_Paragraph, .Match_Around_Paragraph:
 		back := btree_iterator(&editor.btree, offset = selection.cursor)
 		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 
@@ -527,14 +569,18 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 			}
 		}
 
-		selection.cursor = iter.offset - 1
+		if motion == .Match_In_Paragraph {
+			selection.cursor = iter.offset - 1
+		} else {
+			selection.cursor = iter.offset
+		}
 
-	case .Match_In_Curly, .Match_In_Paren, .Match_In_Bracket, .Match_In_Angled:
+	case .Match_In_Curly, .Match_In_Paren, .Match_In_Bracket, .Match_In_Angled, .Match_In_Quote, .Match_In_Single_Quote:
 		motion_apply(editor, selection, motion + .Match_Around_Paren - .Match_In_Paren)
 		selection.cursor -= 1
 		selection.anchor += 1
 
-	case .Match_Around_Curly, .Match_Around_Paren, .Match_Around_Bracket, .Match_Around_Angled:
+	case .Match_Around_Curly, .Match_Around_Paren, .Match_Around_Bracket, .Match_Around_Angled, .Match_Around_Quote, .Match_Around_Single_Quote:
 		back := btree_iterator(&editor.btree, offset = selection.cursor)
 		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 
@@ -548,6 +594,10 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 			start, end = '[', ']'
 		case .Match_Around_Angled:
 			start, end = '<', '>'
+		case .Match_Around_Quote:
+			start, end = '"', '"'
+		case .Match_Around_Single_Quote:
+			start, end = '\'', '\''
 		case:
 			unreachable()
 		}
@@ -556,8 +606,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		for r in btree_iter(&back, back = true) {
 			if r == start {
 				balance -= 1
-			}
-			if r == end {
+			} else if r == end {
 				balance += 1
 			}
 			if balance == 0 {
@@ -569,11 +618,10 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 
 		balance = 1
 		for r in btree_iter(&iter) {
-			if r == start {
-				balance += 1
-			}
 			if r == end {
 				balance -= 1
+			} else if r == start {
+				balance += 1
 			}
 			if balance == 0 {
 				break
@@ -717,18 +765,15 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 			}
 		}
 		selection.anchor = iter.offset
-
-		pos := iter.offset
+		selection.cursor = iter.next_offset
 
 		for r in btree_iter(&iter) {
 			if !unicode.is_letter(r) && !unicode.is_digit(r) && r != '_' {
 				break
 			} else {
-				pos = iter.offset
+				selection.cursor = iter.offset
 			}
 		}
-
-		selection.cursor = pos
 
 	case .Select_Word_Forward:
 		iter := btree_iterator(&editor.btree, offset = selection.cursor)
@@ -983,9 +1028,9 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 	case .Normal:
 		editor.mode = .Normal
 	case .Insert_Newline:
-		btree_insert(&editor.btree, selection.cursor, '\n')
+		editor_insert(editor, selection.cursor, '\n')
 	case .Insert_Tab:
-		btree_insert(&editor.btree, selection.cursor, '\t')
+		editor_insert(editor, selection.cursor, '\t')
 
 	case .Open_Below:
 		iter := btree_iterator(&editor.btree, offset = selection.cursor)
@@ -995,7 +1040,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 			}
 		}
 
-		btree_insert(&editor.btree, iter.offset, '\n')
+		editor_insert(editor, iter.offset, '\n')
 		selection.cursor = iter.offset + 1
 		selection.anchor = selection.cursor
 
@@ -1016,7 +1061,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 			}
 		}
 		for _ in 0 ..< editor.repeat_count {
-			btree_insert(&editor.btree, offset, '\t')
+			editor_insert(editor, offset, '\t')
 		}
 		selection.cursor += Offset(editor.repeat_count)
 	case .Outdent:
@@ -1037,6 +1082,17 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 			} else {
 				break
 			}
+		}
+
+	case .Selections_Align:
+		max_column := -1
+		for selection in editor.selections {
+			max_column = max(max_column, btree_offset_to_position(&editor.btree, selection.cursor).column)
+		}
+
+		column := btree_offset_to_position(&editor.btree, selection.cursor).column
+		for _ in column ..< max_column {
+			editor_insert(editor, selection.cursor, ' ')
 		}
 
 	case .Show_Hover_Information:

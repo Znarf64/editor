@@ -73,15 +73,15 @@ Regular_Expression :: struct {
 /*
 An iterator to repeatedly match a pattern against a string, to be used with `*_iterator` procedures.
 */
-// Match_Iterator :: struct {
-// 	regex:    Regular_Expression,
-// 	capture:  Capture,
-// 	vm:       virtual_machine.Machine,
-// 	idx:      int,
-// 	temp:     runtime.Allocator,
-// 	threads:  int,
-// 	done:     bool,
-// }
+Match_Iterator :: struct {
+	regex:    Regular_Expression,
+	capture:  Capture,
+	vm:       virtual_machine.Machine,
+	idx:      int,
+	temp:     runtime.Allocator,
+	threads:  int,
+	done:     bool,
+}
 
 /*
 Create a regular expression from a string pattern and a set of flags.
@@ -280,23 +280,21 @@ Returns:
 - result: The `Match_Iterator`.
 - err: An error, if one occurred.
 */
-// create_iterator :: proc(
-// 	str: string,
-// 	pattern: string,
-// 	flags: Flags = {},
-// 	permanent_allocator := context.allocator,
-// 	temporary_allocator := context.temp_allocator,
-// ) -> (result: Match_Iterator, err: Error) {
-
-// 	result.regex         = create(pattern, flags, permanent_allocator, temporary_allocator) or_return
-// 	result.capture       = preallocate_capture(permanent_allocator)
-// 	result.temp          = temporary_allocator
-// 	result.vm            = virtual_machine.create(result.regex.program, str, permanent_allocator)
-// 	result.vm.class_data = result.regex.class_data
-// 	result.threads       = max(1, virtual_machine.opcode_count(result.vm.code) - 1)
-
-// 	return
-// }
+create_iterator :: proc(
+	str: string,
+	regex: Regular_Expression,
+	flags: Flags = {},
+	permanent_allocator := context.allocator,
+	temporary_allocator := context.temp_allocator,
+) -> (result: Match_Iterator) {
+	result.regex         = regex
+	result.capture       = preallocate_capture(permanent_allocator)
+	result.temp          = temporary_allocator
+	result.vm            = virtual_machine.create(result.regex.program, str, permanent_allocator)
+	result.vm.class_data = result.regex.class_data
+	result.threads       = max(1, virtual_machine.opcode_count(result.vm.code) - 1)
+	return
+}
 
 /*
 Match a regular expression against a string and allocate the results into the
@@ -450,96 +448,96 @@ Returns:
 - result: `Capture` for this iteration.
 - ok:     A bool indicating if there was a match, stopping the iteration on `false`.
 */
-// match_iterator :: proc(it: ^Match_Iterator) -> (result: Capture, index: int, ok: bool) {
-// 	assert(len(it.capture.groups) >= common.MAX_CAPTURE_GROUPS,
-// 		"Pre-allocated RegEx capture `groups` must be at least 10 elements long.")
-// 	assert(len(it.capture.pos) >= common.MAX_CAPTURE_GROUPS,
-// 		"Pre-allocated RegEx capture `pos` must be at least 10 elements long.")
+match_iterator :: proc(it: ^Match_Iterator) -> (result: Capture, index: int, ok: bool) {
+	assert(len(it.capture.groups) >= common.MAX_CAPTURE_GROUPS,
+		"Pre-allocated RegEx capture `groups` must be at least 10 elements long.")
+	assert(len(it.capture.pos) >= common.MAX_CAPTURE_GROUPS,
+		"Pre-allocated RegEx capture `pos` must be at least 10 elements long.")
 
-// 	// Guard against situations in which the iterator should finish.
-// 	if it.done {
-// 		return
-// 	}
+	// Guard against situations in which the iterator should finish.
+	if it.done {
+		return
+	}
 
-// 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-// 	if it.idx > 0 {
-// 		// Reset the state needed to `virtual_machine.run` again.
-// 		it.vm.top_thread        = 0
-// 		it.vm.current_rune      = rune(0)
-// 		it.vm.current_rune_size = 0
-// 		for i in 0..<it.threads {
-// 			it.vm.threads[i]      = {}
-// 			it.vm.next_threads[i] = {}
-// 		}
-// 	}
+	if it.idx > 0 {
+		// Reset the state needed to `virtual_machine.run` again.
+		it.vm.top_thread        = 0
+		it.vm.current_rune      = rune(0)
+		it.vm.current_rune_size = 0
+		for i in 0..<it.threads {
+			it.vm.threads[i]      = {}
+			it.vm.next_threads[i] = {}
+		}
+	}
 
-// 	// Take note of where the string pointer is before we start.
-// 	sp_before := it.vm.string_pointer
+	// Take note of where the string pointer is before we start.
+	sp_before := it.vm.string_pointer
 
-// 	saved: ^[2 * common.MAX_CAPTURE_GROUPS]int
-// 	{
-// 		context.allocator = it.temp
-// 		if .Unicode in it.regex.flags {
-// 			saved, ok = virtual_machine.run(&it.vm, true)
-// 		} else {
-// 			saved, ok = virtual_machine.run(&it.vm, false)
-// 		}
-// 	}
+	saved: ^[2 * common.MAX_CAPTURE_GROUPS]int
+	{
+		context.allocator = it.temp
+		if .Unicode in it.regex.flags {
+			saved, ok = virtual_machine.run(&it.vm, true)
+		} else {
+			saved, ok = virtual_machine.run(&it.vm, false)
+		}
+	}
 
-// 	if !ok {
-// 		// Match failed, bail out.
-// 		return
-// 	}
+	if !ok {
+		// Match failed, bail out.
+		return
+	}
 
-// 	if it.vm.string_pointer == sp_before {
-// 		// The string pointer did not move, but there was a match.
-// 		//
-// 		// At this point, the pattern supplied to the iterator will infinitely
-// 		// loop if we do not intervene.
-// 		it.done = true
-// 	}
-// 	if it.vm.string_pointer == len(it.vm.memory) {
-// 		// The VM hit the end of the string.
-// 		//
-// 		// We do not check at the start, because a match of pattern `$`
-// 		// against string "" is valid and must return a match.
-// 		//
-// 		// This check prevents a double-match of `$` against a non-empty string.
-// 		it.done = true
-// 	}
+	if it.vm.string_pointer == sp_before {
+		// The string pointer did not move, but there was a match.
+		//
+		// At this point, the pattern supplied to the iterator will infinitely
+		// loop if we do not intervene.
+		it.done = true
+	}
+	if it.vm.string_pointer == len(it.vm.memory) {
+		// The VM hit the end of the string.
+		//
+		// We do not check at the start, because a match of pattern `$`
+		// against string "" is valid and must return a match.
+		//
+		// This check prevents a double-match of `$` against a non-empty string.
+		it.done = true
+	}
 
-// 	str := string(it.vm.memory)
-// 	num_groups: int
+	str := string(it.vm.memory)
+	num_groups: int
 
-// 	if saved != nil {
-// 		n := 0
+	if saved != nil {
+		n := 0
 
-// 		#no_bounds_check for i := 0; i < len(saved); i += 2 {
-// 			a, b := saved[i], saved[i + 1]
-// 			if a == -1 || b == -1 {
-// 				continue
-// 			}
+		#no_bounds_check for i := 0; i < len(saved); i += 2 {
+			a, b := saved[i], saved[i + 1]
+			if a == -1 || b == -1 {
+				continue
+			}
 
-// 			it.capture.groups[n] = str[a:b]
-// 			it.capture.pos[n]    = {a, b}
-// 			n += 1
-// 		}
-// 		num_groups = n
-// 	}
+			it.capture.groups[n] = str[a:b]
+			it.capture.pos[n]    = {a, b}
+			n += 1
+		}
+		num_groups = n
+	}
 
-// 	defer it.idx += 1
+	defer it.idx += 1
 
-// 	if num_groups > 0 {
-// 		result = {it.capture.pos[:num_groups], it.capture.groups[:num_groups]}
-// 	}
-// 	return result, it.idx, ok
-// }
+	if num_groups > 0 {
+		result = {it.capture.pos[:num_groups], it.capture.groups[:num_groups]}
+	}
+	return result, it.idx, ok
+}
 
 match :: proc {
 	match_and_allocate_capture,
 	match_with_preallocated_capture,
-	// match_iterator,
+	match_iterator,
 }
 
 /*
@@ -548,20 +546,20 @@ Reset an iterator, allowing it to be run again as if new.
 Inputs:
 - it: The iterator to reset.
 */
-// reset :: proc(it: ^Match_Iterator) {
-// 	it.done                 = false
-// 	it.idx                  = 0
-// 	it.vm.string_pointer    = 0
+reset :: proc(it: ^Match_Iterator) {
+	it.done                 = false
+	it.idx                  = 0
+	it.vm.string_pointer    = 0
 
-// 	it.vm.top_thread        = 0
-// 	it.vm.current_rune      = rune(0)
-// 	it.vm.current_rune_size = 0
-// 	it.vm.last_rune         = rune(0)
-// 	for i in 0..<it.threads {
-// 		it.vm.threads[i]      = {}
-// 		it.vm.next_threads[i] = {}
-// 	}
-// }
+	it.vm.top_thread        = 0
+	it.vm.current_rune      = rune(0)
+	it.vm.current_rune_size = 0
+	it.vm.last_rune         = rune(0)
+	for i in 0..<it.threads {
+		it.vm.threads[i]      = {}
+		it.vm.next_threads[i] = {}
+	}
+}
 
 /*
 Allocate a `Capture` in advance for use with `match`. This can save some time
@@ -625,17 +623,17 @@ Inputs:
 - it: A `Match_Iterator`
 - allocator: (default: context.allocator)
 */
-// destroy_iterator :: proc(it: Match_Iterator, allocator := context.allocator) {
-// 	context.allocator = allocator
-// 	destroy(it.regex)
-// 	destroy(it.capture)
-// 	virtual_machine.destroy(it.vm)
-// }
+destroy_iterator :: proc(it: Match_Iterator, allocator := context.allocator) {
+	context.allocator = allocator
+	destroy(it.regex)
+	destroy(it.capture)
+	virtual_machine.destroy(it.vm)
+}
 
 destroy :: proc {
 	destroy_regex,
 	destroy_capture,
-	// destroy_iterator,
+	destroy_iterator,
 }
 
 reverse :: proc(node: ^parser.Node) {

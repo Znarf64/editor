@@ -595,3 +595,10 @@ btree_test_to_string :: proc(t: ^testing.T) {
 
 	assert(strings.to_string(b) == data)
 }
+
+@(require_results)
+btree_offset_before :: proc(btree: ^BTree, offset: Offset) -> Offset {
+	iter := btree_iterator(btree, offset)
+	_, _  = btree_iter(&iter, back = true)
+	return iter.offset
+}

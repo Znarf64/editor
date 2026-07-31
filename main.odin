@@ -1001,7 +1001,7 @@ prompt_apply :: proc(editor: ^Editor) {
 		append(history, strings.clone(strings.to_string(editor.prompt.input), vmem.arena_allocator(&editor.prompt.arena)))
 	}
 	switch editor.prompt.mode {
-	case .Keep, .Select:
+	case .Select:
 		pattern, err := regex.create(strings.to_string(editor.prompt.input), flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
 		if err != nil {
 			fmt.println(err)
@@ -1009,19 +1009,60 @@ prompt_apply :: proc(editor: ^Editor) {
 		}
 
 		b := strings.builder_make(context.temp_allocator)
-		for selection in editor.selections {
+		for i := len(editor.selections) - 1; i >= 0; i -= 1 {
+			selection := editor.selections[i]
+
 			start := min(selection.cursor, selection.anchor)
 			end   := max(selection.cursor, selection.anchor)
 
-			start_time := time.now()
 			strings.builder_grow(&b, int(end - start))
 			btree_to_string(&editor.btree, &b, start, end)
-			fmt.println("Selection to string:", time.since(start_time))
 
-			start_time = time.now()
+			regex_iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator)
+			for capture in regex.match(&regex_iter) {
+				append(&editor.new_selections, Selection {
+					anchor        = start + Offset(capture.pos[0][0]),
+					cursor        = start + btree_offset_before(&editor.btree, Offset(capture.pos[0][1])),
+					target_cursor = selection.cursor,
+				})
+			}
+			strings.builder_reset(&b)
+		}
 
-			capture, ok := regex.match(pattern, strings.to_string(b), context.temp_allocator)
-			fmt.println(capture, ok, time.since(start_time))
+		if len(editor.new_selections) != 0 {
+			resize(&editor.selections, len(editor.new_selections))
+			copy(editor.selections[:], editor.new_selections[:])
+			clear(&editor.new_selections)
+		}
+
+		if err != nil {
+			fmt.println(err)
+		}
+	case .Keep:
+		pattern, err := regex.create(strings.to_string(editor.prompt.input), flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
+		if err != nil {
+			fmt.println(err)
+			break
+		}
+
+		b := strings.builder_make(context.temp_allocator)
+
+		for i := len(editor.selections) - 1; i >= 0; i -= 1 {
+			selection := editor.selections[i]
+
+			start := min(selection.cursor, selection.anchor)
+			end   := max(selection.cursor, selection.anchor)
+
+			strings.builder_grow(&b, int(end - start))
+			btree_to_string(&editor.btree, &b, start, end)
+
+			_, ok := regex.match(pattern, strings.to_string(b), context.temp_allocator)
+			if !ok {
+				ordered_remove(&editor.selections, i)
+				if i <= editor.primary {
+					editor.primary -= 1
+				}
+			}
 			strings.builder_reset(&b)
 		}
 
