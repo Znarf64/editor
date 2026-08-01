@@ -96,38 +96,32 @@ Action :: union {
 	Argument_Motion,
 }
 
+deduplicate_selections :: proc(editor: ^Editor) {
+	// this should be better, O(N log N) instead of O(N^2)
+	for i := 0; i < len(editor.selections); i += 1 {
+		for j := i + 1; j < len(editor.selections); j += 1 {
+			if selection_contains(editor.selections[i], editor.selections[j].cursor) || selection_contains(editor.selections[i], editor.selections[j].anchor) {
+				if editor.primary >= j {
+					editor.primary -= 1
+				}
+				editor.selections[i].anchor        = min(editor.selections[i].anchor, editor.selections[j].anchor)
+				editor.selections[i].cursor        = max(editor.selections[i].cursor, editor.selections[j].cursor)
+				editor.selections[i].target_cursor = editor.selections[i].cursor
+				ordered_remove(&editor.selections, j)
+			}
+		}
+	}
+}
+
 action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 	switch v in action {
 	case Motion:
 		if editor.repeat_count == 0 {
 			editor.repeat_count = 1
 		}
-		cursors := make(map[Offset]int, context.temp_allocator)
-		for i := 0; i < len(editor.selections); {
-			selection := &editor.selections[i]
-			motion_apply(editor, selection, v)
-
-			if selection.cursor in cursors {
-				ordered_remove(&editor.selections, i)
-				if i <= editor.primary {
-					editor.primary -= 1
-				}
-			} else {
-				cursors[selection.cursor] = i
-				i                        += 1
-			}
+		for &selection, i in editor.selections {
+			motion_apply(editor, &selection, v, i == editor.primary)
 		}
-		for selection in editor.new_selections {
-			if selection.cursor in cursors {
-				continue
-			}
-			append(&editor.selections, selection)
-		}
-		if len(editor.new_selections) != 0 {
-			editor.primary = len(editor.selections) - 1
-		}
-		clear(&editor.new_selections)
-		editor.repeat_count = 0
 	case Command:
 		command_execute(editor, v)
 		editor.repeat_count = 0
@@ -144,6 +138,17 @@ action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 			action_apply(editor, action, keybind)
 		}
 	}
+	for selection in editor.new_selections {
+		if selection.primary {
+			editor.primary = len(editor.selections)
+		}
+		selection              := selection
+		selection.target_cursor = selection.cursor
+		append(&editor.selections, selection)
+	}
+	clear(&editor.new_selections)
+	editor.repeat_count = 0
+	deduplicate_selections(editor)
 }
 
 Keybinds :: distinct map[Keybind]Action

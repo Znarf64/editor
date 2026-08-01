@@ -2,8 +2,9 @@ package editor
 
 import runtime "base:runtime"
 
-import ini     "core:encoding/ini"
 import fmt     "core:fmt"
+import ini     "core:encoding/ini"
+import reflect "core:reflect"
 import strconv "core:strconv"
 import strings "core:strings"
 import vmem    "core:mem/virtual"
@@ -140,7 +141,30 @@ load_config_file :: proc(config: ^Config, src: string, allocator: runtime.Alloca
 				config.theme[style].bg = color
 			}
 		case "editor":
-			// fmt.printfln("%v: %v = %v", section, key, value)
+			unmarshal_value :: proc(v: any, value: string) -> bool {
+				switch &v in v {
+				case f32:
+					v = strconv.parse_f32(value) or_return
+				case int:
+					v = strconv.parse_int(value) or_return
+				case bool:
+					if strings.equal_fold(value, "true") {
+						v = true
+						return true
+					}
+					if strings.equal_fold(value, "false") {
+						v = false
+						return true
+					}
+					return false
+				}
+				return false
+			}
+			field := reflect.struct_field_value_by_name(config^, key)
+			if field == nil {
+				break
+			}
+			unmarshal_value(field, value) or_break
 		case "language":
 			// fmt.printfln("%v: %v = %v", section, key, value)
 		case "keybinds":
@@ -240,12 +264,7 @@ load_config :: proc(config: ^Config) -> (ok: bool) {
 		config.styles[c] = .Constant
 	}
 
-	config.animations             = true
-	config.relative_line_numbers  = true
-	config.scroll_animation_speed = 7.5
-	config.cursor_animation_speed = 10
-	config.popup_animation_speed  = 7.5
-	config.tab_width              = 4
+	config.tab_width = 4
 
 	load_config_file(config, #load("config.ini"), allocator)
 

@@ -6,7 +6,6 @@ import bytes   "core:bytes"
 import fmt     "core:fmt"
 import utf8    "core:unicode/utf8"
 import strings "core:strings"
-import slice   "core:slice"
 import testing "core:testing"
 
 BTREE_LEAF_SIZE :: 64 - size_of(i32) * 2

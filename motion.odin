@@ -119,6 +119,8 @@ Motion :: enum {
 	Select,
 
 	Flip_Selection,
+
+	Split_Lines,
 }
 
 Motion_Info :: struct {
@@ -244,6 +246,8 @@ motion_descriptions: [Motion]string = {
 	.Select                          = "select",
 
 	.Flip_Selection                  = "flip selection",
+
+	.Split_Lines                     = "split lines",
 }
 
 Argument_Motion :: enum {
@@ -346,6 +350,10 @@ argument_motion_apply_single :: proc(editor: ^Editor, selection: ^Selection, mot
 	}
 }
 
+editor_remove :: proc(editor: ^Editor, start, end: Offset) {
+	btree_remove_range(&editor.btree, start, end)
+}
+
 editor_insert :: proc {
 	editor_insert_rune,
 	editor_insert_string,
@@ -392,7 +400,7 @@ position_to_offset_normalized :: proc(editor: ^Editor, position: Position, verti
 	return vertical_move
 }
 
-motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
+motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion, primary: bool) {
 	vertical_move: bool
 	defer if !vertical_move {
 		selection.target_cursor = selection.cursor
@@ -576,7 +584,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		}
 
 	case .Match_In_Curly, .Match_In_Paren, .Match_In_Bracket, .Match_In_Angled, .Match_In_Quote, .Match_In_Single_Quote:
-		motion_apply(editor, selection, motion + .Match_Around_Paren - .Match_In_Paren)
+		motion_apply(editor, selection, motion + .Match_Around_Paren - .Match_In_Paren, primary)
 		selection.cursor -= 1
 		selection.anchor += 1
 
@@ -1052,18 +1060,37 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		editor.mode = .Insert
 
 	case .Indent:
-		iter := btree_iterator(&editor.btree, offset = selection.cursor)
-		offset: Offset
+		start := min(selection.cursor, selection.anchor)
+		iter  := btree_iterator(&editor.btree, offset = start)
+
 		for r in btree_iter(&iter, back = true) {
 			if r == '\n' {
-				offset = iter.offset + 1
+				indent(editor, iter.offset + 1, editor.repeat_count)
 				break
 			}
 		}
-		for _ in 0 ..< editor.repeat_count {
-			editor_insert(editor, offset, '\t')
+
+		iter = btree_iterator(&editor.btree, offset = start)
+		for r in btree_iter(&iter) {
+			if iter.offset >= max(selection.cursor, selection.anchor) {
+				break
+			}
+			if r == '\n' {
+				indent(editor, iter.offset + 1, editor.repeat_count)
+			}
 		}
-		selection.cursor += Offset(editor.repeat_count)
+
+		indent :: proc(editor: ^Editor, offset: Offset, n: int) {
+			N :: BTREE_LEAF_SIZE
+			@(static, rodata)
+			tab_buf: [N]u8 = '\t'
+
+			n := n
+			for n > 0 {
+				editor_insert(editor, offset, string(tab_buf[:min(n, N)]))
+				n -= N
+			}
+		}
 	case .Outdent:
 		iter := btree_iterator(&editor.btree, offset = selection.cursor)
 		offset: Offset
@@ -1109,7 +1136,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		for _ in 0 ..< editor.repeat_count {
 			for _ in btree_iter(&iter) {
 				if iter.column == position.column {
-					append(&editor.new_selections, Selection { cursor = iter.offset, anchor = iter.offset, })
+					append(&editor.new_selections, New_Selection { cursor = iter.offset, anchor = iter.offset, primary = primary, })
 					break
 				}
 			}
@@ -1127,8 +1154,42 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion) {
 		editor.prompt.mode = .Select
 
 	case .Flip_Selection:
-		selection.anchor, selection.cursor = selection.cursor , selection.anchor
+		selection.anchor, selection.cursor = selection.cursor, selection.anchor
 
+	case .Split_Lines:
+		start := min(selection.cursor, selection.anchor)
+		end   := max(selection.cursor, selection.anchor)
+		iter  := btree_iterator(&editor.btree, start)
+
+		for r in btree_iter(&iter) {
+			if iter.offset >= end {
+				break
+			}
+			if r == '\n' {
+				selection.anchor = start
+				selection.cursor = iter.offset
+
+				start := iter.offset + 1
+				for r in btree_iter(&iter) {
+					if iter.offset >= end {
+						break
+					}
+					if r == '\n' {
+						append(&editor.new_selections, New_Selection {
+							anchor = start,
+							cursor = iter.offset,
+						})
+						start = iter.offset + 1
+					}
+				}
+
+				append(&editor.new_selections, New_Selection {
+					anchor = start,
+					cursor = iter.offset,
+				})
+				break
+			}
+		}
 	case:
 	}
 }

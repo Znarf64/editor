@@ -72,12 +72,17 @@ Leader_Entry :: struct {
 	bind, action: string,
 }
 
+New_Selection :: struct {
+	using selection: Selection,
+	primary:         bool,
+}
+
 Editor :: struct {
 	mode:           Mode,
 
 	primary:        int,
 	selections:     [dynamic]Selection,
-	new_selections: [dynamic]Selection,
+	new_selections: [dynamic]New_Selection,
 
 	visible_lines:  int,
 	screen_size:    [2]f32,
@@ -151,7 +156,7 @@ main :: proc() {
 
 	editor: Editor
 	editor.selections     = make([dynamic]Selection, 1)
-	editor.new_selections = make([dynamic]Selection)
+	editor.new_selections = make([dynamic]New_Selection)
 
 	err := vmem.arena_init_growing(&editor.prompt.arena)
 	assert(err == nil)
@@ -1009,9 +1014,7 @@ prompt_apply :: proc(editor: ^Editor) {
 		}
 
 		b := strings.builder_make(context.temp_allocator)
-		for i := len(editor.selections) - 1; i >= 0; i -= 1 {
-			selection := editor.selections[i]
-
+		for selection, i in editor.selections {
 			start := min(selection.cursor, selection.anchor)
 			end   := max(selection.cursor, selection.anchor)
 
@@ -1019,20 +1022,30 @@ prompt_apply :: proc(editor: ^Editor) {
 			btree_to_string(&editor.btree, &b, start, end)
 
 			regex_iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator)
-			for capture in regex.match(&regex_iter) {
-				append(&editor.new_selections, Selection {
-					anchor        = start + Offset(capture.pos[0][0]),
-					cursor        = start + btree_offset_before(&editor.btree, Offset(capture.pos[0][1])),
-					target_cursor = selection.cursor,
+			for capture, capture_i in regex.match(&regex_iter) {
+				append(&editor.new_selections, New_Selection {
+					anchor  = start + Offset(capture.pos[0][0]),
+					cursor  = start + btree_offset_before(&editor.btree, Offset(capture.pos[0][1])),
+					primary = i == editor.primary && capture_i == 0,
 				})
 			}
 			strings.builder_reset(&b)
 		}
 
 		if len(editor.new_selections) != 0 {
-			resize(&editor.selections, len(editor.new_selections))
-			copy(editor.selections[:], editor.new_selections[:])
+			clear(&editor.selections)
+			reserve(&editor.selections, len(editor.new_selections))
+
+			for selection in editor.new_selections {
+				if selection.primary {
+					editor.primary = len(editor.selections)
+				}
+				selection              := selection
+				selection.target_cursor = selection.cursor
+				append(&editor.selections, selection)
+			}
 			clear(&editor.new_selections)
+			deduplicate_selections(editor)
 		}
 
 		if err != nil {
