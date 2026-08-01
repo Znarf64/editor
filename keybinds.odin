@@ -3,6 +3,7 @@ package editor
 import runtime "base:runtime"
 
 import strings "core:strings"
+import slice   "core:slice"
 import vmem    "core:mem/virtual"
 
 Key :: enum {
@@ -96,21 +97,57 @@ Action :: union {
 	Argument_Motion,
 }
 
+// this is a bit dumb, we should just have a proper data structure to store selections
 deduplicate_selections :: proc(editor: ^Editor) {
-	// this should be better, O(N log N) instead of O(N^2)
-	for i := 0; i < len(editor.selections); i += 1 {
-		for j := i + 1; j < len(editor.selections); j += 1 {
-			if selection_contains(editor.selections[i], editor.selections[j].cursor) || selection_contains(editor.selections[i], editor.selections[j].anchor) {
-				if editor.primary >= j {
-					editor.primary -= 1
-				}
-				editor.selections[i].anchor        = min(editor.selections[i].anchor, editor.selections[j].anchor)
-				editor.selections[i].cursor        = max(editor.selections[i].cursor, editor.selections[j].cursor)
-				editor.selections[i].target_cursor = editor.selections[i].cursor
-				ordered_remove(&editor.selections, j)
-			}
+	n := len(editor.selections)
+	if n <= 1 {
+		return
+	}
+
+	Entry :: struct {
+		min, max:   Offset,
+		orig_index: int,
+	}
+
+	entries := make([]Entry, n, context.temp_allocator)
+	for s, i in editor.selections {
+		entries[i] = { min = min(s.cursor, s.anchor), max = max(s.cursor, s.anchor), orig_index = i, }
+	}
+
+	slice.sort_by(entries, proc(a, b: Entry) -> bool {
+		return a.min < b.min
+	})
+
+	index_map      := make([]int, n, context.temp_allocator)
+	new_selections := make([dynamic]Selection, 0, n, context.temp_allocator)
+
+	cur                      := entries[0]
+	cur_sel                  := editor.selections[cur.orig_index]
+	index_map[cur.orig_index] = 0
+
+	for e in entries[1:] {
+		if e.min <= cur.max {
+			new_min                := min(cur.min, e.min)
+			new_max                := max(cur.max, e.max)
+			cur.min, cur.max        = new_min, new_max
+			cur_sel.anchor          = new_min
+			cur_sel.cursor          = new_max
+			cur_sel.target_cursor   = new_max
+			index_map[e.orig_index] = len(new_selections) // will point to current slot
+		} else {
+			append(&new_selections, cur_sel)
+			cur                       = e
+			cur_sel                   = editor.selections[cur.orig_index]
+			index_map[cur.orig_index] = len(new_selections)
 		}
 	}
+
+	append(&new_selections, cur_sel)
+
+	editor.primary = index_map[editor.primary]
+
+	resize(&editor.selections, len(new_selections))
+	copy(editor.selections[:], new_selections[:])
 }
 
 action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {

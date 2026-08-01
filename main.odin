@@ -77,20 +77,24 @@ New_Selection :: struct {
 	primary:         bool,
 }
 
+Buffer :: struct {
+	btree:         BTree,
+	primary:       int,
+	selections:    [dynamic]Selection,
+	scroll:        int,
+	scroll_anim:   Animation(f32),
+	visible_lines: int,
+}
+
 Editor :: struct {
 	mode:           Mode,
 
-	primary:        int,
-	selections:     [dynamic]Selection,
-	new_selections: [dynamic]New_Selection,
+	using buffer:   Buffer,
 
-	visible_lines:  int,
+	new_selections: [dynamic]New_Selection,
 	screen_size:    [2]f32,
 
 	repeat_count:   int,
-
-	scroll:         int,
-	scroll_anim:    Animation(f32),
 
 	leader:         struct {
 		active:      bool,
@@ -113,8 +117,6 @@ Editor :: struct {
 	},
 
 	prompt:         Prompt,
-
-	btree:          BTree,
 
 	config:         Config,
 
@@ -191,8 +193,7 @@ main :: proc() {
 
 	when true {
 		S :: #load(#file, string)
-		N :: 200 when ODIN_OPTIMIZATION_MODE == .Speed else 1
-		editor.btree = btree_build(strings.repeat(S, N, context.temp_allocator), context.allocator, editor.config.tab_width)
+		editor.btree = btree_build(S, context.allocator, editor.config.tab_width)
 	} else {
 		editor.btree = btree_build("Hello World!\n\n", context.allocator, editor.config.tab_width)
 	}
@@ -1085,7 +1086,7 @@ prompt_apply :: proc(editor: ^Editor) {
 	case .Search:
 		regex_search(editor, strings.to_string(editor.prompt.input))
 	case .Command:
-		unimplemented()
+		command_execute(editor, Command(strings.to_string(editor.prompt.input)))
 	}
 	strings.builder_reset(&editor.prompt.input)
 }

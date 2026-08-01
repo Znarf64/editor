@@ -429,15 +429,23 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion, pri
 		selection.anchor = selection.cursor
 
 	case .View_Half_Page_Up:
+		primary or_break
+
 		editor.scroll -= editor.visible_lines / 2
 		vertical_move  = true
 	case .View_Half_Page_Down:
+		primary or_break
+
 		editor.scroll += editor.visible_lines / 2
 		vertical_move  = true
 	case .View_Page_Up:
+		primary or_break
+
 		editor.scroll -= editor.visible_lines
 		vertical_move  = true
 	case .View_Page_Down:
+		primary or_break
+
 		editor.scroll += editor.visible_lines
 		vertical_move  = true
 
