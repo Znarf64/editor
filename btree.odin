@@ -596,8 +596,19 @@ btree_test_to_string :: proc(t: ^testing.T) {
 }
 
 @(require_results)
-btree_offset_before :: proc(btree: ^BTree, offset: Offset) -> Offset {
+btree_offset_before :: proc(btree: ^BTree, offset: Offset, n := 1) -> Offset {
 	iter := btree_iterator(btree, offset)
-	_, _  = btree_iter(&iter, back = true)
+	for _ in 0 ..< n {
+		_ = btree_iter(&iter, back = true) or_break
+	}
+	return iter.offset
+}
+
+@(require_results)
+btree_offset_after :: proc(btree: ^BTree, offset: Offset, n := 1) -> Offset {
+	iter := btree_iterator(btree, offset)
+	for _ in 0 ..< n {
+		_ = btree_iter(&iter) or_break
+	}
 	return iter.offset
 }

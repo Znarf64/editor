@@ -1,6 +1,5 @@
 package editor
 
-import fmt     "core:fmt"
 import strings "core:strings"
 import unicode "core:unicode"
 import vmem    "core:mem/virtual"
@@ -920,9 +919,8 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion, pri
 		}
 		regex_search_reverse(editor, history[len(history) - 1])
 	case .Set_Search:
-		if selection != &editor.selections[editor.primary] {
-			break
-		}
+		primary or_break
+
 		start := min(selection.anchor, selection.cursor)
 		end   := max(selection.anchor, selection.cursor)
 		b     := strings.builder_make(0, int(end - start), context.temp_allocator)
@@ -955,6 +953,10 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion, pri
 					strings.write_string(&b, "\\b")
 				}
 				break
+			}
+			switch r {
+			case '{', '}', '(', ')', '^', '|', '*', '+', '?', '[', ']':
+				strings.write_string(&b, "\\")
 			}
 			strings.write_escaped_rune(&b, r, '\\')
 			prev = r

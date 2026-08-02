@@ -15,5 +15,7 @@ command_execute :: proc(editor: ^Editor, command: Command) {
 			btree      = btree_build(string(data), context.allocator, editor.config.tab_width),
 			selections = make([dynamic]Selection, 1),
 		}
+	case "q", "quit":
+		os.exit(0)
 	}
 }

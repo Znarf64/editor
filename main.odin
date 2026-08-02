@@ -116,6 +116,8 @@ Editor :: struct {
 		rect:  Animation(Rect),
 	},
 
+	status:         string,
+
 	prompt:         Prompt,
 
 	config:         Config,
@@ -401,7 +403,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 	}
 
 	padding: f32 = 10
-	line_digits  := max(1, int(la.ceil(la.log10(f32(editor.btree.lines)))))
+	line_digits  := int(la.ceil(la.log10(1 + f32(editor.btree.lines))))
 	lines_width  := cell_size.x * f32(line_digits)
 	gutter_width := lines_width + padding + 1 + padding
 
@@ -790,6 +792,14 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 			size   = { 2, cell_size.y, },
 			color  = editor.config.theme[.Ident].fg,
 		)
+	} else {
+		draw_text(
+			&editor.font,
+			commands,
+			editor.status,
+			editor.config.theme[.Ident].fg,
+			{ x, editor.screen_size.y - padding, },
+		)
 	}
 
 	if editor.mode == .Picker {
@@ -931,8 +941,13 @@ regex_search :: proc(editor: ^Editor, pattern_string: string) -> (ok: bool) {
 	b          := strings.builder_make(0, int(editor.btree.bytes - start), context.temp_allocator)
 	btree_to_string(&editor.btree, &b, start)
 
+	iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator)
 	capture: regex.Capture
-	capture, ok = regex.match(pattern, strings.to_string(b), context.temp_allocator)
+	capture, _, ok = regex.match(&iter)
+
+	if ok && capture.pos[0][0] == 0 {
+		capture, _, ok = regex.match(&iter)
+	}
 
 	if ok {
 		_, n                   := utf8.decode_last_rune(capture.groups[0])
@@ -957,6 +972,8 @@ regex_search :: proc(editor: ^Editor, pattern_string: string) -> (ok: bool) {
 	selection.cursor        = Offset(capture.pos[0][1] - n)
 	selection.target_cursor = selection.cursor
 
+	editor.status = "Wrapped around document"
+
 	return true
 }
 
@@ -972,8 +989,13 @@ regex_search_reverse :: proc(editor: ^Editor, pattern_string: string) -> (ok: bo
 	b          := strings.builder_make(0, int(editor.btree.bytes - start), context.temp_allocator)
 	btree_to_string(&editor.btree, &b, end = start, reverse = true)
 
+	iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator)
 	capture: regex.Capture
-	capture, ok = regex.match(pattern, strings.to_string(b), context.temp_allocator)
+	capture, _, ok = regex.match(&iter)
+
+	if ok && capture.pos[0][0] == 0 {
+		capture, _, ok = regex.match(&iter)
+	}
 
 	if ok {
 		_, n                   := utf8.decode_rune(capture.groups[0])
@@ -993,6 +1015,8 @@ regex_search_reverse :: proc(editor: ^Editor, pattern_string: string) -> (ok: bo
 	selection.anchor        = editor.btree.bytes - Offset(capture.pos[0][1])
 	selection.cursor        = editor.btree.bytes - Offset(capture.pos[0][0] + n)
 	selection.target_cursor = selection.cursor
+
+	editor.status = "Wrapped around document"
 
 	return true
 }
