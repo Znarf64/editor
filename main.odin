@@ -78,6 +78,7 @@ New_Selection :: struct {
 }
 
 Buffer :: struct {
+	path:          string,
 	btree:         BTree,
 	primary:       int,
 	selections:    [dynamic]Selection,

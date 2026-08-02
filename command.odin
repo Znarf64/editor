@@ -10,8 +10,9 @@ command_execute :: proc(editor: ^Editor, command: Command) {
 
 	switch command {
 	case "o", "open":
-		data := os.read_entire_file(args, context.temp_allocator) or_break
+		data := os.read_entire_file(args, context.temp_allocator) or_else { '\n', }
 		editor.buffer = {
+			path       = strings.clone(args),
 			btree      = btree_build(string(data), context.allocator, editor.config.tab_width),
 			selections = make([dynamic]Selection, 1),
 		}

@@ -2,6 +2,7 @@ package editor
 
 import runtime "base:runtime"
 
+import fmt     "core:fmt"
 import strings "core:strings"
 import slice   "core:slice"
 import vmem    "core:mem/virtual"
