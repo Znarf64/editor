@@ -955,7 +955,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion, pri
 				break
 			}
 			switch r {
-			case '{', '}', '(', ')', '^', '|', '*', '+', '?', '[', ']':
+			case '{', '}', '(', ')', '^', '|', '*', '+', '?', '[', ']', '.', '$':
 				strings.write_string(&b, "\\")
 			}
 			strings.write_escaped_rune(&b, r, '\\')

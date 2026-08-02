@@ -151,7 +151,7 @@ deduplicate_selections :: proc(editor: ^Editor) {
 }
 
 action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
-	editor.status = ""
+	strings.builder_reset(&editor.status)
 	switch v in action {
 	case Motion:
 		if editor.repeat_count == 0 {

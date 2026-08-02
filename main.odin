@@ -116,7 +116,7 @@ Editor :: struct {
 		rect:  Animation(Rect),
 	},
 
-	status:         string,
+	status:         strings.Builder,
 
 	prompt:         Prompt,
 
@@ -178,6 +178,7 @@ main :: proc() {
 		strings.builder_destroy(&editor.leader.sequence)
 		strings.builder_destroy(&editor.picker.input)
 		strings.builder_destroy(&editor.prompt.input)
+		strings.builder_destroy(&editor.status)
 	}
 
 	font_ok := font_init(&editor.font, #load("font.ttf"), FONT_HEIGHT, context.allocator)
@@ -796,7 +797,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		draw_text(
 			&editor.font,
 			commands,
-			editor.status,
+			strings.to_string(editor.status),
 			editor.config.theme[.Ident].fg,
 			{ x, editor.screen_size.y - padding, },
 		)
@@ -929,11 +930,20 @@ next_column_after_tab :: proc(column, tab_width: int) -> int {
 	return column
 }
 
+editor_set_status :: proc(editor: ^Editor, format: string, args: ..any) {
+	strings.builder_reset(&editor.status)
+	fmt.sbprintf(&editor.status, format, ..args)
+}
+
 regex_search :: proc(editor: ^Editor, pattern_string: string) -> (ok: bool) {
 	pattern, err := regex.create(pattern_string, flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
 	if err != nil {
-		fmt.println(err)
+		editor_set_status(editor, "Failed to parse regex: %v", err)
 		return
+	}
+
+	defer if !ok {
+		editor_set_status(editor, "Not found")
 	}
 
 	selection  := &editor.selections[editor.primary]
@@ -972,7 +982,7 @@ regex_search :: proc(editor: ^Editor, pattern_string: string) -> (ok: bool) {
 	selection.cursor        = Offset(capture.pos[0][1] - n)
 	selection.target_cursor = selection.cursor
 
-	editor.status = "Wrapped around document"
+	editor_set_status(editor, "Wrapped around document")
 
 	return true
 }
@@ -980,8 +990,12 @@ regex_search :: proc(editor: ^Editor, pattern_string: string) -> (ok: bool) {
 regex_search_reverse :: proc(editor: ^Editor, pattern_string: string) -> (ok: bool) {
 	pattern, err := regex.create(pattern_string, flags = { .Unicode, .Reverse_Pattern, }, permanent_allocator = context.temp_allocator)
 	if err != nil {
-		fmt.println(err)
+		editor_set_status(editor, "Failed to parse regex: %v", err)
 		return
+	}
+
+	defer if !ok {
+		editor_set_status(editor, "Not found")
 	}
 
 	selection  := &editor.selections[editor.primary]
@@ -1016,7 +1030,7 @@ regex_search_reverse :: proc(editor: ^Editor, pattern_string: string) -> (ok: bo
 	selection.cursor        = editor.btree.bytes - Offset(capture.pos[0][0] + n)
 	selection.target_cursor = selection.cursor
 
-	editor.status = "Wrapped around document"
+	editor_set_status(editor, "Wrapped around document")
 
 	return true
 }
