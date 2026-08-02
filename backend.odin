@@ -1,9 +1,11 @@
 package editor
 
+import runtime "base:runtime"
+
 Event :: union {
 	Event_Window_Close,
 	Event_Window_Resize,
-	
+
 	Event_Input_Key,
 	Event_Input_Codepoint,
 	Event_Input_Mouse_Move,
@@ -50,11 +52,13 @@ Event_Input_Scroll :: struct {
 }
 
 Backend :: struct {
-	poll_events: proc(backend: ^Backend) -> []Event,
-	draw:        proc(backend: ^Backend, font: Font, commands: []Draw_Command, background_color: [4]f32),
-	set_title:   proc(backend: ^Backend, title: string),
-	destroy:     proc(backend: ^Backend),
-	_events:     [dynamic]Event,
+	poll_events:   proc(backend: ^Backend) -> []Event,
+	draw:          proc(backend: ^Backend, font: Font, commands: []Draw_Command, background_color: [4]f32),
+	set_title:     proc(backend: ^Backend, title: string),
+	get_clipboard: proc(backend: ^Backend, allocator: runtime.Allocator) -> string,
+	set_clipboard: proc(backend: ^Backend, data: string),
+	destroy:       proc(backend: ^Backend),
+	_events:       [dynamic]Event,
 }
 
 @(require_results)

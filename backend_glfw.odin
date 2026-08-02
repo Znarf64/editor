@@ -1,6 +1,6 @@
 package editor
 
-import "base:runtime"
+import runtime "base:runtime"
 
 import strings "core:strings"
 
@@ -60,6 +60,13 @@ _backend_init_glfw :: proc(backend: ^Backend_Glfw) -> (ok: bool) {
 		glfw.DestroyWindow(backend.window)
 		glfw.Terminate()
 		free(backend)
+	}
+	backend.set_clipboard = proc(backend: ^Backend_Glfw, data: string) {
+		runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+		glfw.SetClipboardString(backend.window, strings.clone_to_cstring(data, context.temp_allocator))
+	}
+	backend.get_clipboard = proc(backend: ^Backend_Glfw, allocator: runtime.Allocator) -> string {
+		return strings.clone(glfw.GetClipboardString(backend.window), allocator)
 	}
 
 	glfw.SetWindowUserPointer(backend.window, backend)

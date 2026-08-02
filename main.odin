@@ -88,6 +88,8 @@ Buffer :: struct {
 }
 
 Editor :: struct {
+	backend:       ^Backend,
+
 	mode:           Mode,
 
 	using buffer:   Buffer,
@@ -116,6 +118,8 @@ Editor :: struct {
 		input: strings.Builder,
 		rect:  Animation(Rect),
 	},
+
+	clipboard:      strings.Builder,
 
 	status:         strings.Builder,
 
@@ -152,14 +156,12 @@ main :: proc() {
 		}
 	}
 
-	backend := backend_init()
-	if backend == nil {
+	editor: Editor
+	editor.backend = backend_init()
+	if editor.backend == nil {
 		fmt.eprintln("Failed to initialize backend")
 		os.exit(1)
 	}
-	defer backend->destroy()
-
-	editor: Editor
 	editor.selections     = make([dynamic]Selection, 1)
 	editor.new_selections = make([dynamic]New_Selection)
 
@@ -169,6 +171,7 @@ main :: proc() {
 	assert(err == nil)
 
 	defer {
+		editor.backend->destroy()
 		for h in editor.prompt.history {
 			delete(h)
 		}
@@ -180,6 +183,7 @@ main :: proc() {
 		strings.builder_destroy(&editor.picker.input)
 		strings.builder_destroy(&editor.prompt.input)
 		strings.builder_destroy(&editor.status)
+		strings.builder_destroy(&editor.clipboard)
 	}
 
 	font_ok := font_init(&editor.font, #load("font.ttf"), FONT_HEIGHT, context.allocator)
@@ -212,7 +216,7 @@ main :: proc() {
 	main_loop: for {
 		frames_since_print += 1
 		if time.since(last_print_time) > time.Second {
-			backend->set_title(fmt.tprintf("%v FPS", frames_since_print))
+			editor.backend->set_title(fmt.tprintf("%v FPS", frames_since_print))
 			frames_since_print = 0
 			last_print_time    = time.now()
 		}
@@ -222,7 +226,7 @@ main :: proc() {
 
 		consumed_codepoint_event: int
 
-		for event in backend->poll_events() {
+		for event in editor.backend->poll_events() {
 			switch e in event {
 			case Event_Window_Close:
 				break main_loop
@@ -342,7 +346,7 @@ main :: proc() {
 
 		render(&editor, &draw_commands, f32(delta_time))
 
-		backend->draw(editor.font, draw_commands[:], editor.config.theme[.Background].bg)
+		editor.backend->draw(editor.font, draw_commands[:], editor.config.theme[.Background].bg)
 		free_all(context.temp_allocator)
 	}
 }

@@ -33,7 +33,7 @@ vertex_main :: proc(
 	v_shadow_width  = i_shadow_width
 
 	v_position = a_position * (i_size + i_shadow_width)
-	
+
 	$Position    = { ..2 * (i_offset + v_position) / vertex_uniforms.screen_size - 1, 0, 1, }
 	$Position.y *= -1
 	return
@@ -94,7 +94,7 @@ fragment_main :: proc(
 	if v_texture.z != 0 {
 		f_color.a *= font_texture[v_texture.xy / ([2]f32)(texture_size(font_texture))].r
 	}
-	
+
 	f_color = lerp(f_color, v_border_color, border_weight)
 	return
 }

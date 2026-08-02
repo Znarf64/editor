@@ -184,10 +184,10 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 			surface:  ^wl.surface,
 			keys:      wl.array,
 		) {
-			
+
 		},
 		leave = proc "c" (data: rawptr, keyboard: ^wl.keyboard, serial: uint, surface: ^wl.surface) {
-			
+
 		},
 		key = proc "c" (
 			data:      rawptr,
@@ -281,7 +281,7 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 			)
 		},
 		repeat_info = proc "c" (data: rawptr, keyboard: ^wl.keyboard, rate: int, delay: int) {
-			
+
 		},
 	}
 

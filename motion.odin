@@ -83,7 +83,11 @@ Motion :: enum {
 	Delete,
 
 	Paste,
+	Paste_Before,
+	Paste_System_Before,
 	Yank,
+	Paste_System,
+	Yank_System,
 
 	Insert,
 	Append,
@@ -208,7 +212,11 @@ motion_descriptions: [Motion]string = {
 	.Delete                          = "delete",
 
 	.Paste                           = "paste",
+	.Paste_Before                    = "paste before",
+	.Paste_System                    = "paste system",
+	.Paste_System_Before             = "paste system before",
 	.Yank                            = "yank",
+	.Yank_System                     = "yank system",
 
 	.Insert                          = "insert",
 	.Append                          = "append",
@@ -1021,9 +1029,34 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion, pri
 		btree_remove_range(&editor.btree, start, iter.next_offset)
 
 	case .Paste:
-		unimplemented()
-	case .Yank:
-		unimplemented()
+		end := btree_offset_after(&editor.btree, max(selection.anchor, selection.cursor))
+		n   := editor_insert(editor, end, strings.to_string(editor.clipboard))
+		selection.anchor += n
+		selection.cursor += n
+	case .Paste_System:
+		end := btree_offset_after(&editor.btree, max(selection.anchor, selection.cursor))
+		s   := editor.backend->get_clipboard(context.temp_allocator)
+		n   := editor_insert(editor, end, s)
+		selection.anchor += n
+		selection.cursor += n
+	case .Paste_Before:
+		editor_insert(editor, min(selection.anchor, selection.cursor), strings.to_string(editor.clipboard))
+	case .Paste_System_Before:
+		editor_insert(editor, min(selection.anchor, selection.cursor), editor.backend->get_clipboard(context.temp_allocator))
+	case .Yank, .Yank_System:
+		primary or_break
+
+		start := min(selection.anchor, selection.cursor)
+		end   := btree_offset_after(&editor.btree, max(selection.anchor, selection.cursor))
+
+		if motion == .Yank_System {
+			b := strings.builder_make(0, int(end - start), context.temp_allocator)
+			btree_to_string(&editor.btree, &b, start, end)
+			editor.backend->set_clipboard(strings.to_string(b))
+		} else {
+			strings.builder_reset(&editor.clipboard)
+			btree_to_string(&editor.btree, &editor.clipboard, start, end)
+		}
 
 	case .Insert:
 		if selection.cursor > selection.anchor {
@@ -1113,9 +1146,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion, pri
 		for _ in 0 ..< editor.repeat_count {
 			r := btree_get_rune(editor.btree, offset)
 			if r == '\t' {
-				btree_remove_range(&editor.btree, offset, offset + 1)
-				selection.cursor -= 1
-				selection.anchor -= 1
+				editor_remove(editor, offset, offset + 1)
 			} else {
 				break
 			}
