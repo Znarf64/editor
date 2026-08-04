@@ -359,6 +359,14 @@ argument_motion_apply_single :: proc(editor: ^Editor, selection: ^Selection, mot
 
 editor_remove :: proc(editor: ^Editor, start, end: Offset) {
 	btree_remove_range(&editor.btree, start, end)
+	for &selection in editor.selections {
+		if selection.cursor >= start {
+			selection.cursor -= start - end
+		}
+		if selection.anchor >= start {
+			selection.anchor -= start - end
+		}
+	}
 }
 
 editor_insert :: proc {
@@ -1024,9 +1032,7 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion, pri
 
 	case .Delete:
 		start, end := min(selection.anchor, selection.cursor), max(selection.anchor, selection.cursor)
-		iter       := btree_iterator(&editor.btree, offset = end)
-		_, _        = btree_iter(&iter)
-		btree_remove_range(&editor.btree, start, iter.next_offset)
+		editor_remove(editor, start, btree_offset_after(&editor.btree, end))
 
 	case .Paste:
 		end := btree_offset_after(&editor.btree, max(selection.anchor, selection.cursor))
@@ -1040,9 +1046,13 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion, pri
 		selection.anchor += n
 		selection.cursor += n
 	case .Paste_Before:
+		saved := selection^
 		editor_insert(editor, min(selection.anchor, selection.cursor), strings.to_string(editor.clipboard))
+		selection^ = saved
 	case .Paste_System_Before:
+		saved := selection^
 		editor_insert(editor, min(selection.anchor, selection.cursor), editor.backend->get_clipboard(context.temp_allocator))
+		selection^ = saved
 	case .Yank, .Yank_System:
 		primary or_break
 
@@ -1098,8 +1108,21 @@ motion_apply :: proc(editor: ^Editor, selection: ^Selection, motion: Motion, pri
 		editor.mode = .Insert
 
 	case .Open_Above:
+		iter := btree_iterator(&editor.btree, offset = selection.cursor)
+		for r in btree_iter(&iter, back = true) {
+			if r == '\n' {
+				break
+			}
+		}
+
+		editor_insert(editor, iter.offset, '\n')
+		selection.cursor = iter.offset + 1
+		selection.anchor = selection.cursor
+
 		editor.mode = .Insert
 	case .Change:
+		start, end := min(selection.anchor, selection.cursor), max(selection.anchor, selection.cursor)
+		editor_remove(editor, start, btree_offset_after(&editor.btree, end))
 		editor.mode = .Insert
 
 	case .Indent:
