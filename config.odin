@@ -2,7 +2,6 @@ package editor
 
 import runtime "base:runtime"
 
-import fmt     "core:fmt"
 import ini     "core:encoding/ini"
 import reflect "core:reflect"
 import strconv "core:strconv"

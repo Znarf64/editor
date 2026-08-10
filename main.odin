@@ -1,5 +1,7 @@
 package editor
 
+import runtime "base:runtime"
+
 import ease    "core:math/ease"
 import fmt     "core:fmt"
 import la      "core:math/linalg"
@@ -30,9 +32,14 @@ Draw_Command_Char :: struct {
 	color:    [4]f32,
 }
 
+Draw_Command_Clip :: distinct Rect
+
+DRAW_COMMAND_CLIP_DISABLE :: Draw_Command_Clip { min = min(f32), max = max(f32), }
+
 Draw_Command :: union {
 	Draw_Command_Rect,
 	Draw_Command_Char,
+	Draw_Command_Clip,
 }
 
 Position :: struct {
@@ -87,15 +94,33 @@ Buffer :: struct {
 	visible_lines: int,
 }
 
+buffer_init :: proc(editor: ^Editor, buffer: ^Buffer, path: string, allocator: runtime.Allocator) {
+	path := os.get_absolute_path(path, context.temp_allocator) or_else panic("")
+	self := os.get_working_directory(context.temp_allocator)   or_else panic("")
+	path  = os.get_relative_path(self, path, allocator)        or_else panic("")
+
+	data   := os.read_entire_file(path, context.temp_allocator) or_else { '\n', }
+	buffer^ = {
+		selections = make([dynamic]Selection, 1, allocator),
+		path       = path,
+		btree      = btree_build(string(data), allocator, editor.config.tab_width),
+	}
+}
+
+buffer_destroy :: proc(buffer: Buffer) {
+	btree_destroy(buffer.btree)
+	delete(buffer.selections)
+	delete(buffer.path)
+}
+
 Editor :: struct {
 	backend:       ^Backend,
 
 	mode:           Mode,
 
-	using buffer:   Buffer,
+	buffer:         Buffer,
 
 	new_selections: [dynamic]New_Selection,
-	screen_size:    [2]f32,
 
 	repeat_count:   int,
 
@@ -162,7 +187,6 @@ main :: proc() {
 		fmt.eprintln("Failed to initialize backend")
 		os.exit(1)
 	}
-	editor.selections     = make([dynamic]Selection, 1)
 	editor.new_selections = make([dynamic]New_Selection)
 
 	err := vmem.arena_init_growing(&editor.prompt.arena)
@@ -177,7 +201,6 @@ main :: proc() {
 		}
 		vmem.arena_destroy(&editor.prompt.arena)
 		vmem.arena_destroy(&editor.leader.arena)
-		delete(editor.selections)
 		delete(editor.new_selections)
 		strings.builder_destroy(&editor.leader.sequence)
 		strings.builder_destroy(&editor.picker.input)
@@ -199,19 +222,16 @@ main :: proc() {
 	}
 	defer config_destroy(&editor.config)
 
-	when true {
-		S :: #load(#file, string)
-		editor.btree = btree_build(S, context.allocator, editor.config.tab_width)
-	} else {
-		editor.btree = btree_build("Hello World!\n\n", context.allocator, editor.config.tab_width)
-	}
-	defer btree_destroy(editor.btree)
+	buffer_init(&editor, &editor.buffer, #file, context.allocator)
+	defer buffer_destroy(editor.buffer)
 
 	last_print_time    := time.now()
 	frames_since_print := 0
 
 	draw_commands := make([dynamic]Draw_Command, context.allocator)
 	defer delete(draw_commands)
+
+	screen_size: [2]f32
 
 	main_loop: for {
 		frames_since_print += 1
@@ -221,8 +241,7 @@ main :: proc() {
 			last_print_time    = time.now()
 		}
 
-		prev_primary := editor.selections[editor.primary]
-		prev_scroll  := editor.scroll
+		prev_scroll := editor.buffer.scroll
 
 		consumed_codepoint_event: int
 
@@ -231,7 +250,7 @@ main :: proc() {
 			case Event_Window_Close:
 				break main_loop
 			case Event_Window_Resize:
-				editor.screen_size = ([2]f32)(e.size)
+				screen_size = ([2]f32)(e.size)
 
 			case Event_Input_Key:
 				if e.action == .Up {
@@ -292,7 +311,7 @@ main :: proc() {
 					break
 				}
 				if editor.leader.motion != nil {
-					argument_motion_apply(&editor, editor.leader.motion, e.codepoint)
+					argument_motion_apply(&editor.buffer, editor.leader.motion, e.codepoint)
 					editor.leader.motion = nil
 					editor.leader.active = false
 					strings.builder_reset(&editor.leader.sequence)
@@ -304,39 +323,39 @@ main :: proc() {
 				case .Picker:
 					strings.write_rune(&editor.picker.input, e.codepoint)
 				case .Insert:
-					argument_motion_apply(&editor, .Insert_Character, e.codepoint)
+					argument_motion_apply(&editor.buffer, .Insert_Character, e.codepoint)
 				}
 			case Event_Input_Mouse_Move:
 			case Event_Input_Mouse_Button:
 			case Event_Input_Scroll:
-				editor.scroll -= int(e.delta.y * 5)
+				editor.buffer.scroll -= int(e.delta.y * 5)
 			}
 		}
 
-		primary := &editor.selections[editor.primary]
+		primary := &editor.buffer.selections[editor.buffer.primary]
 
-		if prev_scroll != editor.scroll {
-			primary_position := btree_offset_to_position(&editor.btree, primary.cursor)
-			if primary_position.line < editor.scroll + 5 || primary_position.line > editor.scroll + editor.visible_lines - 5 {
-				primary_position.line -= prev_scroll - editor.scroll
-				_                      = position_to_offset_normalized(&editor, primary_position, true, primary)
+		if prev_scroll != editor.buffer.scroll {
+			primary_position := btree_offset_to_position(&editor.buffer.btree, primary.cursor)
+			if primary_position.line < editor.buffer.scroll + 5 || primary_position.line > editor.buffer.scroll + editor.buffer.visible_lines - 5 {
+				primary_position.line -= prev_scroll - editor.buffer.scroll
+				_                      = position_to_offset_normalized(&editor.buffer, primary_position, true, primary)
 				primary.anchor         = primary.cursor
 			}
 		}
 
-		if prev_primary != primary^ {
-			primary_line := btree_offset_to_line(&editor.btree, primary.cursor)
-			if editor.scroll < primary_line - editor.visible_lines + 5 {
-				editor.scroll = primary_line - editor.visible_lines + 5
+		{
+			primary_line := btree_offset_to_line(&editor.buffer.btree, primary.cursor)
+			if editor.buffer.scroll < primary_line - editor.buffer.visible_lines + 5 {
+				editor.buffer.scroll = primary_line - editor.buffer.visible_lines + 5
 			}
 
-			if editor.scroll > primary_line - 5 {
-				editor.scroll = primary_line - 5
+			if editor.buffer.scroll > primary_line - 5 {
+				editor.buffer.scroll = primary_line - 5
 			}
 		}
 
-		editor.scroll = clamp(editor.scroll, 0, int(editor.btree.lines - 1))
-		animation_set_target(&editor.scroll_anim, f32(editor.scroll))
+		editor.buffer.scroll = clamp(editor.buffer.scroll, 0, int(editor.buffer.btree.lines - 1))
+		animation_set_target(&editor.buffer.scroll_anim, f32(editor.buffer.scroll))
 
 		current_time := time.duration_seconds(time.since(start_time))
 		delta_time   := current_time - prev_time
@@ -344,7 +363,7 @@ main :: proc() {
 
 		clear(&draw_commands)
 
-		render(&editor, &draw_commands, f32(delta_time))
+		render(&editor, &draw_commands, f32(delta_time), screen_size)
 
 		editor.backend->draw(editor.font, draw_commands[:], editor.config.theme[.Background].bg)
 		free_all(context.temp_allocator)
@@ -400,264 +419,90 @@ animation_set_target :: proc(anim: ^Animation($T), target: T) {
 	anim.t      = 0
 }
 
-render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f32) {
-	text_commands := make([dynamic]Draw_Command, context.temp_allocator)
-
-	cell_size: [2]f32 = {
-		la.round(get_glyph_info(&editor.font, 0).x_advance),
-		la.round(((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale)),
-	}
-
+render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f32, screen_size: [2]f32) {
 	padding: f32 = 10
-	line_digits  := int(la.ceil(la.log10(1 + f32(editor.btree.lines))))
-	lines_width  := cell_size.x * f32(line_digits)
-	gutter_width := lines_width + padding + 1 + padding
+	status_bar_height := FONT_HEIGHT + padding * 2 + 2
 
-	editor.visible_lines = max(1, int(la.ceil((editor.screen_size.y - FONT_HEIGHT - padding * 2) / cell_size.y)))
-
-	scroll := animation_update(&editor.scroll_anim, delta_time, editor.config.scroll_animation_speed)
-
-	primary          := editor.selections[editor.primary]
-	primary_position := btree_offset_to_position(&editor.btree, primary.cursor)
-
-	first_visble_line := int(la.floor(scroll))
-	last_visible_line := min(int(editor.btree.lines), first_visble_line + editor.visible_lines)
-
-	position: Position = {
-		line = first_visble_line,
-	}
-	start_offset := btree_position_to_offset(&editor.btree, position)
-	end_offset   := btree_position_to_offset(&editor.btree, { line = last_visible_line, })
-
-	b := strings.builder_make(0, int(end_offset - start_offset), context.temp_allocator)
-	btree_to_string(&editor.btree, &b, start_offset, end_offset)
-	text := strings.to_string(b)
-
-	primary_match: Offset = -1
-	find_primary_match: {
-		iter  := btree_iterator(&editor.btree, editor.selections[editor.primary].cursor)
-		start := btree_iter(&iter) or_break find_primary_match
-
-		back := false
-		delim: rune
-		switch start {
-		case '{':
-			delim = '}'
-		case '[':
-			delim = ']'
-		case '(':
-			delim = ')'
-
-		case '}':
-			delim = '{'
-			back  = true
-		case ']':
-			delim = '['
-			back  = true
-		case ')':
-			delim = '('
-			back  = true
-		case:
-			break find_primary_match
-		}
-
-		balance := 0 if back else 1
-		for r in btree_iter(&iter, back = back) {
-			if iter.offset < start_offset || iter.offset > end_offset {
-				break
-			}
-			if r == delim {
-				balance -= 1
-			} else if r == start {
-				balance += 1
-			}
-			if balance == 0 {
-				primary_match = iter.offset
-				break
-			}
-		}
-	}
-
-	highlighter: Highlighter = {
-		text     = text,
-		keywords = editor.config.styles,
-	}
-
-	cursors := make(map[Offset]int, context.temp_allocator)
-	for selection, i in editor.selections {
-		cursors[selection.cursor] = i
-	}
-
-	render_text: for {
-		start := highlighter.pos
-		style := highlighter_advance(&highlighter)
-		if style == .Invalid {
-			break
-		}
-
-		start_column := position.column
-
-		for char, sub_offset in text[start:highlighter.pos] {
-			defer position = position_after(position, char, editor.config.tab_width)
-
-			offset := start_offset + Offset(start + sub_offset)
-
-			draw_gutter: if position.column == 0 {
-				y := cell_size.y * (f32(position.line) - scroll) + FONT_HEIGHT + padding
-
-				if y < 0 {
-					break draw_gutter
-				}
-
-				l := position.line
-				if editor.config.relative_line_numbers && primary_position.line != position.line {
-					l = abs(primary_position.line - position.line) - 1
-				}
-
-				@(static)
-				line_number_buf: [32]byte
-				str := strconv.write_int(line_number_buf[:], i64(l + 1), base = 10)
-				w   := measure_text(&editor.font, str)
-				draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { lines_width - w + padding, y, })
-
-				draw_rect(commands,
-					offset = {
-						gutter_width - cell_size.x + padding,
-						cell_size.y * (f32(position.line) - scroll) - la.round(f32(editor.font.descender) * editor.font.scale),
-					},
-					size   = { 1, cell_size.y, },
-					color  = editor.config.theme[.Ident].fg,
-				)
-			}
-
-			style := style
-			if id, ok := cursors[offset]; ok {
-				if id == editor.primary {
-					style = .Cursor
-				} else {
-					style = .Cursor_Secondary
-				}
-			}
-
-			next_column := position_after(position, char, editor.config.tab_width).column
-			for selection in editor.selections {
-				if !selection_contains(selection, offset) {
-					continue
-				}
-
-				draw_rect(commands,
-					offset = {
-						f32(position.column) * cell_size.x + gutter_width,
-						cell_size.y * (f32(position.line - 1) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale),
-					} + padding,
-					size   = cell_size * { f32(max(1, next_column - position.column)), 1, },
-					color  = editor.config.theme[.Selection].bg,
-				)
-			}
-
-			if offset == primary_match {
-				draw_rect(commands,
-					offset = {
-						f32(position.column) * cell_size.x + gutter_width,
-						cell_size.y * (f32(position.line) - scroll) + FONT_HEIGHT - la.round(f32(editor.font.descender) * editor.font.scale) - 1,
-					} + padding,
-					size   = { cell_size.x * f32(max(1, next_column - position.column)), 1, },
-					color  = editor.config.theme[.Cursor].bg,
-				)
-			}
-
-			if unicode.is_space(char) {
-				continue
-			}
-
-			x := f32(position.column) * cell_size.x + padding + gutter_width
-			y := cell_size.y * (f32(position.line) - scroll) + FONT_HEIGHT + padding
-			if y < 0 {
-				continue
-			}
-			if y > editor.screen_size.y {
-				break render_text
-			}
-
-			append(&text_commands, Draw_Command_Char {
-				position = { x, y, },
-				color    = editor.config.theme[style].fg,
-				char     = char,
-			})
-
-			// TODO: line wrapping
-		}
-
-		if editor.config.theme[style].bg != 0 {
-			draw_rect(commands,
-				offset = {
-					f32(start_column) * cell_size.x + gutter_width,
-					cell_size.y * (f32(position.line - 1) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale),
-				} + padding,
-				size   = { f32(position.column - start_column) * cell_size.x, cell_size.y, },
-				color  = editor.config.theme[style].bg,
-			)
-		}
-	}
-
-	for &selection, i in editor.selections {
-		line := btree_offset_to_line(&editor.btree, offset = selection.cursor)
-		iter := btree_iterator(&editor.btree, line = line)
-
-		for iter.offset != selection.cursor {
-			_ = btree_iter(&iter) or_else panic("offset out of range")
-		}
-
-		position    := iter.position
-		_, _         = btree_iter(&iter)
-		next_column := iter.column
-		width       := max(next_column - position.column, 1)
-
-		offset := [2]f32 {
-			f32(position.column) * cell_size.x + gutter_width,
-			cell_size.y * f32(position.line - 1) + la.round(f32(editor.font.ascender) * editor.font.scale),
-		} + padding
-
-		size   := cell_size
-		size.x *= f32(width)
-
-		target := Rect{ min = offset, max = offset + size, }
-
-		if selection.anim == {} {
-			center                    := rect_center(target)
-			selection.anim.current.min = center
-			selection.anim.current.max = center
-		}
-
-		animation_set_target(&selection.anim, target)
-
-		style := Style_Key.Cursor_Secondary
-		if i == editor.primary {
-			style = .Cursor
-		}
-
-		cursor_rect := animation_update(&selection.anim, delta_time, editor.config.cursor_animation_speed)
-		draw_rect(commands,
-			offset        = cursor_rect.min - { 0, scroll * cell_size.y, },
-			size          = rect_size(cursor_rect),
-			color         = editor.config.theme[style].bg,
-			border_radius = 2,
-		)
-	}
-
-	append(commands, ..text_commands[:])
-	clear(&text_commands)
+	render_buffer(editor, &editor.buffer, commands, delta_time, { min = padding, max = screen_size - { padding, status_bar_height, }, }, padding)
 
 	draw_rect(commands,
-		offset = { 0, editor.screen_size.y - FONT_HEIGHT - padding * 2, },
-		size   = { editor.screen_size.x, FONT_HEIGHT + padding * 2, },
+		offset = { 0, screen_size.y - FONT_HEIGHT - padding * 2, },
+		size   = { screen_size.x, FONT_HEIGHT + padding * 2, },
 		color  = editor.config.theme[.Background].bg,
 	)
 	draw_rect(commands,
-		offset = { 0, editor.screen_size.y - FONT_HEIGHT - padding * 2 - 2, },
-		size   = { editor.screen_size.x, 2, },
+		offset = { 0, screen_size.y - FONT_HEIGHT - padding * 2 - 2, },
+		size   = { screen_size.x, 2, },
 		color  = color_from_hex_rgba(0x32363DFF),
 	)
+
+	{
+		y := screen_size.y - padding - FONT_HEIGHT - padding
+
+		buffer           := editor.buffer
+		primary          := buffer.selections[buffer.primary]
+		primary_position := btree_offset_to_position(&buffer.btree, primary.cursor)
+
+		{
+			x := screen_size.x - padding
+			if strings.builder_len(editor.leader.sequence) != 0 {
+				str := strings.to_string(editor.leader.sequence)
+				x   -= measure_text(&editor.font, str)
+				draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, screen_size.y - padding, })
+			}
+
+			if editor.repeat_count > 0 {
+				@(static)
+				buf: [32]byte
+
+				str := strconv.write_int(buf[:], i64(editor.repeat_count), base = 10)
+				x   -= measure_text(&editor.font, str)
+				draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, screen_size.y - padding, })
+			}
+
+			if x != screen_size.x - padding {
+				x -= padding
+			}
+
+			{
+				center := screen_size.x / 2
+				w      := measure_text(&editor.font, buffer.path)
+				draw_text(&editor.font, commands, buffer.path, editor.config.theme[.Ident].fg, { center - w / 2, screen_size.y - padding, })
+			}
+
+			{
+				@(static)
+				buf: [32]byte
+				str: string
+
+				str = strconv.write_int(buf[:], i64(primary_position.column + 1), base = 10)
+				x  -= measure_text(&editor.font, str)
+				draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, screen_size.y - padding, })
+
+				str = ":"
+
+				x -= measure_text(&editor.font, str)
+				draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, screen_size.y - padding, })
+
+				str = strconv.write_int(buf[:], i64(primary_position.line + 1), base = 10)
+				x  -= measure_text(&editor.font, str)
+				draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, screen_size.y - padding, })
+
+				x -= padding
+
+				str = "sel"
+
+				x  -= measure_text(&editor.font, str)
+				draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, screen_size.y - padding, })
+
+				x -= padding
+
+				str = strconv.write_int(buf[:], i64(len(buffer.selections)), base = 10)
+				x  -= measure_text(&editor.font, str)
+				draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, screen_size.y - padding, })
+			}
+		}
+	}
 
 	mode_text: string
 	mode_style: Style_Key
@@ -680,7 +525,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		style := editor.config.theme[mode_style]
 		if style.bg != 0 {
 			draw_rect(commands,
-				offset = { x - padding, editor.screen_size.y - FONT_HEIGHT - padding * 2, },
+				offset = { x - padding, screen_size.y - FONT_HEIGHT - padding * 2, },
 				size   = { w, FONT_HEIGHT, } + padding * 2,
 				color  = style.bg,
 			)
@@ -690,7 +535,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 			commands,
 			mode_text,
 			editor.config.theme[mode_style].fg,
-			{ x, editor.screen_size.y - padding, },
+			{ x, screen_size.y - padding, },
 		)
 
 		x += w + padding
@@ -700,58 +545,9 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		}
 	}
 
-	{
-		x := editor.screen_size.x - padding
-		if strings.builder_len(editor.leader.sequence) != 0 {
-			str := strings.to_string(editor.leader.sequence)
-			x   -= measure_text(&editor.font, str)
-			draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
-		}
-
-		if editor.repeat_count > 0 {
-			@(static)
-			buf: [32]byte
-
-			str := strconv.write_int(buf[:], i64(editor.repeat_count), base = 10)
-			x   -= measure_text(&editor.font, str)
-			draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
-		}
-
-		if x != editor.screen_size.x - padding {
-			x -= padding
-		}
-
-		{
-			@(static)
-			buf: [32]byte
-			str: string
-
-			str = strconv.write_int(buf[:], i64(primary_position.column + 1), base = 10)
-			x  -= measure_text(&editor.font, str)
-			draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
-
-			str = ":"
-
-			x -= measure_text(&editor.font, str)
-			draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
-
-			str = strconv.write_int(buf[:], i64(primary_position.line + 1), base = 10)
-			x  -= measure_text(&editor.font, str)
-			draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
-
-			x -= padding
-
-			str = "sel"
-
-			x  -= measure_text(&editor.font, str)
-			draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
-
-			x -= padding
-
-			str = strconv.write_int(buf[:], i64(len(editor.selections)), base = 10)
-			x  -= measure_text(&editor.font, str)
-			draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { x, editor.screen_size.y - padding, })
-		}
+	cell_size: [2]f32 = {
+		la.round(get_glyph_info(&editor.font, 0).x_advance),
+		la.round(((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale)),
 	}
 
 	if editor.mode == .Prompt {
@@ -772,7 +568,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 			commands,
 			mode_string,
 			editor.config.theme[.Ident].fg,
-			{ x, editor.screen_size.y - padding, },
+			{ x, screen_size.y - padding, },
 		)
 
 		text := strings.to_string(editor.prompt.input)
@@ -787,14 +583,14 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 			commands,
 			text,
 			editor.config.theme[.Ident].fg,
-			{ x, editor.screen_size.y - padding, },
+			{ x, screen_size.y - padding, },
 		)
 
 		if strings.builder_len(editor.prompt.input) == 0 {
 			w = 0
 		}
 		draw_rect(commands,
-			offset = { x + w, editor.screen_size.y - FONT_HEIGHT - padding + f32(editor.font.descender) * editor.font.scale, },
+			offset = { x + w, screen_size.y - FONT_HEIGHT - padding + f32(editor.font.descender) * editor.font.scale, },
 			size   = { 2, cell_size.y, },
 			color  = editor.config.theme[.Ident].fg,
 		)
@@ -804,21 +600,21 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 			commands,
 			strings.to_string(editor.status),
 			editor.config.theme[.Ident].fg,
-			{ x, editor.screen_size.y - padding, },
+			{ x, screen_size.y - padding, },
 		)
 	}
 
 	if editor.mode == .Picker {
-		rect := rect_from_min_max(40, editor.screen_size - 40 - { 0, FONT_HEIGHT + padding * 2, })
+		rect := rect_from_min_max(40, screen_size - 40 - { 0, FONT_HEIGHT + padding * 2, })
 		animation_set_target(&editor.picker.rect, rect)
 	} else {
-		center := rect_center(rect_from_min_max(40, editor.screen_size - 40))
+		center := rect_center(rect_from_min_max(40, screen_size - 40))
 		animation_set_target(&editor.picker.rect, Rect{ min = center, max = center, })
 	}
 
 	leader_target_rect := Rect {
-		min = (editor.screen_size - 20 - { 0, FONT_HEIGHT + padding * 2, }) - editor.leader.size,
-		max = (editor.screen_size - 20 - { 0, FONT_HEIGHT + padding * 2, }),
+		min = (screen_size - 20 - { 0, FONT_HEIGHT + padding * 2, }) - editor.leader.size,
+		max = (screen_size - 20 - { 0, FONT_HEIGHT + padding * 2, }),
 	}
 	if editor.leader.active {
 		animation_set_target(&editor.leader.rect, leader_target_rect)
@@ -940,7 +736,7 @@ editor_set_status :: proc(editor: ^Editor, format: string, args: ..any) {
 	fmt.sbprintf(&editor.status, format, ..args)
 }
 
-regex_search :: proc(editor: ^Editor, pattern_string: string) -> (ok: bool) {
+regex_search :: proc(editor: ^Editor, buffer: ^Buffer, pattern_string: string) -> (ok: bool) {
 	pattern, err := regex.create(pattern_string, flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
 	if err != nil {
 		editor_set_status(editor, "Failed to parse regex: %v", err)
@@ -951,10 +747,10 @@ regex_search :: proc(editor: ^Editor, pattern_string: string) -> (ok: bool) {
 		editor_set_status(editor, "Not found")
 	}
 
-	selection  := &editor.selections[editor.primary]
+	selection  := &buffer.selections[buffer.primary]
 	start      := max(selection.cursor, selection.anchor)
-	b          := strings.builder_make(0, int(editor.btree.bytes - start), context.temp_allocator)
-	btree_to_string(&editor.btree, &b, start)
+	b          := strings.builder_make(0, int(buffer.btree.bytes - start), context.temp_allocator)
+	btree_to_string(&buffer.btree, &b, start)
 
 	iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator)
 	capture: regex.Capture
@@ -978,7 +774,7 @@ regex_search :: proc(editor: ^Editor, pattern_string: string) -> (ok: bool) {
 
 	strings.builder_reset(&b)
 	strings.builder_grow(&b, int(start))
-	btree_to_string(&editor.btree, &b, end = start)
+	btree_to_string(&buffer.btree, &b, end = start)
 
 	capture = regex.match(pattern, strings.to_string(b), context.temp_allocator) or_return
 
@@ -992,7 +788,7 @@ regex_search :: proc(editor: ^Editor, pattern_string: string) -> (ok: bool) {
 	return true
 }
 
-regex_search_reverse :: proc(editor: ^Editor, pattern_string: string) -> (ok: bool) {
+regex_search_reverse :: proc(editor: ^Editor, buffer: ^Buffer, pattern_string: string) -> (ok: bool) {
 	pattern, err := regex.create(pattern_string, flags = { .Unicode, .Reverse_Pattern, }, permanent_allocator = context.temp_allocator)
 	if err != nil {
 		editor_set_status(editor, "Failed to parse regex: %v", err)
@@ -1003,10 +799,10 @@ regex_search_reverse :: proc(editor: ^Editor, pattern_string: string) -> (ok: bo
 		editor_set_status(editor, "Not found")
 	}
 
-	selection  := &editor.selections[editor.primary]
+	selection  := &buffer.selections[buffer.primary]
 	start      := min(selection.cursor, selection.anchor)
-	b          := strings.builder_make(0, int(editor.btree.bytes - start), context.temp_allocator)
-	btree_to_string(&editor.btree, &b, end = start, reverse = true)
+	b          := strings.builder_make(0, int(buffer.btree.bytes - start), context.temp_allocator)
+	btree_to_string(&buffer.btree, &b, end = start, reverse = true)
 
 	iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator)
 	capture: regex.Capture
@@ -1026,13 +822,13 @@ regex_search_reverse :: proc(editor: ^Editor, pattern_string: string) -> (ok: bo
 
 	strings.builder_reset(&b)
 	strings.builder_grow(&b, int(start))
-	btree_to_string(&editor.btree, &b, start = start, reverse = true)
+	btree_to_string(&buffer.btree, &b, start = start, reverse = true)
 
 	capture = regex.match(pattern, strings.to_string(b), context.temp_allocator) or_return
 
 	_, n                   := utf8.decode_last_rune(capture.groups[0])
-	selection.anchor        = editor.btree.bytes - Offset(capture.pos[0][1])
-	selection.cursor        = editor.btree.bytes - Offset(capture.pos[0][0] + n)
+	selection.anchor        = buffer.btree.bytes - Offset(capture.pos[0][1])
+	selection.cursor        = buffer.btree.bytes - Offset(capture.pos[0][0] + n)
 	selection.target_cursor = selection.cursor
 
 	editor_set_status(editor, "Wrapped around document")
@@ -1058,38 +854,38 @@ prompt_apply :: proc(editor: ^Editor) {
 		}
 
 		b := strings.builder_make(context.temp_allocator)
-		for selection, i in editor.selections {
+		for selection, i in editor.buffer.selections {
 			start := min(selection.cursor, selection.anchor)
 			end   := max(selection.cursor, selection.anchor)
 
 			strings.builder_grow(&b, int(end - start))
-			btree_to_string(&editor.btree, &b, start, end)
+			btree_to_string(&editor.buffer.btree, &b, start, end)
 
 			regex_iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator)
 			for capture, capture_i in regex.match(&regex_iter) {
 				append(&editor.new_selections, New_Selection {
 					anchor  = start + Offset(capture.pos[0][0]),
-					cursor  = start + btree_offset_before(&editor.btree, Offset(capture.pos[0][1])),
-					primary = i == editor.primary && capture_i == 0,
+					cursor  = start + btree_offset_before(&editor.buffer.btree, Offset(capture.pos[0][1])),
+					primary = i == editor.buffer.primary && capture_i == 0,
 				})
 			}
 			strings.builder_reset(&b)
 		}
 
 		if len(editor.new_selections) != 0 {
-			clear(&editor.selections)
-			reserve(&editor.selections, len(editor.new_selections))
+			clear(&editor.buffer.selections)
+			reserve(&editor.buffer.selections, len(editor.new_selections))
 
 			for selection in editor.new_selections {
 				if selection.primary {
-					editor.primary = len(editor.selections)
+					editor.buffer.primary = len(editor.buffer.selections)
 				}
 				selection              := selection
 				selection.target_cursor = selection.cursor
-				append(&editor.selections, selection)
+				append(&editor.buffer.selections, selection)
 			}
 			clear(&editor.new_selections)
-			deduplicate_selections(editor)
+			deduplicate_selections(&editor.buffer)
 		}
 
 		if err != nil {
@@ -1104,20 +900,20 @@ prompt_apply :: proc(editor: ^Editor) {
 
 		b := strings.builder_make(context.temp_allocator)
 
-		for i := len(editor.selections) - 1; i >= 0; i -= 1 {
-			selection := editor.selections[i]
+		for i := len(editor.buffer.selections) - 1; i >= 0; i -= 1 {
+			selection := editor.buffer.selections[i]
 
 			start := min(selection.cursor, selection.anchor)
 			end   := max(selection.cursor, selection.anchor)
 
 			strings.builder_grow(&b, int(end - start))
-			btree_to_string(&editor.btree, &b, start, end)
+			btree_to_string(&editor.buffer.btree, &b, start, end)
 
 			_, ok := regex.match(pattern, strings.to_string(b), context.temp_allocator)
 			if !ok {
-				ordered_remove(&editor.selections, i)
-				if i <= editor.primary {
-					editor.primary -= 1
+				ordered_remove(&editor.buffer.selections, i)
+				if i <= editor.buffer.primary {
+					editor.buffer.primary -= 1
 				}
 			}
 			strings.builder_reset(&b)
@@ -1127,7 +923,7 @@ prompt_apply :: proc(editor: ^Editor) {
 			fmt.println(err)
 		}
 	case .Search:
-		regex_search(editor, strings.to_string(editor.prompt.input))
+		regex_search(editor, &editor.buffer, strings.to_string(editor.prompt.input))
 	case .Command:
 		command_execute(editor, Command(strings.to_string(editor.prompt.input)))
 	}
@@ -1174,4 +970,254 @@ draw_rect :: proc(
 		border_color  = border_color,
 		shadow_width  = shadow_width,
 	})
+}
+
+render_buffer :: proc(editor: ^Editor, buffer: ^Buffer, commands: ^[dynamic]Draw_Command, delta_time: f32, rect: Rect, padding: f32) {
+	if rect.max.x <= rect.min.x || rect.max.y <= rect.min.y {
+		return
+	}
+
+	text_commands := make([dynamic]Draw_Command, context.temp_allocator)
+
+	append(commands, Draw_Command_Clip(rect))
+	defer append(commands, DRAW_COMMAND_CLIP_DISABLE)
+
+	height := rect.max.y - rect.min.y
+
+	cell_size: [2]f32 = {
+		la.round(get_glyph_info(&editor.font, 0).x_advance),
+		la.round(((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale)),
+	}
+
+	line_digits  := int(la.ceil(la.log10(1 + f32(buffer.btree.lines))))
+	lines_width  := cell_size.x * f32(line_digits)
+	gutter_width := lines_width + padding + 1 + padding
+
+	buffer.visible_lines = max(1, int(1 + la.ceil(height / cell_size.y)))
+
+	scroll := animation_update(&buffer.scroll_anim, delta_time, editor.config.scroll_animation_speed)
+
+	primary          := buffer.selections[buffer.primary]
+	primary_position := btree_offset_to_position(&buffer.btree, primary.cursor)
+
+	first_visble_line := int(la.floor(scroll))
+	last_visible_line := min(int(buffer.btree.lines), first_visble_line + buffer.visible_lines)
+
+	position: Position = {
+		line = first_visble_line,
+	}
+	start_offset := btree_position_to_offset(&buffer.btree, position)
+	end_offset   := btree_position_to_offset(&buffer.btree, { line = last_visible_line, })
+
+	b := strings.builder_make(0, int(end_offset - start_offset), context.temp_allocator)
+	btree_to_string(&buffer.btree, &b, start_offset, end_offset)
+	text := strings.to_string(b)
+
+	primary_match: Offset = -1
+	find_primary_match: {
+		iter  := btree_iterator(&buffer.btree, primary.cursor)
+		start := btree_iter(&iter) or_break find_primary_match
+
+		back := false
+		delim: rune
+		switch start {
+		case '{':
+			delim = '}'
+		case '[':
+			delim = ']'
+		case '(':
+			delim = ')'
+
+		case '}':
+			delim = '{'
+			back  = true
+		case ']':
+			delim = '['
+			back  = true
+		case ')':
+			delim = '('
+			back  = true
+		case:
+			break find_primary_match
+		}
+
+		balance := 0 if back else 1
+		for r in btree_iter(&iter, back = back) {
+			if iter.offset < start_offset || iter.offset > end_offset {
+				break
+			}
+			if r == delim {
+				balance -= 1
+			} else if r == start {
+				balance += 1
+			}
+			if balance == 0 {
+				primary_match = iter.offset
+				break
+			}
+		}
+	}
+
+	highlighter: Highlighter = {
+		text     = text,
+		keywords = editor.config.styles,
+	}
+
+	cursors := make(map[Offset]int, context.temp_allocator)
+	for selection, i in buffer.selections {
+		cursors[selection.cursor] = i
+	}
+
+	render_text: for {
+		start := highlighter.pos
+		style := highlighter_advance(&highlighter)
+		if style == .Invalid {
+			break
+		}
+
+		start_column := position.column
+
+		for char, sub_offset in text[start:highlighter.pos] {
+			defer position = position_after(position, char, editor.config.tab_width)
+
+			offset := start_offset + Offset(start + sub_offset)
+
+			draw_gutter: if position.column == 0 {
+				y := cell_size.y * (f32(position.line) - scroll) + FONT_HEIGHT
+
+				if y < 0 {
+					break draw_gutter
+				}
+
+				l := position.line
+				if editor.config.relative_line_numbers && primary_position.line != position.line {
+					l = abs(primary_position.line - position.line) - 1
+				}
+
+				@(static)
+				line_number_buf: [32]byte
+				str := strconv.write_int(line_number_buf[:], i64(l + 1), base = 10)
+				w   := measure_text(&editor.font, str)
+				draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { lines_width - w, y, } + rect.min)
+
+				draw_rect(commands,
+					offset = {
+						gutter_width - cell_size.x,
+						cell_size.y * (f32(position.line) - scroll),
+					} + rect.min,
+					size   = { 1, cell_size.y, },
+					color  = editor.config.theme[.Ident].fg,
+				)
+			}
+
+			style := style
+			if id, ok := cursors[offset]; ok {
+				if id == buffer.primary {
+					style = .Cursor
+				} else {
+					style = .Cursor_Secondary
+				}
+			}
+
+			next_column := position_after(position, char, editor.config.tab_width).column
+			for selection in buffer.selections {
+				if !selection_contains(selection, offset) {
+					continue
+				}
+
+				draw_rect(commands,
+					offset = {
+						f32(position.column) * cell_size.x + gutter_width,
+						cell_size.y * (f32(position.line - 1) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale),
+					} + rect.min,
+					size   = cell_size * { f32(max(1, next_column - position.column)), 1, },
+					color  = editor.config.theme[.Selection].bg,
+				)
+			}
+
+			if offset == primary_match {
+				draw_rect(commands,
+					offset = {
+						f32(position.column) * cell_size.x + gutter_width,
+						cell_size.y * (f32(position.line) - scroll) + FONT_HEIGHT - la.round(f32(editor.font.descender) * editor.font.scale) - 1,
+					} + rect.min,
+					size   = { cell_size.x * f32(max(1, next_column - position.column)), 1, },
+					color  = editor.config.theme[.Cursor].bg,
+				)
+			}
+
+			if unicode.is_space(char) {
+				continue
+			}
+
+			x := f32(position.column) * cell_size.x + gutter_width
+			y := cell_size.y * (f32(position.line) - scroll) + FONT_HEIGHT
+
+			append(&text_commands, Draw_Command_Char {
+				position = { x, y, } + rect.min,
+				color    = editor.config.theme[style].fg,
+				char     = char,
+			})
+
+			// TODO: line wrapping
+		}
+
+		if editor.config.theme[style].bg != 0 {
+			draw_rect(commands,
+				offset = {
+					f32(start_column) * cell_size.x + gutter_width,
+					cell_size.y * (f32(position.line - 1) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale),
+				} + rect.min,
+				size   = { f32(position.column - start_column) * cell_size.x, cell_size.y, },
+				color  = editor.config.theme[style].bg,
+			)
+		}
+	}
+
+	for &selection, i in buffer.selections {
+		line := btree_offset_to_line(&buffer.btree, offset = selection.cursor)
+		iter := btree_iterator(&buffer.btree, line = line)
+
+		for iter.offset != selection.cursor {
+			_ = btree_iter(&iter) or_else panic("offset out of range")
+		}
+
+		position    := iter.position
+		_, _         = btree_iter(&iter)
+		next_column := iter.column
+		width       := max(next_column - position.column, 1)
+
+		offset := [2]f32 {
+			f32(position.column) * cell_size.x + gutter_width,
+			cell_size.y * f32(position.line - 1) + la.round(f32(editor.font.ascender) * editor.font.scale),
+		} + rect.min
+
+		size   := cell_size
+		size.x *= f32(width)
+
+		target := Rect{ min = offset, max = offset + size, }
+
+		if selection.anim == {} {
+			center                    := rect_center(target)
+			selection.anim.current.min = center
+			selection.anim.current.max = center
+		}
+
+		animation_set_target(&selection.anim, target)
+
+		style := Style_Key.Cursor_Secondary
+		if i == buffer.primary {
+			style = .Cursor
+		}
+
+		cursor_rect := animation_update(&selection.anim, delta_time, editor.config.cursor_animation_speed)
+		draw_rect(commands,
+			offset        = cursor_rect.min - { 0, scroll * cell_size.y, },
+			size          = rect_size(cursor_rect),
+			color         = editor.config.theme[style].bg,
+			border_radius = 2,
+		)
+	}
+
+	append(commands, ..text_commands[:])
 }

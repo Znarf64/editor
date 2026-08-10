@@ -2,7 +2,7 @@ package editor
 
 import runtime "base:runtime"
 
-import fmt     "core:fmt"
+import reflect "core:reflect"
 import strings "core:strings"
 import slice   "core:slice"
 import vmem    "core:mem/virtual"
@@ -99,7 +99,7 @@ Action :: union {
 }
 
 // this is a bit dumb, we should just have a proper data structure to store selections
-deduplicate_selections :: proc(editor: ^Editor) {
+deduplicate_selections :: proc(editor: ^Buffer) {
 	n := len(editor.selections)
 	if n <= 1 {
 		return
@@ -158,8 +158,8 @@ action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 		if editor.repeat_count == 0 {
 			editor.repeat_count = 1
 		}
-		for &selection, i in editor.selections {
-			motion_apply(editor, &selection, v, i == editor.primary)
+		for &selection, i in editor.buffer.selections {
+			motion_apply(editor, &editor.buffer, &selection, v, i == editor.buffer.primary)
 		}
 	case Command:
 		command_execute(editor, v)
@@ -179,15 +179,15 @@ action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 	}
 	for selection in editor.new_selections {
 		if selection.primary {
-			editor.primary = len(editor.selections)
+			editor.buffer.primary = len(editor.buffer.selections)
 		}
 		selection              := selection
 		selection.target_cursor = selection.cursor
-		append(&editor.selections, selection)
+		append(&editor.buffer.selections, selection)
 	}
 	clear(&editor.new_selections)
 	editor.repeat_count = 0
-	deduplicate_selections(editor)
+	deduplicate_selections(&editor.buffer)
 }
 
 Keybinds :: distinct map[Keybind]Action
@@ -345,7 +345,7 @@ action_to_string :: proc(action: Action, arena: ^vmem.Arena) -> string {
 	case Command:
 		return string(v)
 	case Motion:
-		return motion_descriptions[v]
+		return motion_to_name_table[v] or_else panic("invalid motion")
 	case Argument_Motion:
 		return argument_motion_descriptions[v]
 	}

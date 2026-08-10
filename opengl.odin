@@ -132,6 +132,8 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: [
 		}
 	}
 
+	glodin.disable(.Scissor)
+
 	for command in commands {
 		if len(renderer.instance_buffer) >= OPENGL_DRAW_BATCH_SIZE {
 			flush(renderer)
@@ -157,6 +159,19 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: [
 				texture = { **([2]f32)(g.min), 1, },
 				color   = v.color,
 			})
+		case Draw_Command_Clip:
+			flush(renderer)
+
+			if v == DRAW_COMMAND_CLIP_DISABLE {
+				glodin.disable(.Scissor)
+				break
+			}
+
+			rect := v
+			rect.min.y, rect.max.y = f32(renderer.size.y) - v.max.y, f32(renderer.size.y) - v.min.y
+
+			glodin.set_scissor({ min = ([2]int)(rect.min), max = ([2]int)(rect.max), })
+			glodin.enable(.Scissor)
 		}
 	}
 	flush(renderer)
