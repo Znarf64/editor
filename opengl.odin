@@ -1,24 +1,26 @@
 package editor
 
+import runtime "base:runtime"
+
+import fmt   "core:fmt"
 import slice "core:slice"
 
-import glodin "vendor/glodin"
-import ttf    "vendor/ttf_odin"
+import gl "vendor:OpenGL"
+
+import ttf "vendor/ttf_odin"
 
 Opengl_Renderer :: struct {
-	quad:            glodin.Mesh,
-	instance_mesh:   glodin.Instanced_Mesh,
+	vao, vbo:        u32,
+	instance_vbo:    u32,
 	instance_buffer: [dynamic]Opengl_Instance,
-	program:         glodin.Program,
-	uniform_buffer:  glodin.Uniform_Buffer,
+	program:         u32,
 	font:            Opengl_Font,
-	uniforms:       ^Opengl_Uniforms,
-	size:            [2]int,
+	resolution:      [2]int,
 }
 
 Opengl_Font :: struct {
 	using font: Font,
-	atlas:      glodin.Texture,
+	atlas:      u32,
 	baked:      map[rune]Baked_Glyph,
 	skyline:    [dynamic]int,
 }
@@ -27,10 +29,6 @@ Baked_Glyph :: struct {
 	min, max:  [2]int,
 	offset:    [2]int,
 	x_advance: f32,
-}
-
-Opengl_Uniforms :: struct {
-	screen_size: [2]f32,
 }
 
 Opengl_Instance :: struct {
@@ -47,8 +45,88 @@ Opengl_Instance :: struct {
 OPENGL_DRAW_BATCH_SIZE :: 1 << 12
 
 @(require_results)
-opengl_renderer_init :: proc(renderer: ^Opengl_Renderer, allocator := context.allocator) -> bool {
-	glodin.init(proc(rawptr, cstring) {})
+opengl_renderer_init :: proc(
+	renderer: ^Opengl_Renderer,
+	set_proc_address: gl.Set_Proc_Address_Type,
+	allocator := context.allocator,
+) -> bool {
+	gl.load_up_to(4, 5, set_proc_address)
+
+	when ODIN_DEBUG {
+		gl.Enable(gl.DEBUG_OUTPUT)
+		gl.DebugMessageCallback(
+			proc "c" (
+				source:    u32,
+				type:      u32,
+				id:        u32,
+				severity:  u32,
+				length:    i32,
+				message:   cstring,
+				userParam: rawptr,
+			) {
+				if id == 131185 {
+					return
+				}
+
+				source_string: string
+				switch source {
+				case gl.DEBUG_SOURCE_API:
+					source_string = "API"
+				case gl.DEBUG_SOURCE_WINDOW_SYSTEM:
+					source_string = "Window System"
+				case gl.DEBUG_SOURCE_SHADER_COMPILER:
+					source_string = "Shader Compiler"
+				case gl.DEBUG_SOURCE_THIRD_PARTY:
+					source_string = "Third Party"
+				case gl.DEBUG_SOURCE_APPLICATION:
+					source_string = "Application"
+				case gl.DEBUG_SOURCE_OTHER:
+					source_string = "Other"
+				}
+
+				type_string: string
+				switch type {
+				case gl.DEBUG_TYPE_ERROR:
+					type_string = "Error"
+				case gl.DEBUG_TYPE_DEPRECATED_BEHAVIOR:
+					type_string = "Deprecated_Behavior"
+				case gl.DEBUG_TYPE_UNDEFINED_BEHAVIOR:
+					type_string = "Undefined_Behavior"
+				case gl.DEBUG_TYPE_PORTABILITY:
+					type_string = "Portability"
+				case gl.DEBUG_TYPE_PERFORMANCE:
+					type_string = "Performance"
+				case gl.DEBUG_TYPE_MARKER:
+					type_string = "Marker"
+				case gl.DEBUG_TYPE_OTHER:
+					type_string = "Other"
+				}
+
+				level_string: string
+				switch severity {
+				case gl.DEBUG_SEVERITY_NOTIFICATION:
+					level_string = "DEBUG"
+				case gl.DEBUG_SEVERITY_LOW:
+					level_string = "INFO "
+				case gl.DEBUG_SEVERITY_MEDIUM:
+					level_string = "WARN "
+				case gl.DEBUG_SEVERITY_HIGH:
+					level_string = "ERROR"
+				}
+
+				context = runtime.default_context()
+				fmt.eprintfln(
+					"[%s][Source: '%s': Type: '%s']: %v (Code: %d)",
+					level_string,
+					source_string,
+					type_string,
+					message,
+					id,
+				)
+			},
+			nil,
+		)
+	}
 
 	Vertex :: struct {
 		position: [2]f32,
@@ -62,52 +140,88 @@ opengl_renderer_init :: proc(renderer: ^Opengl_Renderer, allocator := context.al
 		{ position = { 1, 0, }, },
 		{ position = { 1, 1, }, },
 	}
-	renderer.quad            = glodin.create_mesh(vertex_buffer[:])
-	renderer.instance_buffer = make([dynamic]Opengl_Instance, OPENGL_DRAW_BATCH_SIZE, allocator)
-	renderer.instance_mesh   = glodin.create_instanced_mesh_from_base(renderer.quad, renderer.instance_buffer[:])
-	clear(&renderer.instance_buffer)
-	renderer.uniform_buffer  = glodin.create_uniform_buffer(Opengl_Uniforms)
-	renderer.uniforms        = glodin.map_uniform_buffer(^Opengl_Uniforms, renderer.uniform_buffer)
-	Uniforms :: distinct Opengl_Uniforms
-	renderer.program         = glodin.create_program_hephaistos(#load("shader.hep"), shared_types = { Uniforms, }) or_else panic("Failed to load shader")
 
-	glodin.set_uniform(renderer.program, "vertex_uniforms",   renderer.uniform_buffer)
-	glodin.set_uniform(renderer.program, "fragment_uniforms", renderer.uniform_buffer)
+	gl.CreateBuffers(1, &renderer.vbo)
+	gl.NamedBufferStorage(renderer.vbo, size_of(Vertex) * len(vertex_buffer), &vertex_buffer[0], gl.DYNAMIC_STORAGE_BIT)
 
-	renderer.font.atlas   = glodin.create_texture(1024, 1024, format = .RGB8, mag_filter = .Nearest, min_filter = .Nearest)
+	gl.CreateBuffers(1, &renderer.instance_vbo)
+	gl.NamedBufferStorage(renderer.instance_vbo, OPENGL_DRAW_BATCH_SIZE * size_of(Opengl_Instance), nil, gl.DYNAMIC_STORAGE_BIT)
+
+	gl.CreateVertexArrays(1, &renderer.vao)
+
+	gl.VertexArrayVertexBuffer(renderer.vao, 0, renderer.vbo,          0, size_of(Vertex))
+	gl.VertexArrayVertexBuffer(renderer.vao, 1, renderer.instance_vbo, 0, size_of(Opengl_Instance))
+
+	gl.VertexArrayBindingDivisor(renderer.vao, 1, 1)
+
+	for i in 0 ..= 8 {
+		gl.EnableVertexArrayAttrib(renderer.vao, u32(i))
+	}
+
+	gl.VertexArrayAttribFormat(renderer.vao, 0, 2, gl.FLOAT, false, 0)
+
+	gl.VertexArrayAttribFormat(renderer.vao, 1, 2, gl.FLOAT, false, u32(offset_of(Opengl_Instance, offset)))
+	gl.VertexArrayAttribFormat(renderer.vao, 2, 2, gl.FLOAT, false, u32(offset_of(Opengl_Instance, size)))
+	gl.VertexArrayAttribFormat(renderer.vao, 3, 3, gl.FLOAT, false, u32(offset_of(Opengl_Instance, texture)))
+	gl.VertexArrayAttribFormat(renderer.vao, 4, 4, gl.FLOAT, false, u32(offset_of(Opengl_Instance, color)))
+	gl.VertexArrayAttribFormat(renderer.vao, 5, 3, gl.FLOAT, false, u32(offset_of(Opengl_Instance, border_radius)))
+	gl.VertexArrayAttribFormat(renderer.vao, 6, 3, gl.FLOAT, false, u32(offset_of(Opengl_Instance, border_width)))
+	gl.VertexArrayAttribFormat(renderer.vao, 7, 4, gl.FLOAT, false, u32(offset_of(Opengl_Instance, border_color)))
+	gl.VertexArrayAttribFormat(renderer.vao, 8, 3, gl.FLOAT, false, u32(offset_of(Opengl_Instance, shadow_width)))
+
+	gl.VertexArrayAttribBinding(renderer.vao, 0, 0)
+	for i in 1 ..= 8 {
+		gl.VertexArrayAttribBinding(renderer.vao, u32(i), 1)
+	}
+
+	gl.BindVertexArray(renderer.vao)
+
+	renderer.instance_buffer = make([dynamic]Opengl_Instance, 0, OPENGL_DRAW_BATCH_SIZE, allocator)
+
+	renderer.program = gl.load_shaders_source(#load("shaders/main.vert"), #load("shaders/main.frag")) or_else panic("Failed to compile shader")
+	gl.UseProgram(renderer.program)
+
+	gl.CreateTextures(gl.TEXTURE_2D, 1, &renderer.font.atlas)
+	gl.TextureStorage2D(renderer.font.atlas, 1, gl.RGB8, 1024, 1024)
 	renderer.font.skyline = make([dynamic]int, 1024, allocator)
 	renderer.font.baked   = make(map[rune]Baked_Glyph, allocator)
-	glodin.set_uniform(renderer.program, "font_texture", renderer.font.atlas)
 
-	glodin.enable(.Blend)
+	gl.BindTextureUnit(0, renderer.font.atlas)
+
+	gl.Enable(gl.BLEND)
+	gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+	gl.PixelStorei(gl.PACK_ALIGNMENT,   1)
+	gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1)
 
 	return true
 }
 
 opengl_renderer_resize :: proc(renderer: ^Opengl_Renderer, size: [2]int) {
-	glodin.window_size_callback(size.x, size.y)
-	renderer.size                 = size
-	renderer.uniforms.screen_size = ([2]f32)(renderer.size)
+	renderer.resolution = size
 }
 
 opengl_renderer_destroy :: proc(renderer: Opengl_Renderer) {
+	renderer := renderer
+
 	delete(renderer.instance_buffer)
 	delete(renderer.font.skyline)
 	delete(renderer.font.baked)
 
-	glodin.destroy(renderer.quad)
-	glodin.destroy(renderer.instance_mesh)
-	glodin.destroy(renderer.program)
-	glodin.destroy(renderer.uniform_buffer)
-	glodin.destroy(renderer.font.atlas)
-
-	glodin.uninit()
+	gl.DeleteVertexArrays(1, &renderer.vao)
+	gl.DeleteBuffers(1, &renderer.vbo)
+	gl.DeleteBuffers(1, &renderer.instance_vbo)
+	gl.DeleteProgram(renderer.program)
+	gl.DeleteTextures(1, &renderer.font.atlas)
 }
 
 opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: []Draw_Command, background_color: [4]f32) {
 	renderer.font.font = font
 
-	glodin.clear_color({}, background_color)
+	gl.ClearColor(**background_color)
+	gl.Clear(gl.COLOR_BUFFER_BIT)
+
+	gl.Uniform2f(0, f32(renderer.resolution.x), f32(renderer.resolution.y))
+	gl.Viewport(0, 0, i32(renderer.resolution.x), i32(renderer.resolution.y))
 
 	flush :: proc(renderer: ^Opengl_Renderer) {
 		if len(renderer.instance_buffer) == 0 {
@@ -116,8 +230,8 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: [
 
 		for {
 			n := min(len(renderer.instance_buffer), OPENGL_DRAW_BATCH_SIZE)
-			glodin.set_instanced_mesh_data(renderer.instance_mesh, renderer.instance_buffer[:n])
-			glodin.draw({}, renderer.program, renderer.instance_mesh, count = n)
+			gl.NamedBufferSubData(renderer.instance_vbo, 0, n * size_of(Opengl_Instance), raw_data(renderer.instance_buffer))
+			gl.DrawArraysInstanced(gl.TRIANGLES, 0, 6, i32(n))
 
 			if len(renderer.instance_buffer) <= OPENGL_DRAW_BATCH_SIZE {
 				clear(&renderer.instance_buffer)
@@ -132,7 +246,7 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: [
 		}
 	}
 
-	glodin.disable(.Scissor)
+	gl.Disable(gl.SCISSOR_TEST)
 
 	for command in commands {
 		if len(renderer.instance_buffer) >= OPENGL_DRAW_BATCH_SIZE {
@@ -163,15 +277,15 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: [
 			flush(renderer)
 
 			if v == DRAW_COMMAND_CLIP_DISABLE {
-				glodin.disable(.Scissor)
+				gl.Disable(gl.SCISSOR_TEST)
 				break
 			}
 
 			rect := v
-			rect.min.y, rect.max.y = f32(renderer.size.y) - v.max.y, f32(renderer.size.y) - v.min.y
+			rect.min.y, rect.max.y = f32(renderer.resolution.y) - v.max.y, f32(renderer.resolution.y) - v.min.y
 
-			glodin.set_scissor({ min = ([2]int)(rect.min), max = ([2]int)(rect.max), })
-			glodin.enable(.Scissor)
+			gl.Scissor(i32(rect.min.x), i32(rect.min.y), i32(rect.max.x - rect.min.x), i32(rect.max.y - rect.min.y))
+			gl.Enable(gl.SCISSOR_TEST)
 		}
 	}
 	flush(renderer)
@@ -216,7 +330,17 @@ get_baked_glyph :: proc(font: ^Opengl_Font, r: rune) -> Baked_Glyph {
 	}
 
 	pos := pack_rect(font, size + 1)
-	glodin.set_texture_data(font.atlas, pixels, pos.x, pos.y, size.x, size.y)
+	gl.TextureSubImage2D(
+		font.atlas,
+		0,
+		i32(pos.x),
+		i32(pos.y),
+		i32(size.x),
+		i32(size.y),
+		gl.RED,
+		gl.UNSIGNED_BYTE,
+		raw_data(pixels),
+	)
 
 	x_advance, _ := ttf.get_glyph_horizontal_metrics(font, glyph)
 

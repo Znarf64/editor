@@ -37,9 +37,7 @@ _backend_init_glfw :: proc(backend: ^Backend_Glfw) -> (ok: bool) {
 
 	glfw.MakeContextCurrent(backend.window)
 
-	gl.load_up_to(4, 6, glfw.gl_set_proc_address)
-
-	opengl_renderer_init(&backend.opengl_renderer) or_return
+	opengl_renderer_init(&backend.opengl_renderer, glfw.gl_set_proc_address) or_return
 
 	backend.poll_events = proc(backend: ^Backend_Glfw) -> []Event {
 		glfw.PollEvents()

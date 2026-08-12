@@ -473,8 +473,6 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 			return false
 		}
 
-		gl.load_up_to(4, 6, egl.gl_set_proc_address)
-
 		backend.egl_initialized = true
 
 		return true
@@ -482,7 +480,7 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 
 	init_egl(backend) or_return
 
-	opengl_renderer_init(&backend.opengl_renderer) or_return
+	opengl_renderer_init(&backend.opengl_renderer, egl.gl_set_proc_address) or_return
 
 	backend.poll_events = proc(backend: ^Backend_Wayland) -> []Event {
 		wl.display_flush(backend.display)

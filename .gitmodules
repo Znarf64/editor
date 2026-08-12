@@ -1,6 +1,3 @@
-[submodule "vendor/glodin"]
-	path = vendor/glodin
-	url = https://github.com/znarf64/glodin
 [submodule "vendor/ttf_odin"]
 	path = vendor/ttf_odin
 	url = https://github.com/znarf64/ttf_odin
