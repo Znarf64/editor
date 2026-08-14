@@ -271,7 +271,30 @@ main :: proc() {
 					case .Enter:
 						picker_submit(&editor)
 					case .Backspace:
-						strings.pop_rune(&editor.picker.input)
+						@(require_results)
+						is_word :: proc(r: rune) -> bool {
+							return r == '_' || unicode.is_letter(r) || unicode.is_number(r)
+						}
+
+						r, w := strings.pop_rune(&editor.picker.input)
+						(w != 0) or_break
+
+						if e.modifiers & { .Control, .Alt, } == {} {
+							picker_update(&editor)
+							break
+						}
+
+						for !is_word(r) {
+							r, w = strings.pop_rune(&editor.picker.input)
+							(w != 0) or_break
+						}
+						for is_word(r) {
+							r, w = strings.pop_rune(&editor.picker.input)
+							(w != 0) or_break
+						}
+						if !is_word(r) && w != 0 {
+							strings.write_rune(&editor.picker.input, r)
+						}
 						picker_update(&editor)
 					case .Down, .Tab:
 						editor.picker.active += 1
@@ -632,14 +655,6 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		append(commands, Draw_Command_Blur{ radius = f32(editor.config.blur_strength), })
 	}
 
-	if editor.mode == .Picker {
-		rect := rect_from_min_max(40, screen_size - 40 - { 0, FONT_HEIGHT + padding * 2, })
-		animation_set_target(&editor.picker.rect, rect)
-	} else {
-		center := rect_center(rect_from_min_max(40, screen_size - 40))
-		animation_set_target(&editor.picker.rect, Rect{ min = center, max = center, })
-	}
-
 	leader_target_rect := Rect {
 		min = (screen_size - 20 - { 0, FONT_HEIGHT + padding * 2, }) - editor.leader.size,
 		max = (screen_size - 20 - { 0, FONT_HEIGHT + padding * 2, }),
@@ -727,7 +742,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		editor.leader.alpha.t       = 1
 	}
 
-	picker_render(editor, commands, delta_time, padding)
+	picker_render(editor, commands, delta_time, padding, screen_size)
 }
 
 @(require_results)
@@ -1006,7 +1021,7 @@ render_buffer :: proc(
 	}
 
 	line_digits  := int(la.ceil(la.log10(1 + f32(buffer.btree.lines))))
-	lines_width  := cell_size.x * f32(line_digits)
+	lines_width  := cell_size.x * f32(line_digits) + padding
 	gutter_width := lines_width + padding + 1 + padding
 
 	buffer.visible_lines = max(1, int(la.floor(height / cell_size.y)))
@@ -1105,8 +1120,16 @@ render_buffer :: proc(
 					break draw_gutter
 				}
 
-				text_color := editor.config.theme[.Ident].fg
+				text_color := editor.config.theme[.Gutter].fg
 				line       := position.line
+
+				if color := editor.config.theme[.Gutter].bg; color != 0 {
+					draw_rect(commands,
+						offset = { 0, cell_size.y * (f32(position.line) - scroll), } + rect.min,
+						size   = { gutter_width - cell_size.x, cell_size.y, },
+						color  = color,
+					)
+				}
 
 				if primary_position.line == position.line {
 					text_color = editor.config.theme[.Cursor].bg
@@ -1126,7 +1149,7 @@ render_buffer :: proc(
 						cell_size.y * (f32(position.line) - scroll),
 					} + rect.min,
 					size   = { 1, cell_size.y, },
-					color  = editor.config.theme[.Ident].fg,
+					color  = editor.config.theme[.Gutter].fg,
 				)
 			}
 
@@ -1210,7 +1233,7 @@ render_buffer :: proc(
 		offset := [2]f32 {
 			f32(position.column) * cell_size.x + gutter_width,
 			cell_size.y * f32(position.line),
-		} + rect.min
+		}
 
 		size   := cell_size
 		size.x *= f32(width)
@@ -1232,7 +1255,7 @@ render_buffer :: proc(
 
 		cursor_rect := animation_update(&selection.anim, delta_time, editor.config.cursor_animation_speed)
 		draw_rect(commands,
-			offset        = cursor_rect.min - { 0, scroll * cell_size.y, },
+			offset        = cursor_rect.min - { 0, scroll * cell_size.y, } + rect.min,
 			size          = rect_size(cursor_rect),
 			color         = editor.config.theme[style].bg,
 			border_radius = 2,

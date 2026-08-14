@@ -1,6 +1,5 @@
 package editor
 
-import fmt     "core:fmt"
 import os      "core:os"
 import strings "core:strings"
 import slice   "core:slice"
@@ -11,6 +10,7 @@ Picker :: struct {
 	mode:    Picker_Mode,
 	input:   strings.Builder,
 	rect:    Animation(Rect),
+	rect2:   Animation(Rect),
 	files:   []os.File_Info,
 	matches: [dynamic]Picker_Match,
 	active:  int,
@@ -199,8 +199,17 @@ item_match_score :: proc(item, pattern: string) -> int {
 	return score
 }
 
-picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time, padding: f32) {
-	picker      := &editor.picker
+picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time, padding: f32, screen_size: [2]f32) {
+	picker := &editor.picker
+
+	if editor.mode == .Picker {
+		rect := rect_from_min_max(100, screen_size - 100 - { 0, FONT_HEIGHT + padding * 2, })
+		animation_set_target(&picker.rect, rect)
+	} else {
+		center := rect_center(rect_from_min_max(100, screen_size - 100))
+		animation_set_target(&picker.rect, Rect{ min = center, max = center, })
+	}
+
 	picker_rect := animation_update(&picker.rect, delta_time, editor.config.popup_animation_speed)
 
 	draw_rect(commands,

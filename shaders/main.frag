@@ -16,7 +16,7 @@ layout (binding  = 1) uniform sampler2D u_texture_blur;
 layout (binding  = 2) uniform sampler2D u_texture_noise;
 
 layout (location = 1) uniform bool      u_enable_blur;
-layout (location = 2) uniform float     u_noise_strength = 0.025;
+layout (location = 2) uniform float     u_noise_strength = 0.0125;
 
 float sdf_rounded_box(vec2 p, vec2 b, float r) {
 	vec2 q = abs(p) - b + r;

@@ -14,6 +14,7 @@ Style_Key :: enum {
 	Popup_Background,
 	Popup_Border,
 	Statusline,
+	Gutter,
 
 	Ui_Focus,
 	Ui_Highlight,
