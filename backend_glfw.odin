@@ -4,7 +4,6 @@ import runtime "base:runtime"
 
 import strings "core:strings"
 
-import gl   "vendor:OpenGL"
 import glfw "vendor:glfw"
 
 Backend_Glfw :: struct {

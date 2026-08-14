@@ -34,12 +34,17 @@ Draw_Command_Char :: struct {
 
 Draw_Command_Clip :: distinct Rect
 
+Draw_Command_Blur :: struct {
+	radius: f32, // 0 = disable blur
+}
+
 DRAW_COMMAND_CLIP_DISABLE :: Draw_Command_Clip { min = min(f32), max = max(f32), }
 
 Draw_Command :: union {
 	Draw_Command_Rect,
 	Draw_Command_Char,
 	Draw_Command_Clip,
+	Draw_Command_Blur,
 }
 
 Position :: struct {
@@ -604,6 +609,10 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		)
 	}
 
+	if editor.config.enable_blur {
+		append(commands, Draw_Command_Blur{ radius = 16, })
+	}
+
 	if editor.mode == .Picker {
 		rect := rect_from_min_max(40, screen_size - 40 - { 0, FONT_HEIGHT + padding * 2, })
 		animation_set_target(&editor.picker.rect, rect)
@@ -627,8 +636,8 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 	draw_rect(commands,
 		offset        = leader_rect.min,
 		size          = rect_size(leader_rect),
-		color         = editor.config.theme[.Background].bg,
-		border_color  = color_from_hex_rgba(0x32363DFF),
+		color         = editor.config.theme[.Popup_Background].fg,
+		border_color  = editor.config.theme[.Popup_Border].fg,
 		border_radius = 8,
 		border_width  = 2,
 		shadow_width  = 16,
@@ -704,8 +713,8 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 	draw_rect(commands,
 		offset        = picker_rect.min,
 		size          = rect_size(picker_rect),
-		color         = color_from_hex_rgba(0x1E2128FF),
-		border_color  = color_from_hex_rgba(0x32363DFF),
+		color         = editor.config.theme[.Popup_Background].fg,
+		border_color  = editor.config.theme[.Popup_Border].fg,
 		border_radius = 8,
 		border_width  = 2,
 		shadow_width  = 16,
@@ -905,6 +914,7 @@ prompt_apply :: proc(editor: ^Editor) {
 
 			start := min(selection.cursor, selection.anchor)
 			end   := max(selection.cursor, selection.anchor)
+			end    = btree_offset_after(&editor.buffer.btree, end)
 
 			strings.builder_grow(&b, int(end - start))
 			btree_to_string(&editor.buffer.btree, &b, start, end)
@@ -972,7 +982,14 @@ draw_rect :: proc(
 	})
 }
 
-render_buffer :: proc(editor: ^Editor, buffer: ^Buffer, commands: ^[dynamic]Draw_Command, delta_time: f32, rect: Rect, padding: f32) {
+render_buffer :: proc(
+	editor:    ^Editor,
+	buffer:    ^Buffer,
+	commands:  ^[dynamic]Draw_Command,
+	delta_time: f32,
+	rect:       Rect,
+	padding:    f32,
+) {
 	if rect.max.x <= rect.min.x || rect.max.y <= rect.min.y {
 		return
 	}
@@ -1083,22 +1100,26 @@ render_buffer :: proc(editor: ^Editor, buffer: ^Buffer, commands: ^[dynamic]Draw
 			offset := start_offset + Offset(start + sub_offset)
 
 			draw_gutter: if position.column == 0 {
-				y := cell_size.y * (f32(position.line) - scroll) + FONT_HEIGHT
+				y := cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale)
 
 				if y < 0 {
 					break draw_gutter
 				}
 
-				l := position.line
-				if editor.config.relative_line_numbers && primary_position.line != position.line {
-					l = abs(primary_position.line - position.line) - 1
+				text_color := editor.config.theme[.Ident].fg
+				line       := position.line
+
+				if primary_position.line == position.line {
+					text_color = editor.config.theme[.Cursor].bg
+				} else if editor.config.relative_line_numbers {
+					line = abs(primary_position.line - position.line) - 1
 				}
 
 				@(static)
 				line_number_buf: [32]byte
-				str := strconv.write_int(line_number_buf[:], i64(l + 1), base = 10)
+				str := strconv.write_int(line_number_buf[:], i64(line + 1), base = 10)
 				w   := measure_text(&editor.font, str)
-				draw_text(&editor.font, commands, str, editor.config.theme[.Ident].fg, { lines_width - w, y, } + rect.min)
+				draw_text(&editor.font, commands, str, text_color, { lines_width - w, y, } + rect.min)
 
 				draw_rect(commands,
 					offset = {
@@ -1128,7 +1149,7 @@ render_buffer :: proc(editor: ^Editor, buffer: ^Buffer, commands: ^[dynamic]Draw
 				draw_rect(commands,
 					offset = {
 						f32(position.column) * cell_size.x + gutter_width,
-						cell_size.y * (f32(position.line - 1) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale),
+						cell_size.y * (f32(position.line) - scroll),
 					} + rect.min,
 					size   = cell_size * { f32(max(1, next_column - position.column)), 1, },
 					color  = editor.config.theme[.Selection].bg,
@@ -1139,7 +1160,7 @@ render_buffer :: proc(editor: ^Editor, buffer: ^Buffer, commands: ^[dynamic]Draw
 				draw_rect(commands,
 					offset = {
 						f32(position.column) * cell_size.x + gutter_width,
-						cell_size.y * (f32(position.line) - scroll) + FONT_HEIGHT - la.round(f32(editor.font.descender) * editor.font.scale) - 1,
+						cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.font.ascender - editor.font.descender) * editor.font.scale) - 1,
 					} + rect.min,
 					size   = { cell_size.x * f32(max(1, next_column - position.column)), 1, },
 					color  = editor.config.theme[.Cursor].bg,
@@ -1151,7 +1172,7 @@ render_buffer :: proc(editor: ^Editor, buffer: ^Buffer, commands: ^[dynamic]Draw
 			}
 
 			x := f32(position.column) * cell_size.x + gutter_width
-			y := cell_size.y * (f32(position.line) - scroll) + FONT_HEIGHT
+			y := cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale)
 
 			append(&text_commands, Draw_Command_Char {
 				position = { x, y, } + rect.min,
@@ -1166,7 +1187,7 @@ render_buffer :: proc(editor: ^Editor, buffer: ^Buffer, commands: ^[dynamic]Draw
 			draw_rect(commands,
 				offset = {
 					f32(start_column) * cell_size.x + gutter_width,
-					cell_size.y * (f32(position.line - 1) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale),
+					cell_size.y * (f32(position.line) - scroll),
 				} + rect.min,
 				size   = { f32(position.column - start_column) * cell_size.x, cell_size.y, },
 				color  = editor.config.theme[style].bg,
@@ -1189,7 +1210,7 @@ render_buffer :: proc(editor: ^Editor, buffer: ^Buffer, commands: ^[dynamic]Draw
 
 		offset := [2]f32 {
 			f32(position.column) * cell_size.x + gutter_width,
-			cell_size.y * f32(position.line - 1) + la.round(f32(editor.font.ascender) * editor.font.scale),
+			cell_size.y * f32(position.line),
 		} + rect.min
 
 		size   := cell_size

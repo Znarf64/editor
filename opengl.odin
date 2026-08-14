@@ -4,18 +4,24 @@ import runtime "base:runtime"
 
 import fmt   "core:fmt"
 import slice "core:slice"
+import math  "core:math"
 
 import gl "vendor:OpenGL"
 
 import ttf "vendor/ttf_odin"
 
 Opengl_Renderer :: struct {
-	vao, vbo:        u32,
-	instance_vbo:    u32,
-	instance_buffer: [dynamic]Opengl_Instance,
-	program:         u32,
-	font:            Opengl_Font,
-	resolution:      [2]int,
+	vao, vbo:         u32,
+	instance_vbo:     u32,
+	instance_buffer:  [dynamic]Opengl_Instance,
+	main_program:     u32,
+	blur_program:     u32,
+	font:             Opengl_Font,
+	blur_textures:    [2]u32,
+	main_texture:     u32,
+	main_framebuffer: u32,
+	noise_texture:    u32,
+	resolution:       [2]int,
 }
 
 Opengl_Font :: struct {
@@ -43,6 +49,20 @@ Opengl_Instance :: struct {
 }
 
 OPENGL_DRAW_BATCH_SIZE :: 1 << 12
+
+OPENGL_UNIFORM_SCREEN_SIZE    :: 0
+OPENGL_UNIFORM_ENABLE_BLUR    :: 1
+OPENGL_UNIFORM_NOISE_STRENGTH :: 2
+
+OPENGL_UNIFORM_BLUR_INPUT     :: 0
+OPENGL_UNIFORM_BLUR_OUTPUT    :: 1
+OPENGL_UNIFORM_BLUR_VERTICAL  :: 2
+OPENGL_UNIFORM_BLUR_SAMPLES   :: 3
+OPENGL_UNIFORM_BLUR_WEIGHTS   :: 4
+
+OPENGL_TEXTURE_BINDING_FONT   :: 0
+OPENGL_TEXTURE_BINDING_BLUR   :: 1
+OPENGL_TEXTURE_BINDING_NOISE  :: 2
 
 @(require_results)
 opengl_renderer_init :: proc(
@@ -178,15 +198,33 @@ opengl_renderer_init :: proc(
 
 	renderer.instance_buffer = make([dynamic]Opengl_Instance, 0, OPENGL_DRAW_BATCH_SIZE, allocator)
 
-	renderer.program = gl.load_shaders_source(#load("shaders/main.vert"), #load("shaders/main.frag")) or_else panic("Failed to compile shader")
-	gl.UseProgram(renderer.program)
+	renderer.main_program = gl.load_shaders_source(#load("shaders/main.vert"), #load("shaders/main.frag")) or_else panic("Failed to compile main shader")
+	renderer.blur_program = gl.load_compute_source(#load("shaders/blur.comp")) or_else panic("Failed to compile blur shader")
 
 	gl.CreateTextures(gl.TEXTURE_2D, 1, &renderer.font.atlas)
 	gl.TextureStorage2D(renderer.font.atlas, 1, gl.RGB8, 1024, 1024)
 	renderer.font.skyline = make([dynamic]int, 1024, allocator)
 	renderer.font.baked   = make(map[rune]Baked_Glyph, allocator)
 
-	gl.BindTextureUnit(0, renderer.font.atlas)
+	gl.CreateTextures(gl.TEXTURE_2D, 1, &renderer.noise_texture)
+	gl.TextureStorage2D(renderer.noise_texture, 1, gl.R8, 1024, 1024)
+	noise    := make([]u8, 1024 * 1024, context.temp_allocator)
+	noise_ok := runtime.random_generator_read_bytes(context.random_generator, noise)
+	assert(noise_ok)
+	gl.TextureSubImage2D(
+		renderer.noise_texture,
+		0,
+		0,
+		0,
+		1024,
+		1024,
+		gl.RED,
+		gl.UNSIGNED_BYTE,
+		raw_data(noise),
+	)
+
+	renderer.resolution = 1
+	opengl_framebuffer_init(renderer)
 
 	gl.Enable(gl.BLEND)
 	gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
@@ -196,8 +234,34 @@ opengl_renderer_init :: proc(
 	return true
 }
 
+opengl_framebuffer_init :: proc(renderer: ^Opengl_Renderer) {
+	gl.CreateTextures(gl.TEXTURE_2D, len(renderer.blur_textures), &renderer.blur_textures[0])
+	for texture in renderer.blur_textures {
+		gl.TextureStorage2D(texture, 1, gl.RGBA8, i32(renderer.resolution.x), i32(renderer.resolution.y))
+	}
+
+	gl.CreateTextures(gl.TEXTURE_2D, 1, &renderer.main_texture)
+	gl.TextureStorage2D(renderer.main_texture, 1, gl.RGBA8, i32(renderer.resolution.x), i32(renderer.resolution.y))
+
+	gl.CreateFramebuffers(1, &renderer.main_framebuffer)
+	gl.BindFramebuffer(gl.FRAMEBUFFER, renderer.main_framebuffer)
+	gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, renderer.main_texture, 0)
+	status := gl.CheckFramebufferStatus(gl.FRAMEBUFFER)
+	if status != gl.FRAMEBUFFER_COMPLETE {
+		fmt.panicf("Failed to create framebuffer: %v", gl.GL_Enum(status))
+	}
+}
+
+opengl_framebuffer_destroy :: proc(renderer: ^Opengl_Renderer) {
+	gl.DeleteTextures(len(renderer.blur_textures), &renderer.blur_textures[0])
+	gl.DeleteTextures(1, &renderer.main_texture)
+	gl.DeleteFramebuffers(1, &renderer.main_framebuffer)
+}
+
 opengl_renderer_resize :: proc(renderer: ^Opengl_Renderer, size: [2]int) {
 	renderer.resolution = size
+	opengl_framebuffer_destroy(renderer)
+	opengl_framebuffer_init(renderer)
 }
 
 opengl_renderer_destroy :: proc(renderer: Opengl_Renderer) {
@@ -210,17 +274,29 @@ opengl_renderer_destroy :: proc(renderer: Opengl_Renderer) {
 	gl.DeleteVertexArrays(1, &renderer.vao)
 	gl.DeleteBuffers(1, &renderer.vbo)
 	gl.DeleteBuffers(1, &renderer.instance_vbo)
-	gl.DeleteProgram(renderer.program)
+	gl.DeleteProgram(renderer.main_program)
+	gl.DeleteProgram(renderer.blur_program)
 	gl.DeleteTextures(1, &renderer.font.atlas)
+	gl.DeleteTextures(len(renderer.blur_textures), &renderer.blur_textures[0])
 }
 
 opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: []Draw_Command, background_color: [4]f32) {
 	renderer.font.font = font
 
+	gl.BindFramebuffer(gl.FRAMEBUFFER, renderer.main_framebuffer)
+
 	gl.ClearColor(**background_color)
 	gl.Clear(gl.COLOR_BUFFER_BIT)
 
-	gl.Uniform2f(0, f32(renderer.resolution.x), f32(renderer.resolution.y))
+	gl.UseProgram(renderer.main_program)
+
+	gl.Uniform2f(OPENGL_UNIFORM_SCREEN_SIZE, f32(renderer.resolution.x), f32(renderer.resolution.y))
+	gl.Uniform1i(OPENGL_UNIFORM_ENABLE_BLUR, 0)
+
+	gl.BindTextureUnit(OPENGL_TEXTURE_BINDING_FONT,  renderer.font.atlas)
+	gl.BindTextureUnit(OPENGL_TEXTURE_BINDING_BLUR,  renderer.blur_textures[0])
+	gl.BindTextureUnit(OPENGL_TEXTURE_BINDING_NOISE, renderer.noise_texture)
+
 	gl.Viewport(0, 0, i32(renderer.resolution.x), i32(renderer.resolution.y))
 
 	flush :: proc(renderer: ^Opengl_Renderer) {
@@ -286,9 +362,70 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: [
 
 			gl.Scissor(i32(rect.min.x), i32(rect.min.y), i32(rect.max.x - rect.min.x), i32(rect.max.y - rect.min.y))
 			gl.Enable(gl.SCISSOR_TEST)
+		case Draw_Command_Blur:
+			flush(renderer)
+
+			if v.radius == 0 {
+				gl.Uniform1i(OPENGL_UNIFORM_ENABLE_BLUR, 0)
+				break
+			}
+			gl.Uniform1i(OPENGL_UNIFORM_ENABLE_BLUR, 1)
+
+			gl.UseProgram(renderer.blur_program)
+
+			weights: [32]f32
+			compute_gaussian_weights(weights[:], int(v.radius), v.radius / 2)
+
+			gl.Uniform1i(OPENGL_UNIFORM_BLUR_SAMPLES, i32(v.radius))
+			gl.Uniform1fv(OPENGL_UNIFORM_BLUR_WEIGHTS, i32(v.radius), &weights[0])
+
+			gl.BindImageTexture(0, renderer.main_texture,     0, false, 0, gl.READ_ONLY,  gl.RGBA8)
+			gl.BindImageTexture(1, renderer.blur_textures[1], 0, false, 0, gl.READ_WRITE, gl.RGBA8)
+			gl.BindImageTexture(2, renderer.blur_textures[0], 0, false, 0, gl.WRITE_ONLY, gl.RGBA8)
+
+			gl.Uniform1i(OPENGL_UNIFORM_BLUR_INPUT,    0)
+			gl.Uniform1i(OPENGL_UNIFORM_BLUR_OUTPUT,   1)
+			gl.Uniform1i(OPENGL_UNIFORM_BLUR_VERTICAL, 0)
+
+			LOCAL_SIZE :: 16
+
+			gl.DispatchCompute(
+				u32(renderer.resolution.x + LOCAL_SIZE - 1) / LOCAL_SIZE,
+				u32(renderer.resolution.y + LOCAL_SIZE - 1) / LOCAL_SIZE,
+				1,
+			)
+			gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT)
+
+			gl.Uniform1i(OPENGL_UNIFORM_BLUR_INPUT,    1)
+			gl.Uniform1i(OPENGL_UNIFORM_BLUR_OUTPUT,   2)
+			gl.Uniform1i(OPENGL_UNIFORM_BLUR_VERTICAL, 1)
+
+			gl.DispatchCompute(
+				u32(renderer.resolution.x + LOCAL_SIZE - 1) / LOCAL_SIZE,
+				u32(renderer.resolution.y + LOCAL_SIZE - 1) / LOCAL_SIZE,
+				1,
+			)
+			gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT)
+
+			gl.UseProgram(renderer.main_program)
 		}
 	}
 	flush(renderer)
+
+	gl.BindFramebuffer(gl.READ_FRAMEBUFFER, renderer.main_framebuffer)
+	gl.BindFramebuffer(gl.DRAW_FRAMEBUFFER, 0)
+	gl.BlitFramebuffer(
+		0,
+		0,
+		i32(renderer.resolution.x),
+		i32(renderer.resolution.y),
+		0,
+		0,
+		i32(renderer.resolution.x),
+		i32(renderer.resolution.y),
+		gl.COLOR_BUFFER_BIT,
+		gl.NEAREST,
+	)
 }
 
 @(require_results)
@@ -353,4 +490,20 @@ get_baked_glyph :: proc(font: ^Opengl_Font, r: rune) -> Baked_Glyph {
 
 	font.baked[r] = b
 	return b
+}
+
+compute_gaussian_weights :: proc(weights: []f32, samples: int, sigma: f32) {
+	sum: f32
+	for i in 0 ..< samples {
+		x         := f32(i)
+		weights[i] = math.exp(-(x * x) / (2 * sigma * sigma))
+		sum       += weights[i]
+	}
+
+	sum *= 2
+	sum -= weights[0]
+
+	for i in 0 ..< samples {
+		weights[i] /= sum;
+	}
 }

@@ -19,8 +19,7 @@ layout (location = 5) out float v_border_width;
 layout (location = 6) out vec4  v_border_color;
 layout (location = 7) out float v_shadow_width;
 
-layout (location = 0)
-uniform vec2 u_screen_size;
+layout (location = 0) uniform vec2 u_screen_size;
 
 void main() {
 	v_texture       = vec3(i_texture.xy + a_position * i_size, i_texture.z);

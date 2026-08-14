@@ -11,7 +11,8 @@ import vmem    "core:mem/virtual"
 Style_Key :: enum {
 	Invalid = 0,
 	Background,
-	Popup,
+	Popup_Background,
+	Popup_Border,
 	Statusline,
 
 	Whitespace,
@@ -42,7 +43,8 @@ Theme :: [Style_Key]Style
 
 Config :: struct {
 	arena:                  vmem.Arena,
-	animations:             bool,
+	enable_animations:      bool,
+	enable_blur:            bool,
 	relative_line_numbers:  bool,
 	scroll_animation_speed: f32,
 	cursor_animation_speed: f32,
