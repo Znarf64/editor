@@ -1,9 +1,11 @@
 package editor
 
+import fmt     "core:fmt"
 import os      "core:os"
 import strings "core:strings"
 import slice   "core:slice"
 import unicode "core:unicode"
+import utf8    "core:unicode/utf8"
 
 Picker :: struct {
 	mode:    Picker_Mode,
@@ -12,6 +14,14 @@ Picker :: struct {
 	files:   []os.File_Info,
 	matches: [dynamic]Picker_Match,
 	active:  int,
+}
+
+Picker_Mode :: enum {
+	Files,
+	Files_Recursive,
+	Global_Search,
+	Symbols,
+	Commands,
 }
 
 Picker_Match :: struct {
@@ -46,6 +56,46 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "") {
 		if err != nil {
 			editor_set_status(editor, "Failed to read directory: %v", err)
 		}
+	case .Files_Recursive:
+		path := path
+		err: os.Error
+		if path == "" {
+			path, err = os.get_working_directory(context.temp_allocator)
+			if err != nil {
+				editor_set_status(editor, "Failed to get current working directory: %v", err)
+				break
+			}
+		}
+		os.file_info_slice_delete(editor.picker.files, context.allocator)
+
+		path, err = os.get_absolute_path(path, context.temp_allocator)
+		if err != nil {
+			editor_set_status(editor, "Failed to get absolute path: %v", err)
+			break
+		}
+
+		w := os.walker_create(path)
+		defer os.walker_destroy(&w)
+
+		files := make([dynamic]os.File_Info, context.allocator)
+		for info in os.walker_walk(&w) {
+			_ = os.walker_error(&w) or_break
+
+			if strings.has_suffix(info.fullpath, ".git") {
+				os.walker_skip_dir(&w)
+				continue
+			}
+
+			if info.type == .Directory {
+				continue
+			}
+
+			info     := os.file_info_clone(info, context.allocator) or_break
+			info.name = strings.trim_prefix(info.fullpath, path)
+			info.name = strings.trim_prefix(info.name, "/")
+			append(&files, info)
+		}
+		editor.picker.files = files[:]
 	case .Symbols:
 	case .Commands:
 	}
@@ -62,7 +112,7 @@ picker_update :: proc(editor: ^Editor) {
 
 	switch editor.picker.mode {
 	case .Global_Search:
-	case .Files:
+	case .Files, .Files_Recursive:
 		clear(&editor.picker.matches)
 		for file, i in editor.picker.files {
 			score := item_match_score(file.name, pattern)
@@ -98,7 +148,7 @@ picker_submit :: proc(editor: ^Editor) {
 	switch picker.mode {
 	case .Global_Search:
 		editor.mode = .Normal
-	case .Files:
+	case .Files, .Files_Recursive:
 		file := picker.files[picker.matches[picker.active].id]
 		if file.type == .Directory {
 			picker_open(editor, .Files, strings.clone(file.fullpath, context.temp_allocator))
@@ -133,7 +183,11 @@ item_match_score :: proc(item, pattern: string) -> int {
 		item = strings.to_lower(item, context.temp_allocator)
 	}
 
-	score := 1
+	if i := strings.index(item, pattern); i != -1 {
+		return i + 1
+	}
+
+	score := 10000
 	for f in pattern {
 		i := strings.index_rune(item, f)
 		if i == -1 {
@@ -191,6 +245,14 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 
 		x += draw_text(&editor.font, commands, ">", editor.config.theme[.Ui_Focus].fg, { x, y + line_height * f32(picker.active), }) + padding
 
+		has_upper: bool
+		for r in pattern {
+			if unicode.is_upper(r) {
+				has_upper = true
+				break
+			}
+		}
+
 		for match, match_index in picker.matches {
 			pos := [2]f32{ x, y, }
 
@@ -198,19 +260,40 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 
 			text_color := editor.config.theme[match_index == picker.active ? .Ui_Focus : .Ui_Text].fg
 
+			defer y += line_height
+
+			if !has_upper {
+				lower  := strings.to_lower(match.name, context.temp_allocator)
+				offset := strings.index(lower, pattern)
+				if offset != -1 {
+					n     := len(pattern)
+					pos.x += draw_text(&editor.font, commands, item[:offset],     text_color,                            pos)
+					pos.x += draw_text(&editor.font, commands, item[offset:][:n], editor.config.theme[.Ui_Highlight].fg, pos)
+					pos.x += draw_text(&editor.font, commands, item[offset:][n:], text_color,                            pos)
+					continue
+				}
+			}
+
 			for f in pattern {
 				i := strings.index_rune(item, f)
+				if !has_upper {
+					l := unicode.to_upper(f)
+					if f != l {
+						// uint(-1) == max(uint)
+						i = int(min(uint(i), uint(strings.index_rune(item, l))))
+					}
+				}
 				assert(i != -1)
 
-				pos.x += draw_text(&editor.font, commands, item[:i],     text_color,                            pos)
-				pos.x += draw_text(&editor.font, commands, item[i:][:1], editor.config.theme[.Ui_Highlight].fg, pos)
+				_, n := utf8.decode_rune(item[i:])
 
-				item = item[i + 1:]
+				pos.x += draw_text(&editor.font, commands, item[:i],     text_color,                            pos)
+				pos.x += draw_text(&editor.font, commands, item[i:][:n], editor.config.theme[.Ui_Highlight].fg, pos)
+
+				item = item[i + n:]
 			}
 
 			draw_text(&editor.font, commands, item, text_color, pos)
-
-			y += line_height
 		}
 	}
 }

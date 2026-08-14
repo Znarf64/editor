@@ -902,7 +902,7 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 		unimplemented()
 
 	case .Open_File:
-		picker_open(editor, .Files)
+		picker_open(editor, .Files_Recursive)
 	case .Close_File:
 		unimplemented()
 

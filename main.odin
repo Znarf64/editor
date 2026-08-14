@@ -66,13 +66,6 @@ Mode :: enum {
 	Picker,
 }
 
-Picker_Mode :: enum {
-	Files,
-	Global_Search,
-	Symbols,
-	Commands,
-}
-
 Prompt_Mode :: enum {
 	Command,
 	Search,
