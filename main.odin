@@ -280,6 +280,16 @@ main :: proc() {
 					case .Backspace:
 						strings.pop_rune(&editor.picker.input)
 						picker_update(&editor)
+					case .Down, .Tab:
+						editor.picker.active += 1
+						if editor.picker.active >= len(editor.picker.matches) {
+							editor.picker.active = 0
+						}
+					case .Up:
+						editor.picker.active -= 1
+						if editor.picker.active < 0 {
+							editor.picker.active = len(editor.picker.matches) - 1
+						}
 					}
 					break
 				}
@@ -402,6 +412,14 @@ rect_center :: proc(rect: Rect) -> [2]f32 {
 @(require_results)
 rect_size :: proc(rect: Rect) -> [2]f32 {
 	return rect.max - rect.min
+}
+
+@(require_results)
+rect_inflate :: proc(rect: Rect, v: [2]f32) -> Rect {
+	return {
+		min = rect.min - v,
+		max = rect.max + v,
+	}
 }
 
 Animation :: struct(T: typeid) {
@@ -617,8 +635,8 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		)
 	}
 
-	if editor.config.enable_blur {
-		append(commands, Draw_Command_Blur{ radius = 16, })
+	if editor.config.blur_strength != 0 {
+		append(commands, Draw_Command_Blur{ radius = f32(editor.config.blur_strength), })
 	}
 
 	if editor.mode == .Picker {
@@ -998,7 +1016,7 @@ render_buffer :: proc(
 	lines_width  := cell_size.x * f32(line_digits)
 	gutter_width := lines_width + padding + 1 + padding
 
-	buffer.visible_lines = max(1, int(1 + la.ceil(height / cell_size.y)))
+	buffer.visible_lines = max(1, int(la.floor(height / cell_size.y)))
 
 	scroll := animation_update(&buffer.scroll_anim, delta_time, editor.config.scroll_animation_speed)
 
@@ -1006,7 +1024,7 @@ render_buffer :: proc(
 	primary_position := btree_offset_to_position(&buffer.btree, primary.cursor)
 
 	first_visble_line := int(la.floor(scroll))
-	last_visible_line := min(int(buffer.btree.lines), first_visble_line + buffer.visible_lines)
+	last_visible_line := min(int(buffer.btree.lines), first_visble_line + buffer.visible_lines + 3)
 
 	position: Position = {
 		line = first_visble_line,

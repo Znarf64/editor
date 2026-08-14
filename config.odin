@@ -15,6 +15,10 @@ Style_Key :: enum {
 	Popup_Border,
 	Statusline,
 
+	Ui_Focus,
+	Ui_Highlight,
+	Ui_Text,
+
 	Whitespace,
 	Ident,
 	Keyword,
@@ -44,7 +48,7 @@ Theme :: [Style_Key]Style
 Config :: struct {
 	arena:                  vmem.Arena,
 	enable_animations:      bool,
-	enable_blur:            bool,
+	blur_strength:          int,
 	relative_line_numbers:  bool,
 	scroll_animation_speed: f32,
 	cursor_animation_speed: f32,

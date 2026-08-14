@@ -18,8 +18,8 @@ void main() {
 	vec4  acc    = imageLoad(u_image_input, coord) * u_weights[0];
 	ivec2 offset = u_vertical ? ivec2(0, 1) : ivec2(1, 0);
 	for (int i = 1; i < u_samples; i += 1) {
-		acc += imageLoad(u_image_input, coord + i * offset) * u_weights[i];
-		acc += imageLoad(u_image_input, coord - i * offset) * u_weights[i];
+		acc += imageLoad(u_image_input, clamp(coord + i * offset, ivec2(0), size - 1)) * u_weights[i];
+		acc += imageLoad(u_image_input, clamp(coord - i * offset, ivec2(0), size - 1)) * u_weights[i];
 	}
 	imageStore(u_image_output, coord, acc);
 }

@@ -26,18 +26,23 @@ picker_destroy :: proc(picker: ^Picker) {
 	delete(picker.matches)
 }
 
-picker_open :: proc(editor: ^Editor, mode: Picker_Mode) {
+picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "") {
 	strings.builder_reset(&editor.picker.input)
 
 	switch mode {
 	case .Global_Search:
 	case .Files:
-		working_directory, err := os.get_working_directory(context.temp_allocator)
-		if err != nil {
-			editor_set_status(editor, "Failed to get current working directory: %v", err)
+		path := path
+		err: os.Error
+		if path == "" {
+			path, err = os.get_working_directory(context.temp_allocator)
+			if err != nil {
+				editor_set_status(editor, "Failed to get current working directory: %v", err)
+				break
+			}
 		}
 		os.file_info_slice_delete(editor.picker.files, context.allocator)
-		editor.picker.files, err = os.read_all_directory_by_path(working_directory, context.allocator)
+		editor.picker.files, err = os.read_all_directory_by_path(path, context.allocator)
 		if err != nil {
 			editor_set_status(editor, "Failed to read directory: %v", err)
 		}
@@ -92,14 +97,21 @@ picker_submit :: proc(editor: ^Editor) {
 
 	switch picker.mode {
 	case .Global_Search:
+		editor.mode = .Normal
 	case .Files:
-		buffer_destroy(editor.buffer)
-		buffer_init(editor, &editor.buffer, picker.files[picker.matches[picker.active].id].fullpath, context.allocator)
+		file := picker.files[picker.matches[picker.active].id]
+		if file.type == .Directory {
+			picker_open(editor, .Files, strings.clone(file.fullpath, context.temp_allocator))
+		} else {
+			buffer_destroy(editor.buffer)
+			buffer_init(editor, &editor.buffer, file.fullpath, context.allocator)
+			editor.mode = .Normal
+		}
 	case .Symbols:
+		editor.mode = .Normal
 	case .Commands:
+		editor.mode = .Normal
 	}
-
-	editor.mode = .Normal
 }
 
 @(require_results)
@@ -147,6 +159,14 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 		shadow_width  = 16,
 	)
 
+	clip_rect := rect_inflate(picker_rect, -2)
+	if clip_rect.min.x >= clip_rect.max.x || clip_rect.min.y >= clip_rect.max.y {
+		return
+	}
+
+	append(commands, Draw_Command_Clip(clip_rect))
+	defer append(commands, DRAW_COMMAND_CLIP_DISABLE)
+
 	if editor.mode == .Picker {
 		draw_text(
 			&editor.font,
@@ -162,30 +182,35 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 			color  = editor.config.theme[.Popup_Border].fg,
 		)
 
-		y := picker_rect.min.y + (padding + FONT_HEIGHT) * 2 + padding + 2
+		line_height := padding + FONT_HEIGHT
+
+		x := picker_rect.min.x + padding
+		y := picker_rect.min.y + line_height * 2 + padding + 2
 
 		pattern := strings.to_string(picker.input)
 
+		x += draw_text(&editor.font, commands, ">", editor.config.theme[.Ui_Focus].fg, { x, y + line_height * f32(picker.active), }) + padding
+
 		for match, match_index in picker.matches {
-			pos := [2]f32{ picker_rect.min.x + padding, y, }
+			pos := [2]f32{ x, y, }
 
 			item := match.name
 
-			text_color := editor.config.theme[match_index == picker.active ? .String : .Ident].fg
+			text_color := editor.config.theme[match_index == picker.active ? .Ui_Focus : .Ui_Text].fg
 
 			for f in pattern {
 				i := strings.index_rune(item, f)
 				assert(i != -1)
 
-				pos.x += draw_text(&editor.font, commands, item[:i],     text_color,                        pos)
-				pos.x += draw_text(&editor.font, commands, item[i:][:1], editor.config.theme[.Function].fg, pos)
+				pos.x += draw_text(&editor.font, commands, item[:i],     text_color,                            pos)
+				pos.x += draw_text(&editor.font, commands, item[i:][:1], editor.config.theme[.Ui_Highlight].fg, pos)
 
 				item = item[i + 1:]
 			}
 
 			draw_text(&editor.font, commands, item, text_color, pos)
 
-			y += padding + FONT_HEIGHT
+			y += line_height
 		}
 	}
 }
