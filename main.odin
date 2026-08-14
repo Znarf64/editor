@@ -143,11 +143,7 @@ Editor :: struct {
 		arena:       vmem.Arena,
 	},
 
-	picker:         struct {
-		mode:  Picker_Mode,
-		input: strings.Builder,
-		rect:  Animation(Rect),
-	},
+	picker:         Picker,
 
 	clipboard:      strings.Builder,
 
@@ -208,10 +204,10 @@ main :: proc() {
 		vmem.arena_destroy(&editor.leader.arena)
 		delete(editor.new_selections)
 		strings.builder_destroy(&editor.leader.sequence)
-		strings.builder_destroy(&editor.picker.input)
 		strings.builder_destroy(&editor.prompt.input)
 		strings.builder_destroy(&editor.status)
 		strings.builder_destroy(&editor.clipboard)
+		picker_destroy(&editor.picker)
 	}
 
 	font_ok := font_init(&editor.font, #load("font.ttf"), FONT_HEIGHT, context.allocator)
@@ -275,6 +271,19 @@ main :: proc() {
 					break
 				}
 
+				if editor.mode == .Picker {
+					#partial switch e.key {
+					case .Escape:
+						editor.mode = .Normal
+					case .Enter:
+						picker_submit(&editor)
+					case .Backspace:
+						strings.pop_rune(&editor.picker.input)
+						picker_update(&editor)
+					}
+					break
+				}
+
 				defer if !editor.leader.active && editor.leader.motion == nil {
 					strings.builder_reset(&editor.leader.sequence)
 					editor.leader.entries = {}
@@ -327,6 +336,7 @@ main :: proc() {
 					strings.write_rune(&editor.prompt.input, e.codepoint)
 				case .Picker:
 					strings.write_rune(&editor.picker.input, e.codepoint)
+					picker_update(&editor)
 				case .Insert:
 					argument_motion_apply(&editor.buffer, .Insert_Character, e.codepoint)
 				}
@@ -442,8 +452,6 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 	)
 
 	{
-		y := screen_size.y - padding - FONT_HEIGHT - padding
-
 		buffer           := editor.buffer
 		primary          := buffer.selections[buffer.primary]
 		primary_position := btree_offset_to_position(&buffer.btree, primary.cursor)
@@ -708,27 +716,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		editor.leader.alpha.t       = 1
 	}
 
-	picker_rect := animation_update(&editor.picker.rect, delta_time, editor.config.popup_animation_speed)
-
-	draw_rect(commands,
-		offset        = picker_rect.min,
-		size          = rect_size(picker_rect),
-		color         = editor.config.theme[.Popup_Background].fg,
-		border_color  = editor.config.theme[.Popup_Border].fg,
-		border_radius = 8,
-		border_width  = 2,
-		shadow_width  = 16,
-	)
-
-	if editor.mode == .Picker {
-		draw_text(
-			&editor.font,
-			commands,
-			strings.to_string(editor.picker.input),
-			editor.config.theme[.Ident].fg,
-			picker_rect.min + padding + { 0, FONT_HEIGHT, },
-		)
-	}
+	picker_render(editor, commands, delta_time, padding)
 }
 
 @(require_results)

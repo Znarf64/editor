@@ -890,14 +890,11 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 		editor.prompt.mode = .Command
 
 	case .Search_Global:
-		editor.mode        = .Picker
-		editor.picker.mode = .Global_Search
+		picker_open(editor, .Global_Search)
 	case .Search_Symbols:
-		editor.mode        = .Picker
-		editor.picker.mode = .Symbols
+		picker_open(editor, .Symbols)
 	case .Command_Palette:
-		editor.mode        = .Picker
-		editor.picker.mode = .Commands
+		picker_open(editor, .Commands)
 
 	case .Save:
 		unimplemented()
@@ -905,8 +902,7 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 		unimplemented()
 
 	case .Open_File:
-		editor.mode        = .Picker
-		editor.picker.mode = .Files
+		picker_open(editor, .Files)
 	case .Close_File:
 		unimplemented()
 

@@ -1,0 +1,25 @@
+#version 450
+
+layout (rgba8, location = 0) readonly  uniform image2D u_image_input;
+layout (rgba8, location = 1) writeonly uniform image2D u_image_output;
+
+layout (location = 2) uniform bool  u_vertical;
+layout (location = 3) uniform int   u_samples;
+layout (location = 4) uniform float u_weights[32];
+
+layout (local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+void main() {
+	ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	ivec2 size  = imageSize(u_image_input);
+	if (coord.x >= size.x || coord.y >= size.y) {
+		return;
+	}
+
+	vec4  acc    = imageLoad(u_image_input, coord) * u_weights[0];
+	ivec2 offset = u_vertical ? ivec2(0, 1) : ivec2(1, 0);
+	for (int i = 1; i < u_samples; i += 1) {
+		acc += imageLoad(u_image_input, coord + i * offset) * u_weights[i];
+		acc += imageLoad(u_image_input, coord - i * offset) * u_weights[i];
+	}
+	imageStore(u_image_output, coord, acc);
+}

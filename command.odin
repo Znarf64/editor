@@ -10,7 +10,8 @@ command_execute :: proc(editor: ^Editor, command: Command) {
 
 	switch command {
 	case "o", "open":
-		buffer_init(editor, &editor.buffer, strings.clone(args), context.allocator)
+		buffer_destroy(editor.buffer)
+		buffer_init(editor, &editor.buffer, args, context.allocator)
 	case "q", "quit":
 		os.exit(0)
 	}
