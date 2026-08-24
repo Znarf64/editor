@@ -16,6 +16,8 @@ Style_Key :: enum {
 	Statusline,
 	Gutter,
 
+	Error,
+
 	Ui_Focus,
 	Ui_Highlight,
 	Ui_Text,
@@ -249,6 +251,7 @@ load_config :: proc(config: ^Config) -> (ok: bool) {
 		binds = make(Keybinds, allocator)
 	}
 
+	config.keybinds[.Normal][{ key = .Escape, }] = .Normal
 	config.keybinds[.Insert][{ key = .Escape, }] = .Normal
 	config.keybinds[.Visual][{ key = .Escape, }] = .Normal
 	config.keybinds[.Prompt][{ key = .Escape, }] = .Normal

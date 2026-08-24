@@ -2,7 +2,6 @@ package editor
 
 import runtime "base:runtime"
 
-import reflect "core:reflect"
 import strings "core:strings"
 import slice   "core:slice"
 import vmem    "core:mem/virtual"
@@ -153,6 +152,7 @@ deduplicate_selections :: proc(editor: ^Buffer) {
 
 action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 	strings.builder_reset(&editor.status)
+	strings.builder_reset(&editor.popup_text)
 	switch v in action {
 	case Motion:
 		if editor.repeat_count == 0 {

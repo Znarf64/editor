@@ -2,9 +2,10 @@ package editor
 
 import runtime "base:runtime"
 
-import fmt   "core:fmt"
-import slice "core:slice"
-import math  "core:math"
+import fmt     "core:fmt"
+import slice   "core:slice"
+import strings "core:strings"
+import math    "core:math"
 
 import gl "vendor:OpenGL"
 
@@ -84,7 +85,9 @@ opengl_renderer_init :: proc(
 				message:   cstring,
 				userParam: rawptr,
 			) {
-				if id == 131185 {
+				context = runtime.default_context()
+
+				if id == 131185 || strings.contains(string(message), "Shader Stats") {
 					return
 				}
 
@@ -134,7 +137,6 @@ opengl_renderer_init :: proc(
 					level_string = "ERROR"
 				}
 
-				context = runtime.default_context()
 				fmt.eprintfln(
 					"[%s][Source: '%s': Type: '%s']: %v (Code: %d)",
 					level_string,

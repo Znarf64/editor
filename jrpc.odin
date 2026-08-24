@@ -1,0 +1,209 @@
+package editor
+
+import intrinsics "base:intrinsics"
+
+import bufio      "core:bufio"
+import bytes      "core:bytes"
+import fmt        "core:fmt"
+import io         "core:io"
+import json       "core:encoding/json"
+import os         "core:os"
+import strconv    "core:strconv"
+import strings    "core:strings"
+
+Base_Message :: struct {
+	method: string,
+	id:     int,
+	error:  Maybe(Response_Error),
+}
+
+@(require_results)
+jrpc_decode_message :: proc(data: []byte) -> (
+	method:  string,
+	id:      int,
+	content: []byte,
+	ok:      bool,
+) {
+	rnrn: [4]u8 = "\r\n\r\n"
+	header_len := bytes.index(data, rnrn[:])
+	if header_len == -1 {
+		return
+	}
+
+	header := string(data[:header_len])
+	content_len: int
+
+	for line in strings.split_lines_iterator(&header) {
+		l := len("Content-Length: ")
+		if len(line) > l && line[:l] == "Content-Length: " {
+			content_len = strconv.parse_int(line[l:]) or_return
+		}
+	}
+
+	content = data[header_len + len(rnrn):]
+
+	msg: Base_Message
+	if err := json.unmarshal(content, &msg, allocator = context.temp_allocator); err != nil {
+		return
+	}
+
+	if error, has_error := msg.error.?; has_error {
+		fmt.eprintln(error.code, error.message)
+		return
+	}
+
+	method = msg.method
+	id     = msg.id
+	ok     = len(content) == content_len
+	return
+}
+
+@(require_results)
+jrpc_send_message :: proc(lsp: ^LSP_Server, data: $T) -> (error: LSP_Error) where intrinsics.type_has_field(T, "jsonrpc") {
+	assert(data.jsonrpc == "2.0")
+
+	content := json.marshal(data, allocator = context.temp_allocator) or_return
+	fmt.fprintf(lsp.stdin, "Content-Length: %d\r\n\r\n", len(content))
+	os.write(lsp.stdin, content)
+
+	return nil
+}
+
+jrpc_split :: proc(data: []byte, _: bool) -> (
+	advance:     int,
+	token:       []byte,
+	err:         bufio.Scanner_Error,
+	final_token: bool,
+) {
+	data := string(data)
+	header_len := strings.index(data, "\r\n\r\n")
+	if header_len == -1 {
+		return
+	}
+
+	header := data[:header_len]
+	content_len: int
+
+	for line in strings.split_lines_iterator(&header) {
+		l := len("Content-Length: ")
+		if len(line) > l && line[:l] == "Content-Length: " {
+			err         = io.Error.Unknown
+			content_len = strconv.parse_int(line[l:]) or_return
+			err         = nil
+		}
+	}
+
+	if len(data) - header_len - 4 < content_len {
+		return
+	}
+
+	advance = header_len + 4 + content_len
+	token   = transmute([]byte)data[:advance]
+
+	return
+}
+
+Response_Error :: struct {
+	/**
+	 * A number indicating the error type that occurred.
+	 */
+	code:    Error_Code,
+
+	/**
+	 * A string providing a short description of the error.
+	 */
+	message: string,
+
+	/**
+	 * A primitive or structured value that contains additional
+	 * information about the error. Can be omitted.
+	 */
+	// data:    any,
+}
+
+Error_Code :: enum {
+	// Defined by JSON-RPC
+	Parse_Error                        = -32700,
+	Invalid_Request                    = -32600,
+	Method_Not_Found                   = -32601,
+	Invalid_Params                     = -32602,
+	Internal_Error                     = -32603,
+
+	/**
+	 * This is the start range of JSON-RPC reserved error codes.
+	 * It doesn't denote a real error code. No LSP error codes should
+	 * be defined between the start and end range. For backwards
+	 * compatibility the `ServerNotInitialized` and the `UnknownErrorCode`
+	 * are left in the range.
+	 *
+	 * @since 3.16.0
+	 */
+	jsonrpc_Reserved_Error_Range_Start = -32099,
+	/**
+	 * Error code indicating that a server received a notification or
+	 * request before the server has received the `initialize` request.
+	 */
+	Server_Not_Initialized             = -32002,
+	Unknown_Error_Code                 = -32001,
+
+	/**
+	 * This is the end range of JSON-RPC reserved error codes.
+	 * It doesn't denote a real error code.
+	 *
+	 * @since 3.16.0
+	 */
+	jsonrpc_Reserved_Error_Range_End   = -32000,
+
+	/**
+	 * This is the start range of LSP reserved error codes.
+	 * It doesn't denote a real error code.
+	 *
+	 * @since 3.16.0
+	 */
+	lsp_Reserved_Error_Range_Start     = -32899,
+
+	/**
+	 * A request failed but it was syntactically correct, e.g the
+	 * method name was known and the parameters were valid. The error
+	 * message should contain human readable information about why
+	 * the request failed.
+	 *
+	 * @since 3.17.0
+	 */
+	Request_Failed                     = -32803,
+
+	/**
+	 * The server cancelled the request. This error code should
+	 * only be used for requests that explicitly support being
+	 * server cancellable.
+	 *
+	 * @since 3.17.0
+	 */
+	Server_Cancelled                   = -32802,
+
+	/**
+	 * The server detected that the content of a document got
+	 * modified outside normal conditions. A server should
+	 * NOT send this error code if it detects a content change
+	 * in it unprocessed messages. The result even computed
+	 * on an older state might still be useful for the client.
+	 *
+	 * If a client decides that a result is not of any use anymore
+	 * the client should cancel the request.
+	 */
+	Content_Modified                    = -32801,
+
+	/**
+	 * The client has canceled a request and a server as detected
+	 * the cancel.
+	 */
+	Request_Cancelled                   = -32800,
+
+	/**
+	 * This is the end range of LSP reserved error codes.
+	 * It doesn't denote a real error code.
+	 *
+	 * @since 3.16.0
+	 */
+	lsp_Reserved_Error_Range_End           = -32800,
+}

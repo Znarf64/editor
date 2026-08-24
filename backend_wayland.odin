@@ -7,8 +7,6 @@ import fmt     "core:fmt"
 import strings "core:strings"
 import linux   "core:sys/linux"
 
-import gl "vendor:OpenGL"
-
 import wl  "vendor/odin-wayland"
 import xdg "vendor/odin-wayland/xdg"
 

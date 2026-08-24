@@ -2,6 +2,8 @@ package editor
 
 import runtime "base:runtime"
 
+import la "core:math/linalg"
+
 import ttf "vendor/ttf_odin"
 
 Glyph_Info :: struct {
@@ -45,6 +47,27 @@ get_glyph_info :: proc(font: ^Font, r: rune) -> Glyph_Info {
 }
 
 @(require_results)
+measure_multiline_text :: proc(font: ^Font, text: string) -> (w, h: f32) {
+	line_height := la.round(((f32(font.ascender) - f32(font.descender)) * font.scale))
+	max_w: f32
+	for r in text {
+		if r == '\n' {
+			h    += line_height
+			max_w = max(max_w, w)
+			w     = 0
+		} else {
+			w += get_glyph_info(font, r).x_advance
+		}
+	}
+
+	if w != 0 {
+		h += line_height
+	}
+
+	return max_w, h
+}
+
+@(require_results)
 measure_text :: proc(font: ^Font, text: string) -> (w: f32) {
 	for r in text {
 		w += get_glyph_info(font, r).x_advance
@@ -54,8 +77,15 @@ measure_text :: proc(font: ^Font, text: string) -> (w: f32) {
 }
 
 draw_text :: proc(font: ^Font, commands: ^[dynamic]Draw_Command, text: string, color: [4]f32, position: [2]f32) -> (width: f32) {
+	line_height := la.round(((f32(font.ascender) - f32(font.descender)) * font.scale))
 	pos := position
 	for r in text {
+		if r == '\n' {
+			pos.y += line_height
+			pos.x  = position.x
+			continue
+		}
+
 		info := get_glyph_info(font, r)
 
 		append(commands, Draw_Command_Char {

@@ -153,9 +153,14 @@ picker_submit :: proc(editor: ^Editor) {
 		if file.type == .Directory {
 			picker_open(editor, .Files, strings.clone(file.fullpath, context.temp_allocator))
 		} else {
-			buffer_destroy(editor.buffer)
-			buffer_init(editor, &editor.buffer, file.fullpath, context.allocator)
+			buffer_destroy(&editor.buffer)
+			data := os.read_entire_file(file.fullpath, context.temp_allocator) or_else { '\n', }
+			buffer_init_with_data(editor, &editor.buffer, file.fullpath, string(data), context.allocator, &editor.lsp)
 			editor.mode = .Normal
+
+			if editor.lsp.initialized {
+				lsp_open_file(&editor.lsp, file.fullpath, string(data))
+			}
 		}
 	case .Symbols:
 		editor.mode = .Normal
@@ -203,10 +208,10 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 	picker := &editor.picker
 
 	if editor.mode == .Picker {
-		rect := rect_from_min_max(100, screen_size - 100 - { 0, FONT_HEIGHT + padding * 2, })
+		rect := rect_from_min_max(100, screen_size - 100)
 		animation_set_target(&picker.rect, rect)
 	} else {
-		center := rect_center(rect_from_min_max(100, screen_size - 100))
+		center := screen_size / 2
 		animation_set_target(&picker.rect, Rect{ min = center, max = center, })
 	}
 
@@ -235,7 +240,7 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 			&editor.font,
 			commands,
 			strings.to_string(picker.input),
-			editor.config.theme[.Ident].fg,
+			editor.config.theme[.Ui_Text].fg,
 			picker_rect.min + padding + { 0, FONT_HEIGHT, },
 		)
 

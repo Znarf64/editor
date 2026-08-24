@@ -5,6 +5,7 @@ import runtime "base:runtime"
 import reflect "core:reflect"
 import strings "core:strings"
 import unicode "core:unicode"
+import utf8    "core:unicode/utf8"
 import vmem    "core:mem/virtual"
 
 Motion :: enum {
@@ -112,6 +113,7 @@ Motion :: enum {
 
 	Show_Hover_Information,
 	Show_Code_Actions,
+	Go_To_Definition,
 
 	Collapse_Selection,
 	Keep_Primary_Selection,
@@ -279,14 +281,27 @@ _buffer_insert :: proc(buffer: ^Buffer, arg: $T, offset: Offset) -> Offset {
 			selection.anchor += n
 		}
 	}
+	for &diagnostic in buffer.diagnostics {
+		if diagnostic.start >= offset {
+			diagnostic.start += n
+		}
+		if diagnostic.end >= offset {
+			diagnostic.end += n
+		}
+	}
 	return n
 }
 
 buffer_insert_rune   :: proc(buffer: ^Buffer, offset: Offset, r: rune)   -> Offset {
+	buf, n := utf8.encode_rune(r)
+	buffer.version += 1
+	lsp_apply_change(buffer.lsp, buffer, offset, offset, string(buf[:n]), buffer.version)
 	return _buffer_insert(buffer, r, offset)
 }
 
 buffer_insert_string :: proc(buffer: ^Buffer, offset: Offset, s: string) -> Offset {
+	buffer.version += 1
+	lsp_apply_change(buffer.lsp, buffer, offset, offset, s, buffer.version)
 	return _buffer_insert(buffer, s, offset)
 }
 
@@ -469,10 +484,12 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 		back := btree_iterator(&buffer.btree, offset = selection.cursor)
 		iter := btree_iterator(&buffer.btree, offset = selection.cursor)
 
+		selection.anchor = 0
 		last_was_newline: bool
 		for r in btree_iter(&back, back = true) {
 			if r == '\n' {
 				if last_was_newline {
+					selection.anchor = back.offset + 2
 					break
 				}
 				last_was_newline = true
@@ -480,8 +497,6 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 				last_was_newline = false
 			}
 		}
-
-		selection.anchor = back.offset + 2 // this is fine, since the last two characters will have been single-byte newline characters
 
 		last_was_newline = false
 		for r in btree_iter(&iter) {
@@ -623,18 +638,10 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 		vertical_move    = position_to_offset_normalized(buffer, position, true, selection)
 		selection.anchor = selection.cursor
 	case .Character_Left:
-		iter := btree_iterator(&buffer.btree, offset = selection.cursor)
-		for _ in 0 ..< editor.repeat_count {
-			_ = btree_iter(&iter, back = true) or_break
-		}
-		selection.cursor = iter.offset
+		selection.cursor = btree_offset_before(&buffer.btree, selection.cursor, editor.repeat_count)
 		selection.anchor = selection.cursor
 	case .Character_Right:
-		iter := btree_iterator(&buffer.btree, offset = selection.cursor)
-		for _ in 0 ..= editor.repeat_count {
-			_ = btree_iter(&iter) or_break
-		}
-		selection.cursor = iter.offset
+		selection.cursor = btree_offset_after(&buffer.btree, selection.cursor, editor.repeat_count)
 		selection.anchor = selection.cursor
 
 	case .Select_Line:
@@ -779,18 +786,15 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 			}
 		}
 		selection.anchor = iter.offset
-
-		pos := iter.offset
+		selection.cursor = iter.next_offset
 
 		for r in btree_iter(&iter) {
 			if unicode.is_space(r) {
 				break
 			} else {
-				pos = iter.offset
+				selection.cursor = iter.offset
 			}
 		}
-
-		selection.cursor = pos
 
 	case .Select_Long_Word_Backward:
 		iter := btree_iterator(&buffer.btree, offset = selection.cursor)
@@ -954,8 +958,10 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 			b := strings.builder_make(0, int(end - start), context.temp_allocator)
 			btree_to_string(&buffer.btree, &b, start, end)
 			editor.backend->set_clipboard(strings.to_string(b))
+			editor_set_status(editor, "yanked to system clipboard")
 		} else {
 			strings.builder_reset(&editor.clipboard)
+			editor_set_status(editor, "yanked to clipboard")
 			btree_to_string(&buffer.btree, &editor.clipboard, start, end)
 		}
 
@@ -1084,7 +1090,10 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 		}
 
 	case .Show_Hover_Information:
-		unimplemented()
+		lsp_get_hover_information(editor, &editor.lsp, buffer)
+	case .Go_To_Definition:
+		primary or_break
+		lsp_go_to_definition(editor, &editor.lsp, buffer)
 	case .Show_Code_Actions:
 		unimplemented()
 	case .Collapse_Selection:
