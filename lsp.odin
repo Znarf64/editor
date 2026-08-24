@@ -3,9 +3,9 @@ package editor
 
 import runtime "base:runtime"
 
-import bufio   "core:bufio"
 import fmt     "core:fmt"
 import json    "core:encoding/json"
+import log     "core:log"
 import os      "core:os"
 import strings "core:strings"
 import vmem    "core:mem/virtual"
@@ -31,14 +31,14 @@ LSP_Capability :: enum {
 LSP_Server :: struct {
 	process:        os.Process,
 	stdin, stdout: ^os.File,
-	scanner:        bufio.Scanner,
+	read_buf:       [dynamic]byte,
 	request_id:     int,
 	responses:      map[int]LSP_Response_Proc,
 	capabilities:   bit_set[LSP_Capability],
 	initialized:    bool,
 }
 
-LSP_Response_Proc :: proc(editor: ^Editor, content: []byte) -> LSP_Error
+LSP_Response_Proc :: proc(editor: ^Editor, lsp_server: ^LSP_Server, content: []byte) -> LSP_Error
 
 @(require_results)
 send_request :: proc(lsp: ^LSP_Server, name: string, params: $Params, response: LSP_Response_Proc) -> (error: LSP_Error) {
@@ -68,15 +68,12 @@ send_notification :: proc(lsp: ^LSP_Server, name: string, params: $Params) -> (e
 }
 
 @(require_results)
-lsp_create :: proc(command: []string) -> (lsp: LSP_Server, err: LSP_Error) {
+lsp_init :: proc(lsp: ^LSP_Server, command: []string) -> (err: LSP_Error) {
 	desc: os.Process_Desc = {
 		command = command,
 	}
 	desc.stdin, lsp.stdin   = os.pipe() or_return
 	lsp.stdout, desc.stdout = os.pipe() or_return
-
-	bufio.scanner_init(&lsp.scanner, os.to_stream(lsp.stdout), context.allocator)
-	lsp.scanner.split = jrpc_split
 
 	lsp.process = os.process_start(desc) or_return
 
@@ -85,13 +82,15 @@ lsp_create :: proc(command: []string) -> (lsp: LSP_Server, err: LSP_Error) {
 			name = "Hello",
 		},
 	}
-	send_request(&lsp, "initialize", r, proc(editor: ^Editor, content: []byte) -> LSP_Error {
+	send_request(lsp, "initialize", r, proc(editor: ^Editor, lsp_server: ^LSP_Server, content: []byte) -> LSP_Error {
 		response: Response(Initialize_Result)
 		json.unmarshal(content, &response, allocator = context.temp_allocator) or_return
 
-		send_notification(&editor.lsp, "initialized", struct{}{}) or_return
+		send_notification(lsp_server, "initialized", struct{}{}) or_return
 
-		editor.lsp.initialized = true
+		log.info("LSP server initialized")
+
+		lsp_server.initialized = true
 
 		return nil
 	}) or_return
@@ -101,10 +100,10 @@ lsp_create :: proc(command: []string) -> (lsp: LSP_Server, err: LSP_Error) {
 
 lsp_destroy :: proc(lsp: ^LSP_Server) {
 	_ = os.process_kill(lsp.process)
-	bufio.scanner_destroy(&lsp.scanner)
 	os.close(lsp.stdout)
 	os.close(lsp.stdin)
 	delete(lsp.responses)
+	delete(lsp.read_buf)
 }
 
 Diagnostic_Severity :: enum {
@@ -128,6 +127,11 @@ Location_Link :: struct {
 	targetUri:            Uri,
 	targetRange:          Range,
 	targetSelectionRange: Range,
+}
+
+Fused_Location :: struct {
+	using _: Location_Link,
+	using _: Location,
 }
 
 Range :: struct {
@@ -241,6 +245,10 @@ Text_Document_Position_Params :: struct {
 }
 
 lsp_open_file :: proc(lsp: ^LSP_Server, path, content: string) {
+	if !lsp.initialized {
+		return
+	}
+
 	uri := uri_from_path(path, context.temp_allocator) or_else panic("failed to get file uri")
 	_ = send_notification(lsp, "textDocument/didOpen", Did_Open_Text_Document_Params {
 		textDocument = {
@@ -295,9 +303,10 @@ lsp_save :: proc(lsp: ^LSP_Server, buffer: ^Buffer) {
 	})
 }
 
-lsp_go_to_definition :: proc(editor: ^Editor, lsp: ^LSP_Server, buffer: ^Buffer) {
-	if !editor.lsp.initialized {
-		editor_set_status(editor, "no lsp server available")
+lsp_go_to_definition :: proc(editor: ^Editor, buffer: ^Buffer) {
+	lsp := editor_get_lsp_server(editor, buffer.language)
+	if lsp == nil || !lsp.initialized {
+		editor_set_popup_text(editor, "no lsp server available")
 		return
 	}
 
@@ -311,11 +320,11 @@ lsp_go_to_definition :: proc(editor: ^Editor, lsp: ^LSP_Server, buffer: ^Buffer)
 			line      = position.line,
 			character = int(cursor - line_start),
 		},
-	}, proc(editor: ^Editor, content: []byte) -> LSP_Error {
+	}, proc(editor: ^Editor, lsp_server: ^LSP_Server, content: []byte) -> LSP_Error {
 		response: Response(union {
 			Location,
-			[]Location_Link,
-			[]Location,
+			// since we don't know whether its all links or locations, but both would be unmarshalled without errors so we do this goofy business
+			[]Fused_Location,
 		})
 		json.unmarshal(content, &response, allocator = context.temp_allocator) or_return
 
@@ -323,42 +332,50 @@ lsp_go_to_definition :: proc(editor: ^Editor, lsp: ^LSP_Server, buffer: ^Buffer)
 		switch v in response.result {
 		case Location:
 			location = v
-		case []Location_Link:
+		case []Fused_Location:
 			if len(v) == 0 {
 				return nil
 			}
-			location = {
-				uri   = v[0].targetUri,
-				range = v[0].targetRange,
+			if len(v) == 1 {
+				location = v[0]
+				if location == {} {
+					location = { uri = v[0].targetUri, range = v[0].targetRange, }
+				}
+				break
 			}
-		case []Location:
-			if len(v) == 0 {
-				return nil
-			}
-			location = v[0]
+
+			picker_open(editor, .Symbols, fused_locations = v)
+			return nil
 		case nil:
 			return nil
 		}
 
-		location.range.end.character -= 1
+		if location.uri != editor.buffer.uri {
+			path := strings.trim_prefix(string(location.uri), "file://")
+			buffer_destroy(&editor.buffer)
+			buffer_init(editor, &editor.buffer, path, context.allocator)
+		}
+
+		if location.range.end.character > 0 {
+			location.range.end.character -= 1
+		}
 
 		start := lsp_position_to_offset(&editor.buffer.btree, location.range.start)
 		end   := lsp_position_to_offset(&editor.buffer.btree, location.range.end)
 
-		clear(&editor.buffer.selections)
 		editor.buffer.primary = 0
-		append(&editor.buffer.selections, Selection {
-			anchor        = start,
-			cursor        = end,
-			target_cursor = end,
-		})
+		resize(&editor.buffer.selections, 1)
+		editor.buffer.selections[0].anchor        = start
+		editor.buffer.selections[0].cursor        = end
+		editor.buffer.selections[0].target_cursor = end
 
 		return nil
 	})
 }
 
-lsp_get_hover_information :: proc(editor: ^Editor, lsp: ^LSP_Server, buffer: ^Buffer) {
-	if !editor.lsp.initialized {
+lsp_get_hover_information :: proc(editor: ^Editor, buffer: ^Buffer) {
+	lsp := editor_get_lsp_server(editor, buffer.language)
+	if lsp == nil || !lsp.initialized {
 		editor_set_popup_text(editor, "no lsp server available")
 		return
 	}
@@ -372,7 +389,7 @@ lsp_get_hover_information :: proc(editor: ^Editor, lsp: ^LSP_Server, buffer: ^Bu
 			line      = position.line,
 			character = int(cursor - line_start),
 		},
-	}, proc(editor: ^Editor, content: []byte) -> LSP_Error {
+	}, proc(editor: ^Editor, lsp: ^LSP_Server, content: []byte) -> LSP_Error {
 		Markup_Kind :: distinct string
 
 		Markup_Content :: struct {
@@ -402,19 +419,33 @@ lsp_get_hover_information :: proc(editor: ^Editor, lsp: ^LSP_Server, buffer: ^Bu
 
 @(require_results)
 lsp_update :: proc(editor: ^Editor, lsp: ^LSP_Server) -> LSP_Error {
-	for (os.pipe_has_data(lsp.stdout) or_return) && bufio.scan(&lsp.scanner) {
-		text := bufio.scanner_bytes(&lsp.scanner)
+	for os.pipe_has_data(lsp.stdout) or_return {
+		READ_CHUNK_SIZE :: 1 << 12
 
-		method, id, content, ok := jrpc_decode_message(text)
+		l := len(lsp.read_buf)
+		resize(&lsp.read_buf, l + READ_CHUNK_SIZE)
+		n := os.read(lsp.stdout, lsp.read_buf[l:]) or_return
+		resize(&lsp.read_buf, l + n)
+	}
+
+	read_cursor := 0
+
+	for {
+		data := lsp.read_buf[read_cursor:]
+		method, id, content, n, ok := jrpc_decode_message(data)
 		if !ok {
 			return json.Error.Unexpected_Token
 		}
+		if n == 0 {
+			break
+		}
+		read_cursor += n
 
 		if id != 0 {
 			fn, found := lsp.responses[id]
 			assert(found, "Invalid response id")
 			delete_key(&lsp.responses, id)
-			fn(editor, content) or_return
+			fn(editor, lsp, content) or_return
 			continue
 		}
 
@@ -426,6 +457,9 @@ lsp_update :: proc(editor: ^Editor, lsp: ^LSP_Server) -> LSP_Error {
 
 		fn(editor, content)
 	}
+
+	copy(lsp.read_buf[:], lsp.read_buf[read_cursor:])
+	resize(&lsp.read_buf, len(lsp.read_buf) - read_cursor)
 
 	return nil
 }

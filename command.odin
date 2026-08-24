@@ -11,13 +11,7 @@ command_execute :: proc(editor: ^Editor, command: Command) {
 	switch command {
 	case "o", "open":
 		buffer_destroy(&editor.buffer)
-		buffer_init(editor, &editor.buffer, args, context.allocator, &editor.lsp)
-
-		data := os.read_entire_file(args, context.temp_allocator) or_break
-
-		if editor.lsp.initialized {
-			lsp_open_file(&editor.lsp, args, string(data))
-		}
+		buffer_init(editor, &editor.buffer, args, context.allocator)
 	case "q", "quit":
 		os.exit(0)
 	case "n", "new":
@@ -27,15 +21,18 @@ command_execute :: proc(editor: ^Editor, command: Command) {
 			btree      = btree_build("\n", context.allocator, editor.config.tab_width),
 		}
 	case "w", "write":
-		if strings.contains(editor.buffer.path, "test/") {
+		buffer := &editor.buffer
+		if strings.contains(buffer.path, "test/") {
 			b := strings.builder_make(context.temp_allocator)
-			btree_to_string(&editor.buffer.btree, &b)
-			_ = os.write_entire_file(editor.buffer.path, b.buf[:])
+			btree_to_string(&buffer.btree, &b)
+			_ = os.write_entire_file(buffer.path, b.buf[:])
 
-			editor_set_status(editor, "'%s' written.", editor.buffer.path)
+			editor_set_status(editor, "'%s' written.", buffer.path)
 		} else {
 			editor_set_status(editor, "NOTHING WRITTEN")
 		}
-		lsp_save(&editor.lsp, &editor.buffer)
+		if lsp := editor_get_lsp_server(editor, buffer.language); lsp != nil {
+			lsp_save(lsp, &editor.buffer)
+		}
 	}
 }

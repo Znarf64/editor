@@ -268,7 +268,10 @@ btree_line_to_offset :: proc(btree: ^BTree, line: int) -> (offset: Offset) {
 			return
 		}
 
-		r, n   := utf8.decode_rune(data)
+		r, n := utf8.decode_rune(data)
+		if n == 0 {
+			break
+		}
 		data    = data[n:]
 		offset += Offset(n)
 		if r == '\n' {

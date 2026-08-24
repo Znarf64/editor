@@ -178,6 +178,15 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 			}
 		}
 		return .String
+	case '`':
+		h.pos += 1
+		for h.pos < len(h.text) {
+			defer h.pos += 1
+			if h.text[h.pos] == '`' {
+				break
+			}
+		}
+		return .String
 	case '\'':
 		h.pos += 1
 		parse_string_single_quote: for h.pos < len(h.text) {

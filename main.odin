@@ -2,9 +2,11 @@ package editor
 
 import runtime "base:runtime"
 
+import bytes   "core:bytes"
 import ease    "core:math/ease"
 import fmt     "core:fmt"
 import la      "core:math/linalg"
+import log     "core:log"
 import mem     "core:mem"
 import os      "core:os"
 import slice   "core:slice"
@@ -93,36 +95,96 @@ Buffer :: struct {
 	path:              string,
 	uri:               Uri,
 	btree:             BTree,
-	primary:           int,
 	selections:        [dynamic]Selection,
+	primary:           int,
 	scroll:            int,
 	scroll_anim:       Animation(f32),
 	visible_lines:     int,
+
+	language:          string,
 	diagnostics:       []Diagnostic,
 	diagnostics_arena: vmem.Arena,
-	lsp:              ^LSP_Server,
 	version:           int,
 }
 
-buffer_init :: proc(editor: ^Editor, buffer: ^Buffer, path: string, allocator: runtime.Allocator, lsp: ^LSP_Server) {
+buffer_init :: proc(editor: ^Editor, buffer: ^Buffer, path: string, allocator: runtime.Allocator, language: string = "") {
 	data := os.read_entire_file(path, context.temp_allocator) or_else { '\n', }
-	buffer_init_with_data(editor, buffer, path, string(data), allocator, lsp)
+	if len(data) == 0 || data[len(data) - 1] != '\n' {
+		data = bytes.concatenate({ data, { '\n', }, }, context.temp_allocator) // stupid
+	}
+	buffer_init_with_data(editor, buffer, path, string(data), allocator, language)
 }
 
-buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path, data: string, allocator: runtime.Allocator, lsp: ^LSP_Server) {
+buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path, data: string, allocator: runtime.Allocator, language: string = "") {
+	log.infof("Opening file '%s'", path)
 	path := os.get_absolute_path(path, context.temp_allocator) or_else panic("")
 	self := os.get_working_directory(context.temp_allocator)   or_else panic("")
 	path  = os.get_relative_path(self, path, allocator)        or_else panic("")
+
+	language := language
+	if language == "" {
+		language = get_language_from_extension(path)
+	}
 
 	buffer^ = {
 		selections = make([dynamic]Selection, 1, allocator),
 		path       = path,
 		uri        = uri_from_path(path, allocator) or_else panic(""),
 		btree      = btree_build(string(data), allocator, editor.config.tab_width),
-		lsp        = lsp,
+		language   = language,
 	}
 	err := vmem.arena_init_growing(&buffer.diagnostics_arena)
 	assert(err == nil, "OOM")
+
+	if lsp := editor_get_lsp_server(editor, language); lsp != nil {
+		lsp_open_file(lsp, path, data)
+	}
+}
+
+@(require_results)
+get_language_from_extension :: proc(path: string) -> string {
+	extension := path
+	if dot := strings.last_index_byte(extension, '.'); dot != -1 {
+		extension = extension[dot + 1:]
+	}
+
+	switch extension {
+	case "cpp", "cxx", "cc":
+		return "cpp"
+	case "rs":
+		return "rust"
+	case "odin":
+		return "odin"
+	}
+
+	log.info("Unkown language file extension:", extension)
+	return "text"
+}
+
+@(require_results)
+editor_get_lsp_server :: proc(editor: ^Editor, language: string) -> ^LSP_Server {
+	if lsp, ok := editor.language_servers[language]; ok {
+		return lsp
+	}
+
+	command: []string
+	switch language {
+	case "odin":
+		command = { "ols", }
+	case:
+		fmt.eprintfln("No language server available for language '%s'", language)
+		return nil
+	}
+	lsp := new(LSP_Server, context.allocator)
+	err := lsp_init(lsp, command)
+	if err != nil {
+		free(lsp, context.allocator)
+		fmt.eprintln("Failed to create lsp:", err)
+		return nil
+	}
+
+	editor.language_servers[language] = lsp
+	return lsp
 }
 
 buffer_destroy :: proc(buffer: ^Buffer) {
@@ -133,47 +195,49 @@ buffer_destroy :: proc(buffer: ^Buffer) {
 	delete(string(buffer.uri))
 }
 
+Leader :: struct {
+	active:      bool,
+	sequence:    strings.Builder,
+	binds:       Keybinds,
+	motion:      Argument_Motion,
+	title:       string,
+	entries:     []Leader_Entry,
+	size:        [2]f32,
+	binds_width: f32,
+	rect:        Animation(Rect),
+	alpha:       Animation(f32),
+	arena:       vmem.Arena,
+}
+
 Editor :: struct {
-	backend:       ^Backend,
+	backend:          ^Backend,
 
-	mode:           Mode,
+	mode:             Mode,
 
-	buffer:         Buffer,
+	buffer:           Buffer,
 
-	new_selections: [dynamic]New_Selection,
+	new_selections:   [dynamic]New_Selection,
 
-	repeat_count:   int,
+	repeat_count:     int,
 
-	leader:         struct {
-		active:      bool,
-		sequence:    strings.Builder,
-		binds:       Keybinds,
-		motion:      Argument_Motion,
-		title:       string,
-		entries:     []Leader_Entry,
-		size:        [2]f32,
-		binds_width: f32,
-		rect:        Animation(Rect),
-		alpha:       Animation(f32),
-		arena:       vmem.Arena,
-	},
+	leader:           Leader,
 
-	popup_rect:     Animation(Rect),
-	popup_text:     strings.Builder,
+	popup_rect:       Animation(Rect),
+	popup_text:       strings.Builder,
 
-	picker:         Picker,
+	picker:           Picker,
 
-	clipboard:      strings.Builder,
+	clipboard:        strings.Builder,
 
-	status:         strings.Builder,
+	status:           strings.Builder,
 
-	prompt:         Prompt,
+	prompt:           Prompt,
 
-	config:         Config,
+	config:           Config,
 
-	font:           Font,
+	font:             Font,
 
-	lsp:            LSP_Server,
+	language_servers: map[string]^LSP_Server,
 }
 
 Prompt :: struct {
@@ -202,6 +266,9 @@ main :: proc() {
 		}
 	}
 
+	context.logger = log.create_console_logger()
+	defer log.destroy_console_logger(context.logger)
+
 	editor: Editor
 	editor.backend = backend_init()
 	if editor.backend == nil {
@@ -215,14 +282,16 @@ main :: proc() {
 	err = vmem.arena_init_growing(&editor.leader.arena)
 	assert(err == nil)
 
-	editor.lsp = lsp_create({ "ols", }) or_else panic("Failed to create lsp")
-	defer lsp_destroy(&editor.lsp)
-
 	defer {
 		editor.backend->destroy()
 		for h in editor.prompt.history {
 			delete(h)
 		}
+		for _, lsp in editor.language_servers {
+			lsp_destroy(lsp)
+			free(lsp)
+		}
+		delete(editor.language_servers)
 		vmem.arena_destroy(&editor.prompt.arena)
 		vmem.arena_destroy(&editor.leader.arena)
 		delete(editor.new_selections)
@@ -247,7 +316,7 @@ main :: proc() {
 	}
 	defer config_destroy(&editor.config)
 
-	buffer_init(&editor, &editor.buffer, "test/test.odin", context.allocator, &editor.lsp)
+	buffer_init(&editor, &editor.buffer, "test/test.odin", context.allocator)
 	defer buffer_destroy(&editor.buffer)
 
 	last_print_time    := time.now()
@@ -329,13 +398,13 @@ main :: proc() {
 						picker_update(&editor)
 					case .Down, .Tab:
 						editor.picker.active += 1
-						if editor.picker.active >= len(editor.picker.matches) {
+						if editor.picker.active >= editor.picker.matching {
 							editor.picker.active = 0
 						}
 					case .Up:
 						editor.picker.active -= 1
 						if editor.picker.active < 0 {
-							editor.picker.active = len(editor.picker.matches) - 1
+							editor.picker.active = editor.picker.matching - 1
 						}
 					}
 					break
@@ -382,7 +451,7 @@ main :: proc() {
 					break
 				}
 				if editor.leader.motion != nil {
-					argument_motion_apply(&editor.buffer, editor.leader.motion, e.codepoint)
+					argument_motion_apply(&editor, &editor.buffer, editor.leader.motion, e.codepoint)
 					editor.leader.motion = nil
 					editor.leader.active = false
 					strings.builder_reset(&editor.leader.sequence)
@@ -395,7 +464,7 @@ main :: proc() {
 					strings.write_rune(&editor.picker.input, e.codepoint)
 					picker_update(&editor)
 				case .Insert:
-					argument_motion_apply(&editor.buffer, .Insert_Character, e.codepoint)
+					argument_motion_apply(&editor, &editor.buffer, .Insert_Character, e.codepoint)
 				}
 			case Event_Input_Mouse_Move:
 			case Event_Input_Mouse_Button:
@@ -435,9 +504,14 @@ main :: proc() {
 
 		clear(&draw_commands)
 
-		lsp_err := lsp_update(&editor, &editor.lsp)
-		if lsp_err != nil {
-			fmt.println(lsp_err)
+		for language, lsp in editor.language_servers {
+			lsp_err := lsp_update(&editor, lsp)
+			if lsp_err != nil {
+				log.error("Fatal LSP Error:", language, lsp_err)
+				delete_key(&editor.language_servers, language)
+				lsp_destroy(lsp)
+				free(lsp)
+			}
 		}
 
 		render(&editor, &draw_commands, f32(delta_time), screen_size)
@@ -559,6 +633,13 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 				@(static)
 				buf: [32]byte
 				str: string
+
+				if editor.buffer.language != "" {
+					str = editor.buffer.language
+					x  -= measure_text(&editor.font, str)
+					draw_text(&editor.font, commands, str, editor.config.theme[.Ui_Text].fg, { x, screen_size.y - padding, })
+					x  -= padding
+				}
 
 				str = strconv.write_int(buf[:], i64(primary_position.column + 1), base = 10)
 				x  -= measure_text(&editor.font, str)
@@ -1411,32 +1492,48 @@ buffer_render :: proc(
 					x            = indentation
 				}
 			case .Code_Block:
+				// language := string(cur.as.code.info)
+
 				text = strings.trim_right(text, "\n")
+
+				highlighter: Highlighter = {
+					text     = text,
+					keywords = editor.config.styles,
+				}
+
 				column: int
-				for r in text {
-					if r == '\n' {
-						width  = max(width, x + cell_size.x * f32(column))
-						y     += line_height
-						column = 0
-						continue
+				render_code: for {
+					start := highlighter.pos
+					style := highlighter_advance(&highlighter)
+					if style == .Invalid {
+						break
 					}
 
-					if r == '\t' {
-						column = next_column_after_tab(column, editor.config.tab_width)
-						continue
+					for r in text[start:highlighter.pos] {
+						if r == '\n' {
+							width  = max(width, x + cell_size.x * f32(column))
+							y     += line_height
+							column = 0
+							continue
+						}
+
+						if r == '\t' {
+							column = next_column_after_tab(column, editor.config.tab_width)
+							continue
+						}
+
+						defer column += 1
+
+						if unicode.is_space(r) {
+							continue
+						}
+
+						append(popup_commands, Draw_Command_Char {
+							position = { x + cell_size.x * f32(column), y, } + text_base,
+							char     = r,
+							color    = editor.config.theme[style].fg,
+						})
 					}
-
-					defer column += 1
-
-					if unicode.is_space(r) {
-						continue
-					}
-
-					append(popup_commands, Draw_Command_Char {
-						position = { x + cell_size.x * f32(column), y, } + text_base,
-						char     = r,
-						color    = editor.config.theme[.Ui_Text].fg,
-					})
 				}
 
 				width = max(width, x + cell_size.x * f32(column))

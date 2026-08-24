@@ -141,6 +141,10 @@ Argument_Motion :: enum {
 	Replace,
 	Find,
 	Find_Backward,
+
+	Surround_Add,
+	Surround_Delete,
+	Surround_Replace,
 }
 
 @(rodata)
@@ -149,6 +153,10 @@ argument_motion_descriptions: [Argument_Motion]string = {
 	.Find             = "find",
 	.Find_Backward    = "find backward",
 	.Replace          = "replace",
+
+	.Surround_Add     = "surround add",
+	.Surround_Delete  = "surround delete",
+	.Surround_Replace = "surround replace",
 }
 
 @(require_results)
@@ -213,13 +221,13 @@ parse_motion :: proc(s: string) -> (motion: Motion, ok: bool) {
 	return motion_from_name_table[canonicalize_motion_name(s, &b)]
 }
 
-argument_motion_apply :: proc(buffer: ^Buffer, motion: Argument_Motion, arg: rune) {
+argument_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, motion: Argument_Motion, arg: rune) {
 	for &selection in buffer.selections {
-		argument_motion_apply_single(buffer, &selection, motion, arg)
+		argument_motion_apply_single(editor, buffer, &selection, motion, arg)
 	}
 }
 
-argument_motion_apply_single :: proc(buffer: ^Buffer, selection: ^Selection, motion: Argument_Motion, arg: rune) {
+argument_motion_apply_single :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, motion: Argument_Motion, arg: rune) {
 	vertical_move: bool
 	defer if !vertical_move {
 		selection.target_cursor = selection.cursor
@@ -250,7 +258,33 @@ argument_motion_apply_single :: proc(buffer: ^Buffer, selection: ^Selection, mot
 		}
 	case .Replace:
 	case .Insert_Character:
-		buffer_insert(buffer, selection.cursor, arg)
+		buffer_insert(editor, buffer, selection.cursor, arg)
+	case .Surround_Add:
+		end := arg
+		switch arg {
+		case '(':
+			end = ')'
+		case '[':
+			end = ']'
+		case '{':
+			end = '}'
+		case '<':
+			end = '>'
+		}
+		buffer_insert(editor, buffer, min(selection.cursor, selection.anchor),     arg)
+		buffer_insert(editor, buffer, max(selection.cursor, selection.anchor) + 1, end)
+
+		if selection.cursor < selection.anchor {
+			selection.cursor -= 1
+			selection.anchor += 1
+		} else {
+			selection.cursor += 1
+			selection.anchor -= 1
+		}
+	case .Surround_Delete:
+		unimplemented()
+	case .Surround_Replace:
+		unimplemented()
 	}
 }
 
@@ -292,16 +326,20 @@ _buffer_insert :: proc(buffer: ^Buffer, arg: $T, offset: Offset) -> Offset {
 	return n
 }
 
-buffer_insert_rune   :: proc(buffer: ^Buffer, offset: Offset, r: rune)   -> Offset {
+buffer_insert_rune   :: proc(editor: ^Editor, buffer: ^Buffer, offset: Offset, r: rune)   -> Offset {
 	buf, n := utf8.encode_rune(r)
 	buffer.version += 1
-	lsp_apply_change(buffer.lsp, buffer, offset, offset, string(buf[:n]), buffer.version)
+	if lsp := editor_get_lsp_server(editor, buffer.language); lsp != nil {
+		lsp_apply_change(lsp, buffer, offset, offset, string(buf[:n]), buffer.version)
+	}
 	return _buffer_insert(buffer, r, offset)
 }
 
-buffer_insert_string :: proc(buffer: ^Buffer, offset: Offset, s: string) -> Offset {
+buffer_insert_string :: proc(editor: ^Editor, buffer: ^Buffer, offset: Offset, s: string) -> Offset {
 	buffer.version += 1
-	lsp_apply_change(buffer.lsp, buffer, offset, offset, s, buffer.version)
+	if lsp := editor_get_lsp_server(editor, buffer.language); lsp != nil {
+		lsp_apply_change(lsp, buffer, offset, offset, s, buffer.version)
+	}
 	return _buffer_insert(buffer, s, offset)
 }
 
@@ -931,22 +969,22 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 
 	case .Paste:
 		end := btree_offset_after(&buffer.btree, max(selection.anchor, selection.cursor))
-		n   := buffer_insert(buffer, end, strings.to_string(editor.clipboard))
+		n   := buffer_insert(editor, buffer, end, strings.to_string(editor.clipboard))
 		selection.anchor += n
 		selection.cursor += n
 	case .Paste_System:
 		end := btree_offset_after(&buffer.btree, max(selection.anchor, selection.cursor))
 		s   := editor.backend->get_clipboard(context.temp_allocator)
-		n   := buffer_insert(buffer, end, s)
+		n   := buffer_insert(editor, buffer, end, s)
 		selection.anchor += n
 		selection.cursor += n
 	case .Paste_Before:
 		saved := selection^
-		buffer_insert(buffer, min(selection.anchor, selection.cursor), strings.to_string(editor.clipboard))
+		buffer_insert(editor, buffer, min(selection.anchor, selection.cursor), strings.to_string(editor.clipboard))
 		selection^ = saved
 	case .Paste_System_Before:
 		saved := selection^
-		buffer_insert(buffer, min(selection.anchor, selection.cursor), editor.backend->get_clipboard(context.temp_allocator))
+		buffer_insert(editor, buffer, min(selection.anchor, selection.cursor), editor.backend->get_clipboard(context.temp_allocator))
 		selection^ = saved
 	case .Yank, .Yank_System:
 		primary or_break
@@ -986,9 +1024,9 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 	case .Normal:
 		editor.mode = .Normal
 	case .Insert_Newline:
-		buffer_insert(buffer, selection.cursor, '\n')
+		buffer_insert(editor, buffer, selection.cursor, '\n')
 	case .Insert_Tab:
-		buffer_insert(buffer, selection.cursor, '\t')
+		buffer_insert(editor, buffer, selection.cursor, '\t')
 
 	case .Open_Below:
 		iter := btree_iterator(&buffer.btree, offset = selection.cursor)
@@ -998,7 +1036,7 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 			}
 		}
 
-		buffer_insert(buffer, iter.offset, '\n')
+		buffer_insert(editor, buffer, iter.offset, '\n')
 		selection.cursor = iter.offset + 1
 		selection.anchor = selection.cursor
 
@@ -1012,7 +1050,7 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 			}
 		}
 
-		buffer_insert(buffer, iter.offset, '\n')
+		buffer_insert(editor, buffer, iter.offset, '\n')
 
 		if iter.offset == 0 {
 			selection.cursor = 0
@@ -1034,7 +1072,7 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 
 		for r in btree_iter(&iter, back = true) {
 			if r == '\n' {
-				indent(buffer, iter.offset + 1, editor.repeat_count)
+				indent(editor, buffer, iter.offset + 1, editor.repeat_count)
 				break
 			}
 		}
@@ -1045,18 +1083,18 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 				break
 			}
 			if r == '\n' {
-				indent(buffer, iter.offset + 1, editor.repeat_count)
+				indent(editor, buffer, iter.offset + 1, editor.repeat_count)
 			}
 		}
 
-		indent :: proc(buffer: ^Buffer, offset: Offset, n: int) {
+		indent :: proc(editor: ^Editor, buffer: ^Buffer, offset: Offset, n: int) {
 			N :: BTREE_LEAF_SIZE
 			@(static, rodata)
 			tab_buf: [N]u8 = '\t'
 
 			n := n
 			for n > 0 {
-				buffer_insert(buffer, offset, string(tab_buf[:min(n, N)]))
+				buffer_insert(editor, buffer, offset, string(tab_buf[:min(n, N)]))
 				n -= N
 			}
 		}
@@ -1086,14 +1124,15 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 
 		column := btree_offset_to_position(&buffer.btree, selection.cursor).column
 		for _ in column ..< max_column {
-			buffer_insert(buffer, selection.cursor, ' ')
+			buffer_insert(editor, buffer, selection.cursor, ' ')
 		}
 
 	case .Show_Hover_Information:
-		lsp_get_hover_information(editor, &editor.lsp, buffer)
+		primary or_break
+		lsp_get_hover_information(editor, buffer)
 	case .Go_To_Definition:
 		primary or_break
-		lsp_go_to_definition(editor, &editor.lsp, buffer)
+		lsp_go_to_definition(editor, buffer)
 	case .Show_Code_Actions:
 		unimplemented()
 	case .Collapse_Selection:

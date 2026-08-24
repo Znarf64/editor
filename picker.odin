@@ -1,19 +1,28 @@
 package editor
 
+import fmt     "core:fmt"
 import os      "core:os"
-import strings "core:strings"
 import slice   "core:slice"
+import strings "core:strings"
 import unicode "core:unicode"
 import utf8    "core:unicode/utf8"
+import vmem    "core:mem/virtual"
+
+Picker_Symbol :: struct {
+	location: Location,
+}
 
 Picker :: struct {
-	mode:    Picker_Mode,
-	input:   strings.Builder,
-	rect:    Animation(Rect),
-	rect2:   Animation(Rect),
-	files:   []os.File_Info,
-	matches: [dynamic]Picker_Match,
-	active:  int,
+	mode:     Picker_Mode,
+	input:    strings.Builder,
+	rect:     Animation(Rect),
+	rect2:    Animation(Rect),
+	files:    []os.File_Info,
+	symbols:  []Picker_Symbol,
+	items:    [dynamic]Picker_Item,
+	active:   int,
+	matching: int,
+	arena:    vmem.Arena,
 }
 
 Picker_Mode :: enum {
@@ -24,20 +33,22 @@ Picker_Mode :: enum {
 	Commands,
 }
 
-Picker_Match :: struct {
+Picker_Item :: struct {
 	name:  string,
 	score: int,
 	id:    int,
 }
 
 picker_destroy :: proc(picker: ^Picker) {
-	os.file_info_slice_delete(picker.files, context.allocator)
 	strings.builder_destroy(&picker.input)
-	delete(picker.matches)
+	delete(picker.items)
+	vmem.arena_destroy(&picker.arena)
 }
 
-picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "") {
+picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused_locations: []Fused_Location = {}) {
 	strings.builder_reset(&editor.picker.input)
+	vmem.arena_free_all(&editor.picker.arena)
+	allocator := vmem.arena_allocator(&editor.picker.arena)
 
 	switch mode {
 	case .Global_Search:
@@ -51,8 +62,7 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "") {
 				break
 			}
 		}
-		os.file_info_slice_delete(editor.picker.files, context.allocator)
-		editor.picker.files, err = os.read_all_directory_by_path(path, context.allocator)
+		editor.picker.files, err = os.read_all_directory_by_path(path, allocator)
 		if err != nil {
 			editor_set_status(editor, "Failed to read directory: %v", err)
 		}
@@ -66,7 +76,6 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "") {
 				break
 			}
 		}
-		os.file_info_slice_delete(editor.picker.files, context.allocator)
 
 		path, err = os.get_absolute_path(path, context.temp_allocator)
 		if err != nil {
@@ -77,7 +86,8 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "") {
 		w := os.walker_create(path)
 		defer os.walker_destroy(&w)
 
-		files := make([dynamic]os.File_Info, context.allocator)
+		files := make([dynamic]os.File_Info, allocator)
+		clear(&editor.picker.items)
 		for info in os.walker_walk(&w) {
 			_ = os.walker_error(&w) or_break
 
@@ -90,15 +100,44 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "") {
 				continue
 			}
 
-			info     := os.file_info_clone(info, context.allocator) or_break
+			info     := os.file_info_clone(info, allocator) or_break
 			info.name = strings.trim_prefix(info.fullpath, path)
 			info.name = strings.trim_prefix(info.name, "/")
+
+			append(&editor.picker.items, Picker_Item {
+				name = info.name,
+				id   = len(files),
+			})
+
 			append(&files, info)
 		}
 		editor.picker.files = files[:]
 	case .Symbols:
+		assert(len(fused_locations) != 0)
+
+		symbols := make([]Picker_Symbol, len(fused_locations), allocator)
+		resize(&editor.picker.items, len(fused_locations))
+		for &l, i in symbols {
+			l.location = fused_locations[i]
+			if l.location == {} {
+				l.location = { uri = fused_locations[i].targetUri, range = fused_locations[i].targetRange, }
+			}
+
+			l.location.uri = uri_clone(l.location.uri, allocator)
+
+			path := strings.trim_prefix(string(l.location.uri), "file://")
+			name := fmt.aprintf("%s:%d", path, l.location.range.start.line + 1, allocator = allocator)
+
+			editor.picker.items[i] = {
+				name = name,
+				id   = i,
+			}
+		}
+
+		editor.picker.symbols = symbols
 	case .Commands:
 	}
+
 	editor.mode        = .Picker
 	editor.picker.mode = mode
 
@@ -110,59 +149,69 @@ picker_update :: proc(editor: ^Editor) {
 
 	editor.picker.active = 0
 
-	switch editor.picker.mode {
-	case .Global_Search:
-	case .Files, .Files_Recursive:
-		clear(&editor.picker.matches)
-		for file, i in editor.picker.files {
-			score := item_match_score(file.name, pattern)
-			if score <= 0 {
-				continue
-			}
-			append(&editor.picker.matches, Picker_Match {
-				name  = file.name,
-				score = score,
-				id    = i,
-			})
+	editor.picker.matching = 0
+	for &item in editor.picker.items {
+		item.score = item_match_score(item.name, pattern)
+		if item.score >= 0 {
+			editor.picker.matching += 1
 		}
-		slice.sort_by(editor.picker.matches[:], proc(a, b: Picker_Match) -> bool {
-			if a.score != b.score {
-				return a.score < b.score
-			}
-
-			return a.name < b.name
-		})
-	case .Symbols:
-	case .Commands:
 	}
+
+	slice.sort_by(editor.picker.items[:], proc(a, b: Picker_Item) -> bool {
+		a_score := a.score >= 0 ? a.score : max(int)
+		b_score := b.score >= 0 ? b.score : max(int)
+		if a_score != b_score {
+			return a_score < b_score
+		}
+
+		return a.name < b.name
+	})
 }
 
 picker_submit :: proc(editor: ^Editor) {
 	picker := &editor.picker
 
-	if len(picker.matches) == 0 {
+	if len(picker.items) == 0 {
 		editor.mode = .Normal
 		return
 	}
+
+	active := picker.items[picker.active]
 
 	switch picker.mode {
 	case .Global_Search:
 		editor.mode = .Normal
 	case .Files, .Files_Recursive:
-		file := picker.files[picker.matches[picker.active].id]
+		file := picker.files[active.id]
 		if file.type == .Directory {
 			picker_open(editor, .Files, strings.clone(file.fullpath, context.temp_allocator))
 		} else {
 			buffer_destroy(&editor.buffer)
-			data := os.read_entire_file(file.fullpath, context.temp_allocator) or_else { '\n', }
-			buffer_init_with_data(editor, &editor.buffer, file.fullpath, string(data), context.allocator, &editor.lsp)
+			buffer_init(editor, &editor.buffer, file.fullpath, context.allocator)
 			editor.mode = .Normal
-
-			if editor.lsp.initialized {
-				lsp_open_file(&editor.lsp, file.fullpath, string(data))
-			}
 		}
 	case .Symbols:
+		symbol := picker.symbols[active.id]
+
+		if symbol.location.uri != editor.buffer.uri {
+			path := strings.trim_prefix(string(symbol.location.uri), "file://")
+			buffer_destroy(&editor.buffer)
+			buffer_init(editor, &editor.buffer, path, context.allocator)
+		}
+
+		if symbol.location.range.end.character > 0 {
+			symbol.location.range.end.character -= 1
+		}
+
+		start := lsp_position_to_offset(&editor.buffer.btree, symbol.location.range.start)
+		end   := lsp_position_to_offset(&editor.buffer.btree, symbol.location.range.end)
+
+		editor.buffer.primary = 0
+		resize(&editor.buffer.selections, 1)
+		editor.buffer.selections[0].anchor        = start
+		editor.buffer.selections[0].cursor        = end
+		editor.buffer.selections[0].target_cursor = end
+
 		editor.mode = .Normal
 	case .Commands:
 		editor.mode = .Normal
@@ -267,17 +316,19 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 			}
 		}
 
-		for match, match_index in picker.matches {
+		for item, item_index in picker.items[:picker.matching] {
+			assert(item.score >= 0)
+
 			pos := [2]f32{ x, y, }
 
-			item := match.name
+			item := item.name
 
-			text_color := editor.config.theme[match_index == picker.active ? .Ui_Focus : .Ui_Text].fg
+			text_color := editor.config.theme[item_index == picker.active ? .Ui_Focus : .Ui_Text].fg
 
 			defer y += line_height
 
 			if !has_upper {
-				lower  := strings.to_lower(match.name, context.temp_allocator)
+				lower  := strings.to_lower(item, context.temp_allocator)
 				offset := strings.index(lower, pattern)
 				if offset != -1 {
 					n     := len(pattern)

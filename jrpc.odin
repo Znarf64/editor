@@ -2,14 +2,15 @@ package editor
 
 import intrinsics "base:intrinsics"
 
-import bufio      "core:bufio"
-import bytes      "core:bytes"
-import fmt        "core:fmt"
-import io         "core:io"
-import json       "core:encoding/json"
-import os         "core:os"
-import strconv    "core:strconv"
-import strings    "core:strings"
+import bufio   "core:bufio"
+import bytes   "core:bytes"
+import fmt     "core:fmt"
+import io      "core:io"
+import json    "core:encoding/json"
+import log     "core:log"
+import os      "core:os"
+import strconv "core:strconv"
+import strings "core:strings"
 
 Base_Message :: struct {
 	method: string,
@@ -22,11 +23,15 @@ jrpc_decode_message :: proc(data: []byte) -> (
 	method:  string,
 	id:      int,
 	content: []byte,
+	n:       int,
 	ok:      bool,
 ) {
 	rnrn: [4]u8 = "\r\n\r\n"
 	header_len := bytes.index(data, rnrn[:])
 	if header_len == -1 {
+		// this is not neccessarily an error, we might just need more data
+		n  = 0
+		ok = true
 		return
 	}
 
@@ -34,13 +39,22 @@ jrpc_decode_message :: proc(data: []byte) -> (
 	content_len: int
 
 	for line in strings.split_lines_iterator(&header) {
-		l := len("Content-Length: ")
-		if len(line) > l && line[:l] == "Content-Length: " {
+		c := "Content-Length: "
+		l := len(c)
+		if len(line) > l && line[:l] == c {
 			content_len = strconv.parse_int(line[l:]) or_return
 		}
 	}
 
 	content = data[header_len + len(rnrn):]
+
+	if len(content) < content_len {
+		n  = 0
+		ok = true
+		return
+	}
+
+	n = header_len + len(rnrn) + content_len
 
 	msg: Base_Message
 	if err := json.unmarshal(content, &msg, allocator = context.temp_allocator); err != nil {
@@ -48,13 +62,15 @@ jrpc_decode_message :: proc(data: []byte) -> (
 	}
 
 	if error, has_error := msg.error.?; has_error {
-		fmt.eprintln(error.code, error.message)
+		log.error("LSP:", error.code, error.message)
+		ok = false
 		return
 	}
 
-	method = msg.method
-	id     = msg.id
-	ok     = len(content) == content_len
+	method  = msg.method
+	id      = msg.id
+	content = content[:content_len]
+	ok      = true
 	return
 }
 
