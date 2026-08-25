@@ -184,8 +184,9 @@ parse_argument_motion :: proc(s: string) -> (motion: Argument_Motion, ok: bool) 
 motion_from_name_table: map[string]Motion
 motion_to_name_table:   map[Motion]string
 
+@(require_results)
 canonicalize_motion_name :: proc(s: string, b: ^strings.Builder) -> string {
-	start := strings.builder_len(b^)
+	strings.builder_reset(b)
 
 	for r in s {
 		r := unicode.to_lower(r)
@@ -195,19 +196,26 @@ canonicalize_motion_name :: proc(s: string, b: ^strings.Builder) -> string {
 		strings.write_rune(b, r)
 	}
 
-	return strings.to_string(b^)[start:]
+	return strings.to_string(b^)
 }
 
 @(init)
 initialize_motion_names :: proc "contextless" () {
 	context = runtime.default_context()
 
-	motion_from_name_table = make(map[string]Motion, len(Motion))
-	motion_to_name_table   = make(map[Motion]string, len(Motion))
-	b                     := strings.builder_make()
+	arena: vmem.Arena
+	err := vmem.arena_init_growing(&arena)
+	assert(err == nil)
+
+	allocator := vmem.arena_allocator(&arena)
+
+	motion_from_name_table = make(map[string]Motion, len(Motion), allocator)
+	motion_to_name_table   = make(map[Motion]string, len(Motion), allocator)
+	b                     := strings.builder_make(allocator)
 
 	for field in reflect.enum_fields_zipped(Motion) {
 		name                                     := canonicalize_motion_name(field.name, &b)
+		name                                      = strings.clone(name, allocator)
 		motion_from_name_table[name]              = Motion(field.value)
 		motion_to_name_table[Motion(field.value)] = name
 	}
@@ -217,8 +225,9 @@ initialize_motion_names :: proc "contextless" () {
 
 @(require_results)
 parse_motion :: proc(s: string) -> (motion: Motion, ok: bool) {
-	b := strings.builder_make(0, len(s), context.temp_allocator)
-	return motion_from_name_table[canonicalize_motion_name(s, &b)]
+	b    := strings.builder_make(0, len(s), context.temp_allocator)
+	name := canonicalize_motion_name(s, &b)
+	return motion_from_name_table[name]
 }
 
 argument_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, motion: Argument_Motion, arg: rune) {

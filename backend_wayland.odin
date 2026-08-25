@@ -7,11 +7,11 @@ import fmt     "core:fmt"
 import strings "core:strings"
 import linux   "core:sys/linux"
 
-import wl  "vendor/odin-wayland"
-import xdg "vendor/odin-wayland/xdg"
+import wl      "vendor/odin-wayland"
+import xdg     "vendor/odin-wayland/xdg"
 
-import egl "vendor/egl"
-import xkb "vendor/odin-xkbcommon"
+import egl     "vendor/egl"
+import xkb     "vendor/odin-xkbcommon"
 
 Backend_Wayland :: struct {
 	using base:          Backend,

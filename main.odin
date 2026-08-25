@@ -77,10 +77,6 @@ Prompt_Mode :: enum {
 	Select,
 }
 
-Leader_Entry :: struct {
-	bind, action: string,
-}
-
 New_Selection :: struct {
 	using selection: Selection,
 	primary:         bool,
@@ -193,6 +189,10 @@ buffer_destroy :: proc(buffer: ^Buffer) {
 	delete(buffer.selections)
 	delete(buffer.path)
 	delete(string(buffer.uri))
+}
+
+Leader_Entry :: struct {
+	bind, action: string,
 }
 
 Leader :: struct {
@@ -1457,6 +1457,7 @@ buffer_render :: proc(
 		indentation: f32
 
 		root := cm.parse_document(raw_data(editor.popup_text.buf), uint(strings.builder_len(editor.popup_text)), cm.DEFAULT_OPTIONS)
+		defer cm.node_free(root)
 		iter := cm.iter_new(root)
 		defer cm.iter_free(iter)
 		for {

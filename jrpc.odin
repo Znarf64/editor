@@ -2,15 +2,15 @@ package editor
 
 import intrinsics "base:intrinsics"
 
-import bufio   "core:bufio"
-import bytes   "core:bytes"
-import fmt     "core:fmt"
-import io      "core:io"
-import json    "core:encoding/json"
-import log     "core:log"
-import os      "core:os"
-import strconv "core:strconv"
-import strings "core:strings"
+import bufio      "core:bufio"
+import bytes      "core:bytes"
+import fmt        "core:fmt"
+import io         "core:io"
+import json       "core:encoding/json"
+import log        "core:log"
+import os         "core:os"
+import strconv    "core:strconv"
+import strings    "core:strings"
 
 Base_Message :: struct {
 	method: string,

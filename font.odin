@@ -2,9 +2,9 @@ package editor
 
 import runtime "base:runtime"
 
-import la "core:math/linalg"
+import la      "core:math/linalg"
 
-import ttf "vendor/ttf_odin"
+import ttf     "vendor/ttf_odin"
 
 Glyph_Info :: struct {
 	size, offset: [2]int,

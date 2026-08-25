@@ -4,7 +4,7 @@ import runtime "base:runtime"
 
 import strings "core:strings"
 
-import glfw "vendor:glfw"
+import glfw    "vendor:glfw"
 
 Backend_Glfw :: struct {
 	using base:        Backend,

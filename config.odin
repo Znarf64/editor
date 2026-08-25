@@ -103,9 +103,9 @@ load_config_file :: proc(config: ^Config, src: string, allocator: runtime.Alloca
 
 	for key, value in ini.iterate(&it) {
 		@(require_results)
-		unquote :: proc(val: string) -> (string, bool) {
+		unquote :: proc(val: string, allocator: runtime.Allocator) -> (string, bool) {
 			if len(val) > 0 && (val[0] == '"' || val[0] == '\'') {
-				v, _, ok := strconv.unquote_string(val, context.temp_allocator)
+				v, _, ok := strconv.unquote_string(val, allocator)
 				if !ok {
 					return val, false
 				}
@@ -114,8 +114,8 @@ load_config_file :: proc(config: ^Config, src: string, allocator: runtime.Alloca
 			return val, true
 		}
 
-		value := unquote(value) or_continue
-		key   := unquote(key)   or_continue
+		value := unquote(value, allocator) or_continue
+		key   := unquote(key,   allocator) or_continue
 
 		section, _, subsection := strings.partition(it.section, ".")
 
@@ -275,9 +275,7 @@ load_config :: proc(config: ^Config) -> (ok: bool) {
 
 	config.tab_width = 4
 
-	load_config_file(config, #load("config.ini"), allocator)
-
-	return true
+	return load_config_file(config, #load("config.ini"), allocator)
 }
 
 config_destroy :: proc(config: ^Config) {
