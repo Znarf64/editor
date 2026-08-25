@@ -725,16 +725,20 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 	}
 
 	if editor.mode == .Prompt {
+		is_regex: bool
 		mode_string: string
 		switch editor.prompt.mode {
 		case .Command:
 			mode_string = ":"
 		case .Search:
 			mode_string = "search: "
+			is_regex    = true
 		case .Keep:
 			mode_string = "keep: "
+			is_regex    = true
 		case .Select:
 			mode_string = "select: "
+			is_regex    = true
 		}
 
 		x := x + draw_text(
@@ -760,14 +764,34 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 			{ x, screen_size.y - padding, },
 		)
 
-		if strings.builder_len(editor.prompt.input) == 0 {
-			w = 0
+		{
+			w := strings.builder_len(editor.prompt.input) == 0 ? 0 : w
+			draw_rect(commands,
+				offset = { x + w, screen_size.y - FONT_HEIGHT - padding + f32(editor.font.descender) * editor.font.scale, },
+				size   = { 2, cell_size.y, },
+				color  = editor.config.theme[.Ui_Text].fg,
+			)
 		}
-		draw_rect(commands,
-			offset = { x + w, screen_size.y - FONT_HEIGHT - padding + f32(editor.font.descender) * editor.font.scale, },
-			size   = { 2, cell_size.y, },
-			color  = editor.config.theme[.Ui_Text].fg,
-		)
+
+		if is_regex {
+			case_insensitive := true
+			for r in text {
+				if unicode.is_upper(r) {
+					case_insensitive = false
+					break
+				}
+			}
+
+			if case_insensitive {
+				draw_text(
+					&editor.font,
+					commands,
+					" (case insensitive)",
+					editor.config.theme[.Ui_Text].fg,
+					{ x + w, screen_size.y - padding, },
+				)
+			}
+		}
 	} else {
 		draw_text(
 			&editor.font,
@@ -894,12 +918,7 @@ editor_set_popup_text :: proc(editor: ^Editor, format: string, args: ..any) {
 }
 
 regex_search :: proc(editor: ^Editor, buffer: ^Buffer, pattern_string: string) -> (ok: bool) {
-	pattern, err := regex.create(pattern_string, flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
-	if err != nil {
-		editor_set_status(editor, "Failed to parse regex: %v", err)
-		return
-	}
-
+	pattern := regex_create(editor, pattern_string) or_return
 	defer if !ok {
 		editor_set_status(editor, "Not found")
 	}
@@ -946,12 +965,7 @@ regex_search :: proc(editor: ^Editor, buffer: ^Buffer, pattern_string: string) -
 }
 
 regex_search_reverse :: proc(editor: ^Editor, buffer: ^Buffer, pattern_string: string) -> (ok: bool) {
-	pattern, err := regex.create(pattern_string, flags = { .Unicode, .Reverse_Pattern, }, permanent_allocator = context.temp_allocator)
-	if err != nil {
-		editor_set_status(editor, "Failed to parse regex: %v", err)
-		return
-	}
-
+	pattern := regex_create(editor, pattern_string, { .Reverse_Pattern, }) or_return
 	defer if !ok {
 		editor_set_status(editor, "Not found")
 	}
@@ -993,6 +1007,28 @@ regex_search_reverse :: proc(editor: ^Editor, buffer: ^Buffer, pattern_string: s
 	return true
 }
 
+@(require_results)
+regex_create :: proc(editor: ^Editor, pattern_string: string, extra_flags: regex.Flags = {}) -> (pattern: regex.Regular_Expression, ok: bool) {
+	flags := regex.Flags { .Unicode, .Case_Insensitive, } | extra_flags
+
+	for r in pattern_string {
+		if unicode.is_upper(r) {
+			flags -= { .Case_Insensitive, }
+			break
+		}
+	}
+
+	err: regex.Error
+	pattern, err = regex.create(pattern_string, flags, permanent_allocator = context.temp_allocator)
+	if err != nil {
+		editor_set_status(editor, "Failed to parse regex: %v", err)
+		return
+	}
+
+	ok = true
+	return
+}
+
 prompt_apply :: proc(editor: ^Editor) {
 	history := &editor.prompt.history[editor.prompt.mode]
 	if strings.builder_len(editor.prompt.input) == 0 {
@@ -1002,13 +1038,10 @@ prompt_apply :: proc(editor: ^Editor) {
 	} else {
 		append(history, strings.clone(strings.to_string(editor.prompt.input), vmem.arena_allocator(&editor.prompt.arena)))
 	}
+
 	switch editor.prompt.mode {
 	case .Select:
-		pattern, err := regex.create(strings.to_string(editor.prompt.input), flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
-		if err != nil {
-			fmt.println(err)
-			break
-		}
+		pattern := regex_create(editor, strings.to_string(editor.prompt.input)) or_break
 
 		b := strings.builder_make(context.temp_allocator)
 		for selection, i in editor.buffer.selections {
@@ -1046,11 +1079,7 @@ prompt_apply :: proc(editor: ^Editor) {
 			deduplicate_selections(&editor.buffer)
 		}
 	case .Keep:
-		pattern, err := regex.create(strings.to_string(editor.prompt.input), flags = { .Unicode, }, permanent_allocator = context.temp_allocator)
-		if err != nil {
-			fmt.println(err)
-			break
-		}
+		pattern := regex_create(editor, strings.to_string(editor.prompt.input)) or_break
 
 		b := strings.builder_make(context.temp_allocator)
 
