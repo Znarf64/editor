@@ -231,6 +231,14 @@ uri_from_path :: proc(path: string, allocator: runtime.Allocator) -> (uri: Uri, 
 	if err != nil {
 		return
 	}
+	when ODIN_OS == .Windows {
+		if colon := strings.index(abs, ":"); colon != -1 {
+			abs = abs[colon + 1:]
+		}
+	}
+	when os.Path_Separator != '/' {
+		abs = os.replace_path_separators(abs, '/', context.temp_allocator)
+	}
 	return Uri(fmt.aprintf("file://%v", abs, allocator = allocator)), true
 }
 

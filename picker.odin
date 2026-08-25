@@ -63,6 +63,11 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 			}
 		}
 		editor.picker.files, err = os.read_all_directory_by_path(path, allocator)
+		when os.Path_Separator != '/' {
+			for &file in editor.picker.files {
+				file.fullpath = os.replace_path_separators(file.fullpath, '/', allocator) or_else panic("Failed to replace path separators")
+			}
+		}
 		if err != nil {
 			editor_set_status(editor, "Failed to read directory: %v", err)
 		}
@@ -102,7 +107,7 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 
 			info     := os.file_info_clone(info, allocator) or_break
 			info.name = strings.trim_prefix(info.fullpath, path)
-			info.name = strings.trim_prefix(info.name, "/")
+			info.name = strings.trim_prefix(info.name, os.Path_Separator_String)
 
 			append(&editor.picker.items, Picker_Item {
 				name = info.name,
