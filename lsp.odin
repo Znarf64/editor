@@ -36,6 +36,7 @@ LSP_Server :: struct {
 	responses:      map[int]LSP_Response_Proc,
 	capabilities:   bit_set[LSP_Capability],
 	initialized:    bool,
+	pending_files:  map[string]struct{}, // files opened before the server is initialized
 }
 
 LSP_Response_Proc :: proc(editor: ^Editor, lsp_server: ^LSP_Server, content: []byte) -> LSP_Error
@@ -88,9 +89,17 @@ lsp_init :: proc(lsp: ^LSP_Server, command: []string) -> (err: LSP_Error) {
 
 		send_notification(lsp_server, "initialized", struct{}{}) or_return
 
-		log.info("LSP server initialized")
-
 		lsp_server.initialized = true
+
+		for path in lsp_server.pending_files {
+			data := os.read_entire_file(path, context.temp_allocator) or_continue
+			lsp_open_file(lsp_server, path, string(data))
+			delete(path)
+		}
+		delete(lsp_server.pending_files)
+		lsp_server.pending_files = {}
+
+		log.info("LSP server initialized")
 
 		return nil
 	}) or_return
@@ -246,6 +255,9 @@ Text_Document_Position_Params :: struct {
 
 lsp_open_file :: proc(lsp: ^LSP_Server, path, content: string) {
 	if !lsp.initialized {
+		if path not_in lsp.pending_files {
+			lsp.pending_files[strings.clone(path)] = {}
+		}
 		return
 	}
 

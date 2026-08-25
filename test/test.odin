@@ -19,4 +19,6 @@ main :: proc() {
 	when (false || true) && false {
 		testing = another
 	}
+
+	ERROR
 }
