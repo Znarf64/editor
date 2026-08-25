@@ -2,6 +2,8 @@ package editor
 
 import runtime "base:runtime"
 
+INITIAL_WINDOW_SIZE :: [2]int { 900, 600, }
+
 Event :: union {
 	Event_Window_Close,
 	Event_Window_Resize,

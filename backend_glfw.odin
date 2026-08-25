@@ -31,12 +31,15 @@ _backend_init_glfw :: proc(backend: ^Backend_Glfw) -> (ok: bool) {
 		glfw.Terminate()
 	}
 
-	backend.window = glfw.CreateWindow(900, 600, "", nil, nil)
+	backend.window = glfw.CreateWindow(i32(INITIAL_WINDOW_SIZE.x), i32(INITIAL_WINDOW_SIZE.y), "", nil, nil)
 	(backend.window != nil) or_return
 
 	glfw.MakeContextCurrent(backend.window)
 
 	opengl_renderer_init(&backend.opengl_renderer, glfw.gl_set_proc_address) or_return
+	opengl_renderer_resize(&backend.opengl_renderer, INITIAL_WINDOW_SIZE)
+
+	append(&backend._events, Event_Window_Resize { INITIAL_WINDOW_SIZE, })
 
 	backend.poll_events = proc(backend: ^Backend_Glfw) -> []Event {
 		glfw.PollEvents()
@@ -56,6 +59,7 @@ _backend_init_glfw :: proc(backend: ^Backend_Glfw) -> (ok: bool) {
 
 		glfw.DestroyWindow(backend.window)
 		glfw.Terminate()
+		delete(backend._events)
 		free(backend)
 	}
 	backend.set_clipboard = proc(backend: ^Backend_Glfw, data: string) {
@@ -72,7 +76,7 @@ _backend_init_glfw :: proc(backend: ^Backend_Glfw) -> (ok: bool) {
 		context = runtime.default_context()
 
 		backend := cast(^Backend_Glfw)glfw.GetWindowUserPointer(window)
-		size    := [2]int { int(width), int(height), }
+		size    := [2]int{ max(1, int(width)), max(1, int(height)), }
 		append(&backend._events, Event_Window_Resize { size = size, })
 		opengl_renderer_resize(&backend.opengl_renderer, size)
 	})
