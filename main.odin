@@ -2,7 +2,6 @@ package editor
 
 import runtime "base:runtime"
 
-import bytes   "core:bytes"
 import ease    "core:math/ease"
 import fmt     "core:fmt"
 import la      "core:math/linalg"
@@ -105,10 +104,18 @@ Buffer :: struct {
 
 buffer_init :: proc(editor: ^Editor, buffer: ^Buffer, path: string, allocator: runtime.Allocator, language: string = "") {
 	data := os.read_entire_file(path, context.temp_allocator) or_else { '\n', }
-	if len(data) == 0 || data[len(data) - 1] != '\n' {
-		data = bytes.concatenate({ data, { '\n', }, }, context.temp_allocator) // stupid
+	b    := strings.builder_make(0, len(data), context.temp_allocator)
+	// iterating byte-wise is fine here
+	for x in data {
+		if x == '\r' {
+			continue // nope
+		}
+		strings.write_byte(&b, x)
 	}
-	buffer_init_with_data(editor, buffer, path, string(data), allocator, language)
+	if len(data) == 0 || data[len(data) - 1] != '\n' {
+		strings.write_byte(&b, '\n')
+	}
+	buffer_init_with_data(editor, buffer, path, strings.to_string(b), allocator, language)
 }
 
 buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path, data: string, allocator: runtime.Allocator, language: string = "") {
