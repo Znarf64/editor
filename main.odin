@@ -38,7 +38,9 @@ Draw_Command_Char :: struct {
 Draw_Command_Clip :: distinct Rect
 
 Draw_Command_Blur :: struct {
-	radius: f32, // 0 = disable blur
+	rect:          Rect,
+	radius:        f32,
+	border_radius: f32,
 }
 
 DRAW_COMMAND_CLIP_DISABLE :: Draw_Command_Clip { min = min(f32), max = max(f32), }
@@ -118,11 +120,30 @@ buffer_init :: proc(editor: ^Editor, buffer: ^Buffer, path: string, allocator: r
 	buffer_init_with_data(editor, buffer, path, strings.to_string(b), allocator, language)
 }
 
+@(require_results)
+normalize_path :: proc(path: string, allocator: runtime.Allocator) -> string {
+	path := path
+	if !os.is_absolute_path(path) {
+		path = os.get_absolute_path(path, context.temp_allocator) or_else panic("")
+	}
+	when os.Path_Separator != '/' {
+		path = os.replace_path_separators(path, '/', allocator) or_else panic("Failed to replace path separators")
+	}
+	self     := os.get_working_directory(context.temp_allocator) or_else panic("")
+	relative := os.get_relative_path(self, path, allocator) or_else panic("")
+	if !strings.has_prefix(relative, "..") {
+		path = relative
+	} else {
+		path = strings.clone(path)
+		delete(relative)
+	}
+
+	return path
+}
+
 buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path, data: string, allocator: runtime.Allocator, language: string = "") {
+	path := normalize_path(path, allocator)
 	log.infof("Opening file '%s'", path)
-	path := os.get_absolute_path(path, context.temp_allocator) or_else panic("")
-	self := os.get_working_directory(context.temp_allocator)   or_else panic("")
-	path  = os.get_relative_path(self, path, allocator)        or_else panic("")
 
 	language := language
 	if language == "" {
@@ -236,6 +257,8 @@ Editor :: struct {
 
 	clipboard:        strings.Builder,
 
+	jumplist:         Jumplist,
+
 	status:           strings.Builder,
 
 	prompt:           Prompt,
@@ -247,9 +270,46 @@ Editor :: struct {
 	language_servers: map[string]^LSP_Server,
 }
 
+Range :: struct {
+	start, end: Offset,
+}
+
+Jumplist_Entry :: struct {
+	using range: Range,
+	path:        string,
+	content:     string,
+}
+
+Jumplist :: struct {
+	entries: [dynamic]Jumplist_Entry,
+	arena:   vmem.Arena,
+}
+
+jumplist_add :: proc(editor: ^Editor, selection := Selection{}) {
+	selection := selection
+	if selection == {} {
+		selection = editor.buffer.selections[editor.buffer.primary]
+	}
+
+	allocator := vmem.arena_allocator(&editor.jumplist.arena)
+
+	start := min(selection.anchor, selection.cursor)
+	end   := max(selection.anchor, selection.cursor)
+
+	b := strings.builder_make(allocator)
+	btree_to_string(&editor.buffer.btree, &b, start, end)
+
+	append(&editor.jumplist.entries, Jumplist_Entry {
+		path    = editor.buffer.path,
+		start   = start,
+		end     = end,
+		content = strings.to_string(b),
+	})
+}
+
 Prompt :: struct {
 	mode:    Prompt_Mode,
-	input:   strings.Builder,
+	input:   Input_Line,
 	history: [Prompt_Mode][dynamic]string,
 	arena:   vmem.Arena,
 }
@@ -286,7 +346,9 @@ main :: proc() {
 
 	err := vmem.arena_init_growing(&editor.prompt.arena)
 	assert(err == nil)
-	err = vmem.arena_init_growing(&editor.leader.arena)
+	err  = vmem.arena_init_growing(&editor.leader.arena)
+	assert(err == nil)
+	err  = vmem.arena_init_growing(&editor.jumplist.arena)
 	assert(err == nil)
 
 	defer {
@@ -303,7 +365,7 @@ main :: proc() {
 		vmem.arena_destroy(&editor.leader.arena)
 		delete(editor.new_selections)
 		strings.builder_destroy(&editor.leader.sequence)
-		strings.builder_destroy(&editor.prompt.input)
+		input_line_destroy(editor.prompt.input)
 		strings.builder_destroy(&editor.status)
 		strings.builder_destroy(&editor.clipboard)
 		strings.builder_destroy(&editor.popup_text)
@@ -359,60 +421,39 @@ main :: proc() {
 				}
 
 				if editor.mode == .Prompt {
-					#partial switch e.key {
-					case .Escape:
-						editor.mode = .Normal
-					case .Enter:
+					switch input_line_handle_event(&editor.prompt.input, e) {
+					case .None:
+					case .Submit:
 						prompt_apply(&editor)
 						editor.mode = .Normal
-					case .Backspace:
-						strings.pop_rune(&editor.prompt.input)
+					case .Exit:
+						editor.mode = .Normal
+					case .Change:
 					}
 					break
 				}
 
 				if editor.mode == .Picker {
-					#partial switch e.key {
-					case .Escape:
-						editor.mode = .Normal
-					case .Enter:
+					switch input_line_handle_event(&editor.picker.input, e) {
+					case .None:
+						#partial switch e.key {
+						case .Down, .Tab:
+							editor.picker.active += 1
+							if editor.picker.active >= editor.picker.matching {
+								editor.picker.active = 0
+							}
+						case .Up:
+							editor.picker.active -= 1
+							if editor.picker.active < 0 {
+								editor.picker.active = editor.picker.matching - 1
+							}
+						}
+					case .Submit:
 						picker_submit(&editor)
-					case .Backspace:
-						@(require_results)
-						is_word :: proc(r: rune) -> bool {
-							return r == '_' || unicode.is_letter(r) || unicode.is_number(r)
-						}
-
-						r, w := strings.pop_rune(&editor.picker.input)
-						(w != 0) or_break
-
-						if e.modifiers & { .Control, .Alt, } == {} {
-							picker_update(&editor)
-							break
-						}
-
-						for !is_word(r) {
-							r, w = strings.pop_rune(&editor.picker.input)
-							(w != 0) or_break
-						}
-						for is_word(r) {
-							r, w = strings.pop_rune(&editor.picker.input)
-							(w != 0) or_break
-						}
-						if !is_word(r) && w != 0 {
-							strings.write_rune(&editor.picker.input, r)
-						}
-						picker_update(&editor)
-					case .Down, .Tab:
-						editor.picker.active += 1
-						if editor.picker.active >= editor.picker.matching {
-							editor.picker.active = 0
-						}
-					case .Up:
-						editor.picker.active -= 1
-						if editor.picker.active < 0 {
-							editor.picker.active = editor.picker.matching - 1
-						}
+						editor.mode = .Normal
+					case .Exit:
+						editor.mode = .Normal
+					case .Change:
 					}
 					break
 				}
@@ -466,9 +507,9 @@ main :: proc() {
 				}
 				#partial switch editor.mode {
 				case .Prompt:
-					strings.write_rune(&editor.prompt.input, e.codepoint)
+					_ = input_line_handle_event(&editor.prompt.input, e)
 				case .Picker:
-					strings.write_rune(&editor.picker.input, e.codepoint)
+					_ = input_line_handle_event(&editor.picker.input, e)
 					picker_update(&editor)
 				case .Insert:
 					argument_motion_apply(&editor, &editor.buffer, .Insert_Character, e.codepoint)
@@ -476,7 +517,16 @@ main :: proc() {
 			case Event_Input_Mouse_Move:
 			case Event_Input_Mouse_Button:
 			case Event_Input_Scroll:
-				editor.buffer.scroll -= int(e.delta.y * 5)
+				y := int(e.delta.y * editor.config.scroll_scale)
+				if y == 0 {
+					break
+				}
+				editor.repeat_count = abs(y)
+				if y > 0 {
+					action_apply(&editor, Motion.View_Line_Up, {})
+				} else {
+					action_apply(&editor, Motion.View_Line_Down, {})
+				}
 			}
 		}
 
@@ -589,9 +639,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 	padding: f32 = 10
 	status_bar_height := FONT_HEIGHT + padding * 2 + 2
 
-	popup_commands := make([dynamic]Draw_Command, context.temp_allocator)
-
-	buffer_render(editor, &editor.buffer, commands, &popup_commands, delta_time, { min = padding, max = screen_size - { padding, status_bar_height, }, }, padding)
+	buffer_render(editor, &editor.buffer, commands, delta_time, { min = padding, max = screen_size - { padding, status_bar_height, }, }, padding)
 
 	draw_rect(commands,
 		offset = { 0, screen_size.y - FONT_HEIGHT - padding * 2, },
@@ -749,28 +797,18 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 			{ x, screen_size.y - padding, },
 		)
 
-		text := strings.to_string(editor.prompt.input)
-		if text == "" {
+		default: string
+		if default == "" {
 			history := editor.prompt.history[editor.prompt.mode]
 			if len(history) != 0 {
-				text = history[len(history) - 1]
+				default = history[len(history) - 1]
 			}
 		}
-		w := draw_text(
-			&editor.font,
-			commands,
-			text,
-			editor.config.theme[.Ui_Text].fg,
-			{ x, screen_size.y - padding, },
-		)
+		w := input_line_render(editor, commands, &editor.prompt.input, { x, screen_size.y - padding, }, delta_time, default)
 
-		{
-			w := strings.builder_len(editor.prompt.input) == 0 ? 0 : w
-			draw_rect(commands,
-				offset = { x + w, screen_size.y - FONT_HEIGHT - padding + f32(editor.font.descender) * editor.font.scale, },
-				size   = { 2, cell_size.y, },
-				color  = editor.config.theme[.Ui_Text].fg,
-			)
+		text := strings.to_string(editor.prompt.input.buffer)
+		if text == "" {
+			text = default
 		}
 
 		if is_regex {
@@ -802,12 +840,6 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		)
 	}
 
-	if editor.config.blur_strength != 0 {
-		append(commands, Draw_Command_Blur{ radius = f32(editor.config.blur_strength), })
-	}
-
-	append(commands, ..popup_commands[:])
-
 	leader_target_rect := Rect {
 		min = (screen_size - 20 - { 0, FONT_HEIGHT + padding * 2, }) - editor.leader.size,
 		max = (screen_size - 20 - { 0, FONT_HEIGHT + padding * 2, }),
@@ -828,6 +860,8 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		border_radius = 8,
 		border_width  = 2,
 		shadow_width  = 16,
+
+		blur_radius   = f32(editor.config.blur_strength),
 	)
 
 	animation_set_target(&editor.leader.alpha, editor.leader.active && editor.leader.rect.t == 1 ? 1 : 0)
@@ -1031,17 +1065,19 @@ regex_create :: proc(editor: ^Editor, pattern_string: string, extra_flags: regex
 
 prompt_apply :: proc(editor: ^Editor) {
 	history := &editor.prompt.history[editor.prompt.mode]
-	if strings.builder_len(editor.prompt.input) == 0 {
+	if strings.builder_len(editor.prompt.input.buffer) == 0 {
 		if len(history) != 0 {
-			strings.write_string(&editor.prompt.input, history[len(history) - 1])
+			strings.write_string(&editor.prompt.input.buffer, history[len(history) - 1])
 		}
 	} else {
-		append(history, strings.clone(strings.to_string(editor.prompt.input), vmem.arena_allocator(&editor.prompt.arena)))
+		append(history, strings.clone(strings.to_string(editor.prompt.input.buffer), vmem.arena_allocator(&editor.prompt.arena)))
 	}
+
+	input := strings.to_string(editor.prompt.input.buffer)
 
 	switch editor.prompt.mode {
 	case .Select:
-		pattern := regex_create(editor, strings.to_string(editor.prompt.input)) or_break
+		pattern := regex_create(editor, input) or_break
 
 		b := strings.builder_make(context.temp_allocator)
 		for selection, i in editor.buffer.selections {
@@ -1079,7 +1115,7 @@ prompt_apply :: proc(editor: ^Editor) {
 			deduplicate_selections(&editor.buffer)
 		}
 	case .Keep:
-		pattern := regex_create(editor, strings.to_string(editor.prompt.input)) or_break
+		pattern := regex_create(editor, input) or_break
 
 		b := strings.builder_make(context.temp_allocator)
 
@@ -1121,11 +1157,11 @@ prompt_apply :: proc(editor: ^Editor) {
 			deduplicate_selections(&editor.buffer)
 		}
 	case .Search:
-		regex_search(editor, &editor.buffer, strings.to_string(editor.prompt.input))
+		regex_search(editor, &editor.buffer, input)
 	case .Command:
-		command_execute(editor, Command(strings.to_string(editor.prompt.input)))
+		command_execute(editor, Command(strings.to_string(editor.prompt.input.buffer)))
 	}
-	strings.builder_reset(&editor.prompt.input)
+	input_line_reset(&editor.prompt.input)
 }
 
 @(require_results)
@@ -1159,9 +1195,21 @@ draw_rect :: proc(
 	border_width:  f32    = 0,
 	border_color:  [4]f32 = 0,
 	shadow_width:  f32    = 0,
+	blur_radius:   f32    = 0,
 ) {
+	if size == 0 {
+		return
+	}
+	rect := rect_from_min_max(offset, offset + size)
+	if blur_radius != 0 {
+		append(commands, Draw_Command_Blur {
+			rect          = rect,
+			radius        = blur_radius,
+			border_radius = border_radius,
+		})
+	}
 	append(commands, Draw_Command_Rect {
-		rect          = rect_from_min_max(offset, offset + size),
+		rect          = rect,
 		color         = color,
 		border_radius = border_radius,
 		border_width  = border_width,
@@ -1171,13 +1219,12 @@ draw_rect :: proc(
 }
 
 buffer_render :: proc(
-	editor:         ^Editor,
-	buffer:         ^Buffer,
-	commands:       ^[dynamic]Draw_Command,
-	popup_commands: ^[dynamic]Draw_Command,
-	delta_time:      f32,
-	rect:            Rect,
-	padding:         f32,
+	editor:    ^Editor,
+	buffer:    ^Buffer,
+	commands:  ^[dynamic]Draw_Command,
+	delta_time: f32,
+	rect:       Rect,
+	padding:    f32,
 ) {
 	if rect.max.x <= rect.min.x || rect.max.y <= rect.min.y {
 		return
@@ -1192,7 +1239,7 @@ buffer_render :: proc(
 
 	cell_size: [2]f32 = {
 		la.round(get_glyph_info(&editor.font, 0).x_advance),
-		la.round(((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale)),
+		la.round((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale),
 	}
 
 	line_digits  := int(la.ceil(la.log10(1 + f32(buffer.btree.lines))))
@@ -1468,13 +1515,14 @@ buffer_render :: proc(
 
 	append(commands, ..text_commands[:])
 
-	{
+	draw_popup: {
 		popup_rect := animation_update(&editor.popup_rect, delta_time, editor.config.popup_animation_speed)
 		popup_rect.min.y -= scroll * cell_size.y
 		popup_rect.max.y -= scroll * cell_size.y
 		popup_rect.min   += rect.min
 		popup_rect.max   += rect.min
-		draw_rect(popup_commands,
+
+		draw_rect(commands,
 			offset        = popup_rect.min,
 			size          = rect_size(popup_rect),
 			color         = editor.config.theme[.Popup_Background].fg,
@@ -1482,6 +1530,8 @@ buffer_render :: proc(
 			border_radius = 8,
 			border_width  = 2,
 			shadow_width  = 16,
+
+			blur_radius   = f32(editor.config.blur_strength),
 		)
 
 		line_height := FONT_HEIGHT + padding
@@ -1498,7 +1548,7 @@ buffer_render :: proc(
 		defer cm.iter_free(iter)
 		for {
 			ev_type := cm.iter_next(iter)
-			if ev_type == .Done  {
+			if ev_type == .Done {
 				break
 			}
 			cur := cm.iter_get_node(iter)
@@ -1509,7 +1559,7 @@ buffer_render :: proc(
 			case .None:
 			case .Document:
 			case .Block_Quote:
-				x += draw_text(&editor.font, popup_commands, "Block_Quote",    editor.config.theme[.Operator].fg, { x, y, } + text_base)
+				x += draw_text(&editor.font, commands, "Block_Quote",    editor.config.theme[.Operator].fg, { x, y, } + text_base)
 
 				width = max(width, x)
 				y    += line_height
@@ -1521,7 +1571,7 @@ buffer_render :: proc(
 			case .Item:
 				if ev_type == .Enter {
 					RADIUS :: 2
-					draw_rect(popup_commands, { cell_size.x - RADIUS, y - FONT_HEIGHT / 2 - RADIUS, } + text_base, RADIUS * 2, editor.config.theme[.Ui_Text].fg, border_radius = RADIUS)
+					draw_rect(commands, { cell_size.x - RADIUS, y - FONT_HEIGHT / 2 - RADIUS, } + text_base, RADIUS * 2, editor.config.theme[.Ui_Text].fg, border_radius = RADIUS)
 					x           += cell_size.x * 2
 					indentation += cell_size.x * 2
 				} else if ev_type == .Exit {
@@ -1565,7 +1615,7 @@ buffer_render :: proc(
 							continue
 						}
 
-						append(popup_commands, Draw_Command_Char {
+						append(commands, Draw_Command_Char {
 							position = { x + cell_size.x * f32(column), y, } + text_base,
 							char     = r,
 							color    = editor.config.theme[style].fg,
@@ -1576,13 +1626,13 @@ buffer_render :: proc(
 				width = max(width, x + cell_size.x * f32(column))
 				y    += line_height
 			case .HTML_Block:
-				x += draw_text(&editor.font, popup_commands, "HTML_Block",     editor.config.theme[.Operator].fg, { x, y, } + text_base)
+				x += draw_text(&editor.font, commands, "HTML_Block",     editor.config.theme[.Operator].fg, { x, y, } + text_base)
 
 				width = max(width, x)
 				y    += line_height
 				x     = indentation
 			case .Custom_Block:
-				x += draw_text(&editor.font, popup_commands, "Custom_Block",   editor.config.theme[.Operator].fg, { x, y, } + text_base)
+				x += draw_text(&editor.font, commands, "Custom_Block",   editor.config.theme[.Operator].fg, { x, y, } + text_base)
 
 				width = max(width, x)
 				y    += line_height
@@ -1598,13 +1648,13 @@ buffer_render :: proc(
 				y    += line_height
 
 				if ev_type == .Exit {
-					draw_rect(popup_commands, { 0, y - FONT_HEIGHT, } + text_base, { x, 1, }, editor.config.theme[.Ui_Text].fg)
+					draw_rect(commands, { 0, y - FONT_HEIGHT, } + text_base, { x, 1, }, editor.config.theme[.Ui_Text].fg)
 					y += line_height
 				}
 
 				x = indentation
 			case .Thematic_Break:
-				draw_rect(popup_commands, { 0, y - FONT_HEIGHT / 2 - 1, } + text_base, { popup_rect.max.x - popup_rect.min.x - padding * 2, 1, }, editor.config.theme[.Ui_Text].fg)
+				draw_rect(commands, { 0, y - FONT_HEIGHT / 2 - 1, } + text_base, { popup_rect.max.x - popup_rect.min.x - padding * 2, 1, }, editor.config.theme[.Ui_Text].fg)
 
 				width = max(width, x)
 				y    += line_height
@@ -1614,21 +1664,21 @@ buffer_render :: proc(
 				y    += line_height
 				x     = indentation
 			case .Text:
-				x += draw_text(&editor.font, popup_commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
+				x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
 			case .Code:
-				x += draw_text(&editor.font, popup_commands, text, editor.config.theme[.String].fg,   { x, y, } + text_base)
+				x += draw_text(&editor.font, commands, text, editor.config.theme[.String].fg,   { x, y, } + text_base)
 			case .HTML_Inline:
-				x += draw_text(&editor.font, popup_commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
+				x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
 			case .Custom_Inline:
-				x += draw_text(&editor.font, popup_commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
+				x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
 			case .Emph:
-				x += draw_text(&editor.font, popup_commands, text, editor.config.theme[.Keyword].fg,  { x, y, } + text_base)
+				x += draw_text(&editor.font, commands, text, editor.config.theme[.Keyword].fg,  { x, y, } + text_base)
 			case .Strong:
-				x += draw_text(&editor.font, popup_commands, text, editor.config.theme[.Operator].fg, { x, y, } + text_base)
+				x += draw_text(&editor.font, commands, text, editor.config.theme[.Operator].fg, { x, y, } + text_base)
 			case .Link:
-				x += draw_text(&editor.font, popup_commands, text, editor.config.theme[.String].fg,   { x, y, } + text_base)
+				x += draw_text(&editor.font, commands, text, editor.config.theme[.String].fg,   { x, y, } + text_base)
 			case .Image:
-				x += draw_text(&editor.font, popup_commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
+				x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
 			}
 		}
 
@@ -1652,4 +1702,119 @@ buffer_render :: proc(
 		}
 		animation_set_target(&editor.popup_rect, target)
 	}
+}
+
+Input_Line :: struct {
+	buffer:      strings.Builder,
+	default:     string,
+	cursor:      int,
+	cursor_anim: Animation(f32),
+}
+
+Input_Line_Result :: enum {
+	None = 0,
+	Submit,
+	Exit,
+	Change,
+}
+
+@(require_results)
+input_line_handle_event :: proc(input: ^Input_Line, event: Event) -> Input_Line_Result {
+	defer input.cursor = strings.builder_len(input.buffer)
+	#partial switch e in event {
+	case Event_Input_Key:
+		if e.action == .Up {
+			return .None
+		}
+		#partial switch e.key {
+		case .Escape:
+			strings.builder_reset(&input.buffer)
+			input.cursor = 0
+			return .Exit
+		case .Enter:
+			return .Submit
+		case .Backspace:
+			@(require_results)
+			is_word :: proc(r: rune) -> bool {
+				return r == '_' || unicode.is_letter(r) || unicode.is_number(r)
+			}
+
+			r, w := strings.pop_rune(&input.buffer)
+			(w != 0) or_break
+
+			if e.modifiers & { .Control, .Alt, } == {} {
+				return .Change
+			}
+
+			for !is_word(r) {
+				r, w = strings.pop_rune(&input.buffer)
+				(w != 0) or_break
+			}
+			for is_word(r) {
+				r, w = strings.pop_rune(&input.buffer)
+				(w != 0) or_break
+			}
+			if !is_word(r) && w != 0 {
+				strings.write_rune(&input.buffer, r)
+			}
+			return .Change
+		}
+		return .None
+	case Event_Input_Codepoint:
+		strings.write_rune(&input.buffer, e.codepoint)
+		return .Change
+	case Event_Input_Mouse_Button:
+		// TODO?
+		return .None
+	case:
+		return .None
+	}
+}
+
+input_line_destroy :: proc(input: Input_Line) {
+	input := input
+	strings.builder_destroy(&input.buffer)
+}
+
+input_line_reset :: proc(input: ^Input_Line) {
+	strings.builder_reset(&input.buffer)
+	input.cursor = 0
+}
+
+input_line_render :: proc(
+	editor:   ^Editor,
+	commands: ^[dynamic]Draw_Command,
+	input:    ^Input_Line,
+	position: [2]f32,
+	delta_time: f32,
+	default := "",
+) -> (width: f32) {
+	text := strings.to_string(input.buffer)
+	if text == "" {
+		text = default
+	}
+	width = draw_text(
+		&editor.font,
+		commands,
+		text[:input.cursor],
+		editor.config.theme[.Ui_Text].fg,
+		position,
+	)
+	animation_set_target(&input.cursor_anim, width)
+	anim := animation_update(&input.cursor_anim, delta_time, editor.config.cursor_animation_speed)
+	height := (f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale
+	draw_rect(commands,
+		offset = position + { anim, -(height + f32(editor.font.descender) * editor.font.scale), },
+		size   = { 1, height, },
+		color  = editor.config.theme[.Ui_Text].fg,
+	)
+	width += draw_text(
+		&editor.font,
+		commands,
+		text[input.cursor:],
+		editor.config.theme[.Ui_Text].fg,
+		position + { width, 0, },
+	)
+
+	return
 }

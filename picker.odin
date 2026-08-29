@@ -13,16 +13,19 @@ Picker_Symbol :: struct {
 }
 
 Picker :: struct {
-	mode:     Picker_Mode,
-	input:    strings.Builder,
-	rect:     Animation(Rect),
-	rect2:    Animation(Rect),
-	files:    []os.File_Info,
-	symbols:  []Picker_Symbol,
-	items:    [dynamic]Picker_Item,
-	active:   int,
-	matching: int,
-	arena:    vmem.Arena,
+	mode:        Picker_Mode,
+	input:       Input_Line,
+	items:       [dynamic]Picker_Item,
+	active:      int,
+	matching:    int,
+	arena:       vmem.Arena,
+
+	files:       []os.File_Info,
+	symbols:     []Picker_Symbol,
+	diagnostics: []Diagnostic,
+
+	rect:        Animation(Rect),
+	rect2:       Animation(Rect),
 }
 
 Picker_Mode :: enum {
@@ -30,6 +33,7 @@ Picker_Mode :: enum {
 	Files_Recursive,
 	Global_Search,
 	Symbols,
+	Diagnostics,
 	Commands,
 }
 
@@ -40,13 +44,13 @@ Picker_Item :: struct {
 }
 
 picker_destroy :: proc(picker: ^Picker) {
-	strings.builder_destroy(&picker.input)
+	input_line_destroy(picker.input)
 	delete(picker.items)
 	vmem.arena_destroy(&picker.arena)
 }
 
 picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused_locations: []Fused_Location = {}) {
-	strings.builder_reset(&editor.picker.input)
+	input_line_reset(&editor.picker.input)
 	vmem.arena_free_all(&editor.picker.arena)
 	allocator := vmem.arena_allocator(&editor.picker.arena)
 
@@ -63,10 +67,8 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 			}
 		}
 		editor.picker.files, err = os.read_all_directory_by_path(path, allocator)
-		when os.Path_Separator != '/' {
-			for &file in editor.picker.files {
-				file.fullpath = os.replace_path_separators(file.fullpath, '/', allocator) or_else panic("Failed to replace path separators")
-			}
+		for &file in editor.picker.files {
+			file.fullpath = normalize_path(file.fullpath, allocator)
 		}
 		if err != nil {
 			editor_set_status(editor, "Failed to read directory: %v", err)
@@ -105,9 +107,10 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 				continue
 			}
 
-			info     := os.file_info_clone(info, allocator) or_break
-			info.name = strings.trim_prefix(info.fullpath, path)
-			info.name = strings.trim_prefix(info.name, os.Path_Separator_String)
+			info         := os.file_info_clone(info, allocator) or_break
+			info.fullpath = normalize_path(info.fullpath, allocator)
+			info.name     = strings.trim_prefix(info.fullpath, path)
+			info.name     = strings.trim_prefix(info.name, "/")
 
 			append(&editor.picker.items, Picker_Item {
 				name = info.name,
@@ -130,7 +133,7 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 
 			l.location.uri = uri_clone(l.location.uri, allocator)
 
-			path := strings.trim_prefix(string(l.location.uri), "file://")
+			path := uri_to_path(l.location.uri, context.temp_allocator) or_else "invalid path"
 			name := fmt.aprintf("%s:%d", path, l.location.range.start.line + 1, allocator = allocator)
 
 			editor.picker.items[i] = {
@@ -140,6 +143,25 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 		}
 
 		editor.picker.symbols = symbols
+	case .Diagnostics:
+		diagnostics := make([]Diagnostic, len(editor.buffer.diagnostics), allocator)
+		resize(&editor.picker.items, len(diagnostics))
+		for &d, i in diagnostics {
+			diagnostic := editor.buffer.diagnostics[i]
+			d = {
+				start   = diagnostic.start,
+				end     = diagnostic.end,
+				code    = strings.clone(diagnostic.code,    allocator),
+				message = strings.clone(diagnostic.message, allocator),
+			}
+
+			editor.picker.items[i] = {
+				name = fmt.aprintf("%s:%s", d.code, d.message, allocator = allocator),
+				id   = i,
+			}
+		}
+
+		editor.picker.diagnostics = diagnostics
 	case .Commands:
 	}
 
@@ -150,7 +172,7 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 }
 
 picker_update :: proc(editor: ^Editor) {
-	pattern := strings.to_string(editor.picker.input)
+	pattern := strings.to_string(editor.picker.input.buffer)
 
 	editor.picker.active = 0
 
@@ -199,7 +221,7 @@ picker_submit :: proc(editor: ^Editor) {
 		symbol := picker.symbols[active.id]
 
 		if symbol.location.uri != editor.buffer.uri {
-			path := strings.trim_prefix(string(symbol.location.uri), "file://")
+			path := uri_to_path(symbol.location.uri, context.temp_allocator) or_break
 			buffer_destroy(&editor.buffer)
 			buffer_init(editor, &editor.buffer, path, context.allocator)
 		}
@@ -216,6 +238,16 @@ picker_submit :: proc(editor: ^Editor) {
 		editor.buffer.selections[0].anchor        = start
 		editor.buffer.selections[0].cursor        = end
 		editor.buffer.selections[0].target_cursor = end
+
+		editor.mode = .Normal
+	case .Diagnostics:
+		diagnostic := picker.diagnostics[active.id]
+
+		editor.buffer.primary = 0
+		resize(&editor.buffer.selections, 1)
+		editor.buffer.selections[0].anchor        = diagnostic.start
+		editor.buffer.selections[0].cursor        = diagnostic.end
+		editor.buffer.selections[0].target_cursor = diagnostic.end
 
 		editor.mode = .Normal
 	case .Commands:
@@ -271,6 +303,10 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 
 	picker_rect := animation_update(&picker.rect, delta_time, editor.config.popup_animation_speed)
 
+	if rect_size(picker_rect) == 0 {
+		return
+	}
+
 	draw_rect(commands,
 		offset        = picker_rect.min,
 		size          = rect_size(picker_rect),
@@ -279,6 +315,7 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 		border_radius = 8,
 		border_width  = 2,
 		shadow_width  = 16,
+		blur_radius   = f32(editor.config.blur_strength),
 	)
 
 	clip_rect := rect_inflate(picker_rect, -2)
@@ -290,12 +327,12 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 	defer append(commands, DRAW_COMMAND_CLIP_DISABLE)
 
 	if editor.mode == .Picker {
-		draw_text(
-			&editor.font,
+		input_line_render(
+			editor,
 			commands,
-			strings.to_string(picker.input),
-			editor.config.theme[.Ui_Text].fg,
+			&picker.input,
 			picker_rect.min + padding + { 0, FONT_HEIGHT, },
+			delta_time,
 		)
 
 		draw_rect(commands,
@@ -309,7 +346,7 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 		x := picker_rect.min.x + padding
 		y := picker_rect.min.y + line_height * 2 + padding + 2
 
-		pattern := strings.to_string(picker.input)
+		pattern := strings.to_string(picker.input.buffer)
 
 		x += draw_text(&editor.font, commands, ">", editor.config.theme[.Ui_Focus].fg, { x, y + line_height * f32(picker.active), }) + padding
 

@@ -94,6 +94,8 @@ Action :: union {
 	Leader_Binds,
 	Command,
 	Motion,
+	Primary_Motion,
+	Selection_Motion,
 	Argument_Motion,
 }
 
@@ -158,8 +160,20 @@ action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 		if editor.repeat_count == 0 {
 			editor.repeat_count = 1
 		}
+		motion_apply(editor, &editor.buffer, v)
+	case Selection_Motion:
+		if editor.repeat_count == 0 {
+			editor.repeat_count = 1
+		}
 		for &selection, i in editor.buffer.selections {
-			motion_apply(editor, &editor.buffer, &selection, v, i == editor.buffer.primary)
+			selection_motion_apply(editor, &editor.buffer, &selection, v, i == editor.buffer.primary)
+		}
+	case Primary_Motion:
+		if editor.repeat_count == 0 {
+			editor.repeat_count = 1
+		}
+		for &selection, i in editor.buffer.selections {
+			primary_motion_apply(editor, &editor.buffer, &selection, v)
 		}
 	case Command:
 		command_execute(editor, v)
@@ -345,7 +359,11 @@ action_to_string :: proc(action: Action, arena: ^vmem.Arena) -> string {
 	case Command:
 		return string(v)
 	case Motion:
-		return motion_to_name_table[v] or_else panic("invalid motion")
+		return motion_to_name_table[v]
+	case Primary_Motion:
+		return primary_motion_to_name_table[v]
+	case Selection_Motion:
+		return selection_motion_to_name_table[v]
 	case Argument_Motion:
 		return argument_motion_descriptions[v]
 	}

@@ -57,6 +57,7 @@ Config :: struct {
 	cursor_animation_speed: f32,
 	popup_animation_speed:  f32,
 	tab_width:              int,
+	scroll_scale:           f32,
 	theme:                  Theme,
 	keybinds:               [Mode]Keybinds,
 	styles:                 map[string]Style_Key,

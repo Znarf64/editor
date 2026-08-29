@@ -12,11 +12,6 @@ layout (location = 7) in float v_shadow_width;
 layout (location = 0) out vec4 f_color;
 
 layout (binding  = 0) uniform sampler2D u_texture_font;
-layout (binding  = 1) uniform sampler2D u_texture_blur;
-layout (binding  = 2) uniform sampler2D u_texture_noise;
-
-layout (location = 1) uniform bool      u_enable_blur;
-layout (location = 2) uniform float     u_noise_strength = 0.005;
 
 float sdf_rounded_box(vec2 p, vec2 b, float r) {
 	vec2 q = abs(p) - b + r;
@@ -64,11 +59,4 @@ void main() {
 	}
 
 	f_color = mix(f_color, v_border_color, border_weight);
-
-	if (u_enable_blur && f_color.a != 0) {
-		vec2  texel = gl_FragCoord.xy / vec2(textureSize(u_texture_blur,  0));
-		float noise = texture(u_texture_noise, gl_FragCoord.xy / vec2(textureSize(u_texture_noise, 0))).r;
-		f_color.rgb = mix(texture(u_texture_blur, texel).rgb, f_color.rgb, f_color.a) + vec3(noise - 0.5) * u_noise_strength;
-		f_color.a   = 1;
-	}
 }

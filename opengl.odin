@@ -18,7 +18,7 @@ Opengl_Renderer :: struct {
 	main_program:     u32,
 	blur_program:     u32,
 	font:             Opengl_Font,
-	blur_textures:    [2]u32,
+	blur_texture:     u32,
 	main_texture:     u32,
 	main_framebuffer: u32,
 	noise_texture:    u32,
@@ -51,19 +51,18 @@ Opengl_Instance :: struct {
 
 OPENGL_DRAW_BATCH_SIZE :: 1 << 12
 
-OPENGL_UNIFORM_SCREEN_SIZE    :: 0
-OPENGL_UNIFORM_ENABLE_BLUR    :: 1
-OPENGL_UNIFORM_NOISE_STRENGTH :: 2
+OPENGL_UNIFORM_SCREEN_SIZE        :: 0
 
-OPENGL_UNIFORM_BLUR_INPUT     :: 0
-OPENGL_UNIFORM_BLUR_OUTPUT    :: 1
-OPENGL_UNIFORM_BLUR_VERTICAL  :: 2
-OPENGL_UNIFORM_BLUR_SAMPLES   :: 3
-OPENGL_UNIFORM_BLUR_WEIGHTS   :: 4
+OPENGL_UNIFORM_BLUR_INPUT         :: 0
+OPENGL_UNIFORM_BLUR_OUTPUT        :: 1
+OPENGL_UNIFORM_BLUR_NOISE         :: 2
+OPENGL_UNIFORM_BLUR_VERTICAL      :: 3
+OPENGL_UNIFORM_BLUR_SAMPLES       :: 4
+OPENGL_UNIFORM_BLUR_RECT          :: 5
+OPENGL_UNIFORM_BLUR_BORDER_RADIUS :: 6
+OPENGL_UNIFORM_BLUR_WEIGHTS       :: 7
 
-OPENGL_TEXTURE_BINDING_FONT   :: 0
-OPENGL_TEXTURE_BINDING_BLUR   :: 1
-OPENGL_TEXTURE_BINDING_NOISE  :: 2
+OPENGL_TEXTURE_BINDING_FONT       :: 0
 
 @(require_results)
 opengl_renderer_init :: proc(
@@ -237,10 +236,8 @@ opengl_renderer_init :: proc(
 }
 
 opengl_framebuffer_init :: proc(renderer: ^Opengl_Renderer) {
-	gl.CreateTextures(gl.TEXTURE_2D, len(renderer.blur_textures), &renderer.blur_textures[0])
-	for texture in renderer.blur_textures {
-		gl.TextureStorage2D(texture, 1, gl.RGBA8, i32(renderer.resolution.x), i32(renderer.resolution.y))
-	}
+	gl.CreateTextures(gl.TEXTURE_2D, 1, &renderer.blur_texture)
+	gl.TextureStorage2D(renderer.blur_texture, 1, gl.RGBA8, i32(renderer.resolution.x), i32(renderer.resolution.y))
 
 	gl.CreateTextures(gl.TEXTURE_2D, 1, &renderer.main_texture)
 	gl.TextureStorage2D(renderer.main_texture, 1, gl.RGBA8, i32(renderer.resolution.x), i32(renderer.resolution.y))
@@ -255,7 +252,7 @@ opengl_framebuffer_init :: proc(renderer: ^Opengl_Renderer) {
 }
 
 opengl_framebuffer_destroy :: proc(renderer: ^Opengl_Renderer) {
-	gl.DeleteTextures(len(renderer.blur_textures), &renderer.blur_textures[0])
+	gl.DeleteTextures(1, &renderer.blur_texture)
 	gl.DeleteTextures(1, &renderer.main_texture)
 	gl.DeleteFramebuffers(1, &renderer.main_framebuffer)
 }
@@ -279,7 +276,7 @@ opengl_renderer_destroy :: proc(renderer: Opengl_Renderer) {
 	gl.DeleteProgram(renderer.main_program)
 	gl.DeleteProgram(renderer.blur_program)
 	gl.DeleteTextures(1, &renderer.font.atlas)
-	gl.DeleteTextures(len(renderer.blur_textures), &renderer.blur_textures[0])
+	gl.DeleteTextures(1, &renderer.blur_texture)
 }
 
 opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: []Draw_Command, background_color: [4]f32) {
@@ -293,11 +290,8 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: [
 	gl.UseProgram(renderer.main_program)
 
 	gl.Uniform2f(OPENGL_UNIFORM_SCREEN_SIZE, f32(renderer.resolution.x), f32(renderer.resolution.y))
-	gl.Uniform1i(OPENGL_UNIFORM_ENABLE_BLUR, 0)
 
-	gl.BindTextureUnit(OPENGL_TEXTURE_BINDING_FONT,  renderer.font.atlas)
-	gl.BindTextureUnit(OPENGL_TEXTURE_BINDING_BLUR,  renderer.blur_textures[0])
-	gl.BindTextureUnit(OPENGL_TEXTURE_BINDING_NOISE, renderer.noise_texture)
+	gl.BindTextureUnit(OPENGL_TEXTURE_BINDING_FONT, renderer.font.atlas)
 
 	gl.Viewport(0, 0, i32(renderer.resolution.x), i32(renderer.resolution.y))
 
@@ -365,13 +359,11 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: [
 			gl.Scissor(i32(rect.min.x), i32(rect.min.y), i32(rect.max.x - rect.min.x), i32(rect.max.y - rect.min.y))
 			gl.Enable(gl.SCISSOR_TEST)
 		case Draw_Command_Blur:
-			flush(renderer)
-
 			if v.radius == 0 {
-				gl.Uniform1i(OPENGL_UNIFORM_ENABLE_BLUR, 0)
 				break
 			}
-			gl.Uniform1i(OPENGL_UNIFORM_ENABLE_BLUR, 1)
+
+			flush(renderer)
 
 			gl.UseProgram(renderer.blur_program)
 
@@ -381,30 +373,40 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: [
 			gl.Uniform1i(OPENGL_UNIFORM_BLUR_SAMPLES, i32(v.radius))
 			gl.Uniform1fv(OPENGL_UNIFORM_BLUR_WEIGHTS, i32(v.radius), &weights[0])
 
-			gl.BindImageTexture(0, renderer.main_texture,     0, false, 0, gl.READ_ONLY,  gl.RGBA8)
-			gl.BindImageTexture(1, renderer.blur_textures[1], 0, false, 0, gl.READ_WRITE, gl.RGBA8)
-			gl.BindImageTexture(2, renderer.blur_textures[0], 0, false, 0, gl.WRITE_ONLY, gl.RGBA8)
+			gl.BindImageTexture(0, renderer.main_texture,  0, false, 0, gl.READ_WRITE, gl.RGBA8)
+			gl.BindImageTexture(1, renderer.blur_texture,  0, false, 0, gl.READ_WRITE, gl.RGBA8)
+			gl.BindImageTexture(2, renderer.noise_texture, 0, false, 0, gl.READ_ONLY,  gl.R8)
+
+			gl.Uniform4i(
+				OPENGL_UNIFORM_BLUR_RECT,
+				i32(v.rect.min.x),
+				i32(v.rect.min.y),
+				i32(v.rect.max.x),
+				i32(v.rect.max.y),
+			)
 
 			gl.Uniform1i(OPENGL_UNIFORM_BLUR_INPUT,    0)
 			gl.Uniform1i(OPENGL_UNIFORM_BLUR_OUTPUT,   1)
+			gl.Uniform1i(OPENGL_UNIFORM_BLUR_NOISE,    2)
 			gl.Uniform1i(OPENGL_UNIFORM_BLUR_VERTICAL, 0)
 
 			LOCAL_SIZE :: 16
 
 			gl.DispatchCompute(
-				u32(renderer.resolution.x + LOCAL_SIZE - 1) / LOCAL_SIZE,
-				u32(renderer.resolution.y + LOCAL_SIZE - 1) / LOCAL_SIZE,
+				u32(                    i32(v.rect.max.x) - i32(v.rect.min.x) + LOCAL_SIZE - 1) / LOCAL_SIZE,
+				u32(2 * i32(v.radius) + i32(v.rect.max.y) - i32(v.rect.min.y) + LOCAL_SIZE - 1) / LOCAL_SIZE,
 				1,
 			)
 			gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT)
 
-			gl.Uniform1i(OPENGL_UNIFORM_BLUR_INPUT,    1)
-			gl.Uniform1i(OPENGL_UNIFORM_BLUR_OUTPUT,   2)
-			gl.Uniform1i(OPENGL_UNIFORM_BLUR_VERTICAL, 1)
+			gl.Uniform1i(OPENGL_UNIFORM_BLUR_INPUT,         1)
+			gl.Uniform1i(OPENGL_UNIFORM_BLUR_OUTPUT,        0)
+			gl.Uniform1i(OPENGL_UNIFORM_BLUR_VERTICAL,      1)
+			gl.Uniform1f(OPENGL_UNIFORM_BLUR_BORDER_RADIUS, v.border_radius)
 
 			gl.DispatchCompute(
-				u32(renderer.resolution.x + LOCAL_SIZE - 1) / LOCAL_SIZE,
-				u32(renderer.resolution.y + LOCAL_SIZE - 1) / LOCAL_SIZE,
+				u32(min(i32(renderer.resolution.x), i32(v.rect.max.x)) - i32(v.rect.min.x) + LOCAL_SIZE - 1) / LOCAL_SIZE,
+				u32(min(i32(renderer.resolution.y), i32(v.rect.max.y)) - i32(v.rect.min.y) + LOCAL_SIZE - 1) / LOCAL_SIZE,
 				1,
 			)
 			gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT)

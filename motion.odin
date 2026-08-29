@@ -8,16 +8,23 @@ import unicode "core:unicode"
 import utf8    "core:unicode/utf8"
 import vmem    "core:mem/virtual"
 
-Motion :: enum {
+// A motion applied only to the primary selection
+Primary_Motion :: enum {
+	Show_Hover_Information,
+	Show_Code_Actions,
+	Go_To_Definition,
+
+	Search_Next,
+	Search_Previous,
+	Set_Search,
+}
+
+// A motion applied to every selection
+Selection_Motion :: enum {
 	Cursor_Page_Up = 1,
 	Cursor_Page_Down,
 	Cursor_Half_Page_Up,
 	Cursor_Half_Page_Down,
-
-	View_Page_Up,
-	View_Page_Down,
-	View_Half_Page_Up,
-	View_Half_Page_Down,
 
 	Go_To_Matching,
 	Match_In_Word,
@@ -59,22 +66,6 @@ Motion :: enum {
 	Select_Long_Word_End_Forward,
 	Select_Long_Word_Backward,
 
-	Search,
-	Search_Next,
-	Search_Previous,
-	Set_Search,
-	Command,
-
-	Open_File,
-	Search_Global,
-	Search_Symbols,
-	Command_Palette,
-
-	Save,
-	Save_As,
-
-	Close_File,
-
 	Case_Swap,
 
 	Case_To_Lower,
@@ -111,10 +102,6 @@ Motion :: enum {
 	Open_Below,
 	Open_Above,
 
-	Show_Hover_Information,
-	Show_Code_Actions,
-	Go_To_Definition,
-
 	Collapse_Selection,
 	Keep_Primary_Selection,
 	Create_Selection_Below,
@@ -131,9 +118,28 @@ Motion :: enum {
 	Split_Lines,
 }
 
-Motion_Info :: struct {
-	name:        string,
-	description: string,
+// A motion independent of selections
+Motion :: enum {
+	View_Line_Down,
+	View_Line_Up,
+	View_Page_Up,
+	View_Page_Down,
+	View_Half_Page_Up,
+	View_Half_Page_Down,
+
+	Open_File,
+	Search_Global,
+	Search_Symbols,
+	Command_Palette,
+	Diagnostics,
+
+	Save,
+	Save_As,
+
+	Close_File,
+
+	Search,
+	Command,
 }
 
 Argument_Motion :: enum {
@@ -182,7 +188,13 @@ parse_argument_motion :: proc(s: string) -> (motion: Argument_Motion, ok: bool) 
 }
 
 motion_from_name_table: map[string]Motion
-motion_to_name_table:   map[Motion]string
+motion_to_name_table:   [Motion]string
+
+selection_motion_from_name_table: map[string]Selection_Motion
+selection_motion_to_name_table:   [Selection_Motion]string
+
+primary_motion_from_name_table: map[string]Primary_Motion
+primary_motion_to_name_table:   [Primary_Motion]string
 
 @(require_results)
 canonicalize_motion_name :: proc(s: string, b: ^strings.Builder) -> string {
@@ -210,7 +222,6 @@ initialize_motion_names :: proc "contextless" () {
 	allocator := vmem.arena_allocator(&arena)
 
 	motion_from_name_table = make(map[string]Motion, len(Motion), allocator)
-	motion_to_name_table   = make(map[Motion]string, len(Motion), allocator)
 	b                     := strings.builder_make(allocator)
 
 	for field in reflect.enum_fields_zipped(Motion) {
@@ -220,14 +231,36 @@ initialize_motion_names :: proc "contextless" () {
 		motion_to_name_table[Motion(field.value)] = name
 	}
 
+	for field in reflect.enum_fields_zipped(Primary_Motion) {
+		name                                                     := canonicalize_motion_name(field.name, &b)
+		name                                                      = strings.clone(name, allocator)
+		primary_motion_from_name_table[name]                      = Primary_Motion(field.value)
+		primary_motion_to_name_table[Primary_Motion(field.value)] = name
+	}
+
+	for field in reflect.enum_fields_zipped(Selection_Motion) {
+		name                                                         := canonicalize_motion_name(field.name, &b)
+		name                                                          = strings.clone(name, allocator)
+		selection_motion_from_name_table[name]                        = Selection_Motion(field.value)
+		selection_motion_to_name_table[Selection_Motion(field.value)] = name
+	}
+
 	return
 }
 
 @(require_results)
-parse_motion :: proc(s: string) -> (motion: Motion, ok: bool) {
-	b    := strings.builder_make(0, len(s), context.temp_allocator)
-	name := canonicalize_motion_name(s, &b)
-	return motion_from_name_table[name]
+parse_motion :: proc(s: string) -> (motion: Action, ok: bool) {
+	b         := strings.builder_make(0, len(s), context.temp_allocator)
+	name      := canonicalize_motion_name(s, &b)
+	motion, ok = motion_from_name_table[name]
+	if ok {
+		return
+	}
+	motion, ok = selection_motion_from_name_table[name]
+	if ok {
+		return
+	}
+	return primary_motion_from_name_table[name]
 }
 
 argument_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, motion: Argument_Motion, arg: rune) {
@@ -372,7 +405,123 @@ position_to_offset_normalized :: proc(buffer: ^Buffer, position: Position, verti
 	return vertical_move
 }
 
-motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, motion: Motion, primary: bool) {
+motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, motion: Motion) {
+	switch motion {
+	case .View_Line_Up:
+		buffer.scroll -= editor.repeat_count
+	case .View_Line_Down:
+		buffer.scroll += editor.repeat_count
+	case .View_Half_Page_Up:
+		buffer.scroll -= buffer.visible_lines / 2
+	case .View_Half_Page_Down:
+		buffer.scroll += buffer.visible_lines / 2
+	case .View_Page_Up:
+		buffer.scroll -= buffer.visible_lines
+	case .View_Page_Down:
+		buffer.scroll += buffer.visible_lines
+
+	case .Search:
+		editor.mode        = .Prompt
+		editor.prompt.mode = .Search
+	case .Command:
+		editor.mode        = .Prompt
+		editor.prompt.mode = .Command
+
+	case .Search_Global:
+		picker_open(editor, .Global_Search)
+	case .Search_Symbols:
+		picker_open(editor, .Symbols)
+	case .Command_Palette:
+		picker_open(editor, .Commands)
+	case .Diagnostics:
+		picker_open(editor, .Diagnostics)
+
+	case .Save:
+		unimplemented()
+	case .Save_As:
+		unimplemented()
+
+	case .Open_File:
+		picker_open(editor, .Files_Recursive)
+	case .Close_File:
+		unimplemented()
+	}
+}
+
+primary_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, motion: Primary_Motion) {
+	switch motion {
+	case .Show_Hover_Information:
+		lsp_get_hover_information(editor, buffer)
+	case .Go_To_Definition:
+		lsp_go_to_definition(editor, buffer)
+	case .Show_Code_Actions:
+		unimplemented()
+
+	case .Search_Next:
+		history := editor.prompt.history[.Search]
+		if len(history) == 0 {
+			break
+		}
+		regex_search(editor, buffer, history[len(history) - 1])
+	case .Search_Previous:
+		history := editor.prompt.history[.Search]
+		if len(history) == 0 {
+			break
+		}
+		regex_search_reverse(editor, buffer, history[len(history) - 1])
+	case .Set_Search:
+		start := min(selection.anchor, selection.cursor)
+		end   := max(selection.anchor, selection.cursor)
+		b     := strings.builder_make(0, int(end - start), context.temp_allocator)
+		iter  := btree_iterator(&buffer.btree, offset = min(selection.anchor, selection.cursor))
+
+		@(require_results)
+		is_word_class :: #force_inline proc "contextless" (r: rune) -> bool {
+			switch r {
+			case '0'..='9', 'A'..='Z', '_', 'a'..='z':
+				return true
+			case:
+				return false
+			}
+		}
+
+		if prev, ok := btree_iter(&iter, back = true); ok {
+			_, _      = btree_iter(&iter)
+			first, _ := btree_iter(&iter)
+			_, _      = btree_iter(&iter, back = true)
+
+			if is_word_class(first) != is_word_class(prev) {
+				strings.write_string(&b, "\\b")
+			}
+		}
+
+		prev: rune
+		for r in btree_iter(&iter) {
+			if iter.offset > max(selection.anchor, selection.cursor) {
+				if is_word_class(r) != is_word_class(prev) {
+					strings.write_string(&b, "\\b")
+				}
+				break
+			}
+			switch r {
+			case '{', '}', '(', ')', '^', '|', '*', '+', '?', '[', ']', '.', '$':
+				strings.write_string(&b, "\\")
+			}
+			strings.write_escaped_rune(&b, r, '\\')
+			prev = r
+		}
+
+		s := strings.to_string(b)
+
+		history := &editor.prompt.history[.Search]
+		if len(history) != 0 && history[len(history) - 1] == s {
+			break
+		}
+		append(history, strings.clone(s, vmem.arena_allocator(&editor.prompt.arena)))
+	}
+}
+
+selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, motion: Selection_Motion, primary: bool) {
 	vertical_move: bool
 	defer if !vertical_move {
 		selection.target_cursor = selection.cursor
@@ -399,27 +548,6 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 		position.line   += buffer.visible_lines
 		vertical_move    = position_to_offset_normalized(buffer, position, true, selection)
 		selection.anchor = selection.cursor
-
-	case .View_Half_Page_Up:
-		primary or_break
-
-		buffer.scroll -= buffer.visible_lines / 2
-		vertical_move  = true
-	case .View_Half_Page_Down:
-		primary or_break
-
-		buffer.scroll += buffer.visible_lines / 2
-		vertical_move  = true
-	case .View_Page_Up:
-		primary or_break
-
-		buffer.scroll -= buffer.visible_lines
-		vertical_move  = true
-	case .View_Page_Down:
-		primary or_break
-
-		buffer.scroll += buffer.visible_lines
-		vertical_move  = true
 
 	case .Go_To_Matching:
 		iter  := btree_iterator(&buffer.btree, offset = selection.cursor)
@@ -564,7 +692,7 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 		}
 
 	case .Match_In_Curly, .Match_In_Paren, .Match_In_Bracket, .Match_In_Angled, .Match_In_Quote, .Match_In_Single_Quote:
-		motion_apply(editor, buffer, selection, motion + .Match_Around_Paren - .Match_In_Paren, primary)
+		selection_motion_apply(editor, buffer, selection, motion + .Match_Around_Paren - .Match_In_Paren, primary)
 		selection.cursor -= 1
 		selection.anchor += 1
 
@@ -868,95 +996,6 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 
 		selection.cursor = iter.offset
 
-	case .Search_Next:
-		history := editor.prompt.history[.Search]
-		if len(history) == 0 {
-			break
-		}
-		regex_search(editor, buffer, history[len(history) - 1])
-	case .Search_Previous:
-		history := editor.prompt.history[.Search]
-		if len(history) == 0 {
-			break
-		}
-		regex_search_reverse(editor, buffer, history[len(history) - 1])
-	case .Set_Search:
-		primary or_break
-
-		start := min(selection.anchor, selection.cursor)
-		end   := max(selection.anchor, selection.cursor)
-		b     := strings.builder_make(0, int(end - start), context.temp_allocator)
-		iter  := btree_iterator(&buffer.btree, offset = min(selection.anchor, selection.cursor))
-
-		@(require_results)
-		is_word_class :: #force_inline proc "contextless" (r: rune) -> bool {
-			switch r {
-			case '0'..='9', 'A'..='Z', '_', 'a'..='z':
-				return true
-			case:
-				return false
-			}
-		}
-
-		if prev, ok := btree_iter(&iter, back = true); ok {
-			_, _      = btree_iter(&iter)
-			first, _ := btree_iter(&iter)
-			_, _      = btree_iter(&iter, back = true)
-
-			if is_word_class(first) != is_word_class(prev) {
-				strings.write_string(&b, "\\b")
-			}
-		}
-
-		prev: rune
-		for r in btree_iter(&iter) {
-			if iter.offset > max(selection.anchor, selection.cursor) {
-				if is_word_class(r) != is_word_class(prev) {
-					strings.write_string(&b, "\\b")
-				}
-				break
-			}
-			switch r {
-			case '{', '}', '(', ')', '^', '|', '*', '+', '?', '[', ']', '.', '$':
-				strings.write_string(&b, "\\")
-			}
-			strings.write_escaped_rune(&b, r, '\\')
-			prev = r
-		}
-
-		s := strings.to_string(b)
-
-		history := &editor.prompt.history[.Search]
-		if len(history) != 0 && history[len(history) - 1] == s {
-			break
-		}
-		append(history, strings.clone(s, vmem.arena_allocator(&editor.prompt.arena)))
-	case .Search:
-		strings.builder_reset(&editor.prompt.input)
-		editor.mode        = .Prompt
-		editor.prompt.mode = .Search
-	case .Command:
-		strings.builder_reset(&editor.prompt.input)
-		editor.mode        = .Prompt
-		editor.prompt.mode = .Command
-
-	case .Search_Global:
-		picker_open(editor, .Global_Search)
-	case .Search_Symbols:
-		picker_open(editor, .Symbols)
-	case .Command_Palette:
-		picker_open(editor, .Commands)
-
-	case .Save:
-		unimplemented()
-	case .Save_As:
-		unimplemented()
-
-	case .Open_File:
-		picker_open(editor, .Files_Recursive)
-	case .Close_File:
-		unimplemented()
-
 	case .Case_Swap:
 		unimplemented()
 	case .Case_To_Lower:
@@ -1136,14 +1175,6 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, mo
 			buffer_insert(editor, buffer, selection.cursor, ' ')
 		}
 
-	case .Show_Hover_Information:
-		primary or_break
-		lsp_get_hover_information(editor, buffer)
-	case .Go_To_Definition:
-		primary or_break
-		lsp_go_to_definition(editor, buffer)
-	case .Show_Code_Actions:
-		unimplemented()
 	case .Collapse_Selection:
 		selection.anchor = selection.cursor
 	case .Keep_Primary_Selection:

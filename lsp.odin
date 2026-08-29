@@ -10,8 +10,6 @@ import os      "core:os"
 import strings "core:strings"
 import vmem    "core:mem/virtual"
 
-Uri :: distinct string
-
 LSP_Error :: union #shared_nil {
 	os.Error,
 	json.Error,
@@ -128,14 +126,14 @@ LSP_Position :: struct {
 
 Location :: struct {
 	uri:   Uri,
-	range: Range,
+	range: LSP_Range,
 }
 
 Location_Link :: struct {
-	originSelectionRange: Range,
+	originSelectionRange: LSP_Range,
 	targetUri:            Uri,
-	targetRange:          Range,
-	targetSelectionRange: Range,
+	targetRange:          LSP_Range,
+	targetSelectionRange: LSP_Range,
 }
 
 Fused_Location :: struct {
@@ -143,12 +141,12 @@ Fused_Location :: struct {
 	using _: Location,
 }
 
-Range :: struct {
+LSP_Range :: struct {
 	start, end: LSP_Position,
 }
 
 LSP_Diagnostic :: struct {
-	range:    Range,
+	range:    LSP_Range,
 	message:  string,
 	code:     string,
 	severity: Maybe(Diagnostic_Severity),
@@ -225,28 +223,6 @@ Text_Document_Item :: struct {
 	text: string,
 }
 
-@(require_results)
-uri_from_path :: proc(path: string, allocator: runtime.Allocator) -> (uri: Uri, ok: bool) {
-	abs, err := os.get_absolute_path(path, context.temp_allocator)
-	if err != nil {
-		return
-	}
-	when ODIN_OS == .Windows {
-		if colon := strings.index(abs, ":"); colon != -1 {
-			abs = abs[colon + 1:]
-		}
-	}
-	when os.Path_Separator != '/' {
-		abs = os.replace_path_separators(abs, '/', context.temp_allocator)
-	}
-	return Uri(fmt.aprintf("file://%v", abs, allocator = allocator)), true
-}
-
-@(require_results)
-uri_clone :: proc(uri: Uri, allocator: runtime.Allocator) -> Uri {
-	return Uri(strings.clone(string(uri), allocator))
-}
-
 Did_Save_Text_Document_Params :: struct {
 	textDocument: Text_Document_Identifier,
 	text:         Maybe(string),
@@ -293,7 +269,7 @@ Text_Document_Content_Change_Event :: struct {
 	/**
 	 * The range of the document that changed.
 	 */
-	range: Range,
+	range: LSP_Range,
 
 	/**
 	 * The new text for the provided range.
@@ -371,7 +347,10 @@ lsp_go_to_definition :: proc(editor: ^Editor, buffer: ^Buffer) {
 		}
 
 		if location.uri != editor.buffer.uri {
-			path := strings.trim_prefix(string(location.uri), "file://")
+			path, ok := uri_to_path(location.uri, context.temp_allocator)
+			if !ok {
+				return nil
+			}
 			buffer_destroy(&editor.buffer)
 			buffer_init(editor, &editor.buffer, path, context.allocator)
 		}
