@@ -88,24 +88,51 @@ Diagnostic :: struct {
 	message, code: string,
 }
 
-Buffer :: struct {
-	path:              string,
-	uri:               Uri,
-	btree:             BTree,
-	selections:        [dynamic]Selection,
-	primary:           int,
-	scroll:            int,
-	scroll_anim:       Animation(f32),
-	visible_lines:     int,
+Buffer_View :: struct {
+	using buffer: ^Buffer,
 
+	selections:    [dynamic]Selection,
+	primary:       int,
+	scroll:        int,
+	scroll_anim:   Animation(f32),
+	visible_lines: int,
+}
+
+Buffer :: struct {
+	path:              Normalized_Path,
+	btree:             BTree,
+
+	uri:               Uri,
 	language:          string,
 	diagnostics:       []Diagnostic,
 	diagnostics_arena: vmem.Arena,
 	version:           int,
 }
 
-buffer_init :: proc(editor: ^Editor, buffer: ^Buffer, path: string, allocator: runtime.Allocator, language: string = "") {
-	data := os.read_entire_file(path, context.temp_allocator) or_else { '\n', }
+file_open :: proc(editor: ^Editor, path: Normalized_Path) {
+	defer editor.window_tree = &editor.buffer
+
+	editor.mode = .Normal
+	for b in editor.buffers {
+		if b.path == path {
+			editor.buffer = {
+				selections = make([dynamic]Selection, 1, context.allocator),
+				buffer     = b,
+			}
+			return
+		}
+	}
+
+	editor.buffer = {
+		selections = make([dynamic]Selection, 1, context.allocator),
+		buffer     = new(Buffer),
+	}
+	append(&editor.buffers, editor.buffer)
+	buffer_init(editor, editor.buffer, path)
+}
+
+buffer_init :: proc(editor: ^Editor, buffer: ^Buffer, path: Normalized_Path, language: string = "") {
+	data := os.read_entire_file(string(path), context.temp_allocator) or_else { '\n', }
 	b    := strings.builder_make(0, len(data), context.temp_allocator)
 	// iterating byte-wise is fine here
 	for x in data {
@@ -117,32 +144,11 @@ buffer_init :: proc(editor: ^Editor, buffer: ^Buffer, path: string, allocator: r
 	if len(data) == 0 || data[len(data) - 1] != '\n' {
 		strings.write_byte(&b, '\n')
 	}
-	buffer_init_with_data(editor, buffer, path, strings.to_string(b), allocator, language)
+	buffer_init_with_data(editor, buffer, path, strings.to_string(b), language)
 }
 
-@(require_results)
-normalize_path :: proc(path: string, allocator: runtime.Allocator) -> string {
-	path := path
-	if !os.is_absolute_path(path) {
-		path = os.get_absolute_path(path, context.temp_allocator) or_else panic("")
-	}
-	when os.Path_Separator != '/' {
-		path = os.replace_path_separators(path, '/', allocator) or_else panic("Failed to replace path separators")
-	}
-	self     := os.get_working_directory(context.temp_allocator) or_else panic("")
-	relative := os.get_relative_path(self, path, allocator) or_else panic("")
-	if !strings.has_prefix(relative, "..") {
-		path = relative
-	} else {
-		path = strings.clone(path)
-		delete(relative)
-	}
-
-	return path
-}
-
-buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path, data: string, allocator: runtime.Allocator, language: string = "") {
-	path := normalize_path(path, allocator)
+buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path: Normalized_Path, data: string, language: string = "") {
+	path := path_clone(path, context.allocator)
 	log.infof("Opening file '%s'", path)
 
 	language := language
@@ -151,10 +157,9 @@ buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path, data: stri
 	}
 
 	buffer^ = {
-		selections = make([dynamic]Selection, 1, allocator),
 		path       = path,
-		uri        = uri_from_path(path, allocator) or_else panic(""),
-		btree      = btree_build(string(data), allocator, editor.config.tab_width),
+		uri        = uri_from_path(path, context.allocator),
+		btree      = btree_build(string(data), context.allocator, editor.config.tab_width),
 		language   = language,
 	}
 	err := vmem.arena_init_growing(&buffer.diagnostics_arena)
@@ -166,9 +171,9 @@ buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path, data: stri
 }
 
 @(require_results)
-get_language_from_extension :: proc(path: string) -> string {
+get_language_from_extension :: proc(path: $S/string) -> string {
 	extension := path
-	if dot := strings.last_index_byte(extension, '.'); dot != -1 {
+	if dot := strings.last_index_byte(string(extension), '.'); dot != -1 {
 		extension = extension[dot + 1:]
 	}
 
@@ -214,8 +219,7 @@ editor_get_lsp_server :: proc(editor: ^Editor, language: string) -> ^LSP_Server 
 buffer_destroy :: proc(buffer: ^Buffer) {
 	vmem.arena_destroy(&buffer.diagnostics_arena)
 	btree_destroy(buffer.btree)
-	delete(buffer.selections)
-	delete(buffer.path)
+	delete(string(buffer.path))
 	delete(string(buffer.uri))
 }
 
@@ -237,12 +241,24 @@ Leader :: struct {
 	arena:       vmem.Arena,
 }
 
+Multi_Window :: struct {
+	children: [dynamic]Window,
+	vertical: bool,
+}
+
+Window :: union {
+	Multi_Window,
+	^Buffer_View,
+}
+
 Editor :: struct {
 	backend:          ^Backend,
 
 	mode:             Mode,
 
-	buffer:           Buffer,
+	window_tree:      Window,
+	buffers:          [dynamic]^Buffer,
+	buffer:           Buffer_View,
 
 	new_selections:   [dynamic]New_Selection,
 
@@ -276,7 +292,7 @@ Range :: struct {
 
 Jumplist_Entry :: struct {
 	using range: Range,
-	path:        string,
+	path:        Normalized_Path,
 	content:     string,
 }
 
@@ -361,6 +377,11 @@ main :: proc() {
 			free(lsp)
 		}
 		delete(editor.language_servers)
+		for b in editor.buffers {
+			buffer_destroy(b)
+			free(b)
+		}
+		delete(editor.buffers)
 		vmem.arena_destroy(&editor.prompt.arena)
 		vmem.arena_destroy(&editor.leader.arena)
 		delete(editor.new_selections)
@@ -385,8 +406,7 @@ main :: proc() {
 	}
 	defer config_destroy(&editor.config)
 
-	buffer_init(&editor, &editor.buffer, "test/test.odin", context.allocator)
-	defer buffer_destroy(&editor.buffer)
+	file_open(&editor, "test/test.odin")
 
 	last_print_time    := time.now()
 	frames_since_print := 0
@@ -437,16 +457,16 @@ main :: proc() {
 					switch input_line_handle_event(&editor.picker.input, e) {
 					case .None:
 						#partial switch e.key {
-						case .Down, .Tab:
-							editor.picker.active += 1
-							if editor.picker.active >= editor.picker.matching {
-								editor.picker.active = 0
+						case .Tab:
+							if .Shift in e.modifiers {
+								picker_focus_prev(&editor)
+							} else {
+								picker_focus_next(&editor)
 							}
+						case .Down:
+							picker_focus_next(&editor)
 						case .Up:
-							editor.picker.active -= 1
-							if editor.picker.active < 0 {
-								editor.picker.active = editor.picker.matching - 1
-							}
+							picker_focus_prev(&editor)
 						}
 					case .Submit:
 						picker_submit(&editor)
@@ -454,6 +474,7 @@ main :: proc() {
 					case .Exit:
 						editor.mode = .Normal
 					case .Change:
+						picker_update(&editor)
 					}
 					break
 				}
@@ -536,7 +557,7 @@ main :: proc() {
 			primary_position := btree_offset_to_position(&editor.buffer.btree, primary.cursor)
 			if primary_position.line < editor.buffer.scroll + 5 || primary_position.line > editor.buffer.scroll + editor.buffer.visible_lines - 5 {
 				primary_position.line -= prev_scroll - editor.buffer.scroll
-				_                      = position_to_offset_normalized(&editor.buffer, primary_position, true, primary)
+				_                      = position_to_offset_normalized(editor.buffer, primary_position, true, primary)
 				primary.anchor         = primary.cursor
 			}
 		}
@@ -583,25 +604,33 @@ Rect :: struct {
 }
 
 @(require_results)
-rect_from_min_max :: proc(min, max: [2]f32) -> Rect {
+rect_from_min_max :: #force_inline proc "contextless" (min, max: [2]f32) -> Rect {
 	return { min = min, max = max,  }
 }
 
 @(require_results)
-rect_center :: proc(rect: Rect) -> [2]f32 {
+rect_center :: #force_inline proc "contextless" (rect: Rect) -> [2]f32 {
 	return (rect.min + rect.max) / 2
 }
 
 @(require_results)
-rect_size :: proc(rect: Rect) -> [2]f32 {
+rect_size :: #force_inline proc "contextless" (rect: Rect) -> [2]f32 {
 	return rect.max - rect.min
 }
 
 @(require_results)
-rect_inflate :: proc(rect: Rect, v: [2]f32) -> Rect {
+rect_inflate :: #force_inline proc "contextless" (rect: Rect, v: [2]f32) -> Rect {
 	return {
 		min = rect.min - v,
 		max = rect.max + v,
+	}
+}
+
+@(require_results)
+rect_round :: #force_inline proc "contextless" (rect: Rect) -> Rect {
+	return {
+		min = la.round(rect.min),
+		max = la.round(rect.max),
 	}
 }
 
@@ -635,11 +664,30 @@ animation_set_target :: proc(anim: ^Animation($T), target: T) {
 	anim.t      = 0
 }
 
+window_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, window: Window, delta_time: f32, rect: Rect) {
+	switch w in window {
+	case Multi_Window:
+		n           := len(w.children)
+		axis        := int(w.vertical)
+		size        := rect_size(rect)
+		per_window  := (size[axis] - f32(n - 1) * editor.config.padding) / f32(n)
+		origin      := rect.min
+		extent      := size
+		extent[axis] = per_window
+		for &w in w.children {
+			window_render(editor, commands, w, delta_time, { min = origin, max = origin + extent, })
+			origin[axis] += per_window + editor.config.padding
+		}
+	case ^Buffer_View:
+		buffer_render(editor, w, commands, delta_time, rect_round(rect))
+	}
+}
+
 render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f32, screen_size: [2]f32) {
-	padding: f32 = 10
+	padding           := editor.config.padding
 	status_bar_height := FONT_HEIGHT + padding * 2 + 2
 
-	buffer_render(editor, &editor.buffer, commands, delta_time, { min = padding, max = screen_size - { padding, status_bar_height, }, }, padding)
+	window_render(editor, commands, editor.window_tree, delta_time, { min = padding, max = screen_size - { padding, status_bar_height, }, })
 
 	draw_rect(commands,
 		offset = { 0, screen_size.y - FONT_HEIGHT - padding * 2, },
@@ -824,7 +872,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 				draw_text(
 					&editor.font,
 					commands,
-					" (case insensitive)",
+					" (Aa)",
 					editor.config.theme[.Ui_Text].fg,
 					{ x + w, screen_size.y - padding, },
 				)
@@ -951,7 +999,7 @@ editor_set_popup_text :: proc(editor: ^Editor, format: string, args: ..any) {
 	fmt.sbprintf(&editor.popup_text, format, ..args)
 }
 
-regex_search :: proc(editor: ^Editor, buffer: ^Buffer, pattern_string: string) -> (ok: bool) {
+regex_search :: proc(editor: ^Editor, buffer: ^Buffer_View, pattern_string: string) -> (ok: bool) {
 	pattern := regex_create(editor, pattern_string) or_return
 	defer if !ok {
 		editor_set_status(editor, "Not found")
@@ -998,7 +1046,7 @@ regex_search :: proc(editor: ^Editor, buffer: ^Buffer, pattern_string: string) -
 	return true
 }
 
-regex_search_reverse :: proc(editor: ^Editor, buffer: ^Buffer, pattern_string: string) -> (ok: bool) {
+regex_search_reverse :: proc(editor: ^Editor, buffer: ^Buffer_View, pattern_string: string) -> (ok: bool) {
 	pattern := regex_create(editor, pattern_string, { .Reverse_Pattern, }) or_return
 	defer if !ok {
 		editor_set_status(editor, "Not found")
@@ -1220,11 +1268,10 @@ draw_rect :: proc(
 
 buffer_render :: proc(
 	editor:    ^Editor,
-	buffer:    ^Buffer,
+	buffer:    ^Buffer_View,
 	commands:  ^[dynamic]Draw_Command,
 	delta_time: f32,
 	rect:       Rect,
-	padding:    f32,
 ) {
 	if rect.max.x <= rect.min.x || rect.max.y <= rect.min.y {
 		return
@@ -1243,8 +1290,8 @@ buffer_render :: proc(
 	}
 
 	line_digits  := int(la.ceil(la.log10(1 + f32(buffer.btree.lines))))
-	lines_width  := cell_size.x * f32(line_digits) + padding
-	gutter_width := lines_width + padding + 1 + padding
+	lines_width  := cell_size.x * f32(line_digits) + editor.config.padding
+	gutter_width := lines_width + editor.config.padding + 1 + editor.config.padding
 
 	buffer.visible_lines = max(1, int(la.floor(height / cell_size.y)))
 
@@ -1534,10 +1581,10 @@ buffer_render :: proc(
 			blur_radius   = f32(editor.config.blur_strength),
 		)
 
-		line_height := FONT_HEIGHT + padding
+		line_height := FONT_HEIGHT + editor.config.padding
 		width: f32
 
-		text_base := popup_rect.min + { padding, padding + FONT_HEIGHT, }
+		text_base := popup_rect.min + { editor.config.padding, editor.config.padding + FONT_HEIGHT, }
 
 		x, y: f32
 		indentation: f32
@@ -1565,9 +1612,11 @@ buffer_render :: proc(
 				y    += line_height
 				x     = indentation
 			case .List:
-				width = max(width, x)
-				y    += line_height
-				x     = indentation
+				if ev_type == .Exit {
+					width = max(width, x)
+					y    += line_height
+					x     = indentation
+				}
 			case .Item:
 				if ev_type == .Enter {
 					RADIUS :: 2
@@ -1654,7 +1703,7 @@ buffer_render :: proc(
 
 				x = indentation
 			case .Thematic_Break:
-				draw_rect(commands, { 0, y - FONT_HEIGHT / 2 - 1, } + text_base, { popup_rect.max.x - popup_rect.min.x - padding * 2, 1, }, editor.config.theme[.Ui_Text].fg)
+				draw_rect(commands, { 0, y - FONT_HEIGHT / 2 - 1, } + text_base, { popup_rect.max.x - popup_rect.min.x - editor.config.padding * 2, 1, }, editor.config.theme[.Ui_Text].fg)
 
 				width = max(width, x)
 				y    += line_height
@@ -1693,7 +1742,7 @@ buffer_render :: proc(
 
 		target: Rect = {
 			min = rect_base,
-			max = rect_base + { width, y - padding, } + padding * 2,
+			max = rect_base + { width, y - editor.config.padding, } + editor.config.padding * 2,
 		}
 		if width == 0 {
 			center    := rect_center(target)
@@ -1782,10 +1831,10 @@ input_line_reset :: proc(input: ^Input_Line) {
 }
 
 input_line_render :: proc(
-	editor:   ^Editor,
-	commands: ^[dynamic]Draw_Command,
-	input:    ^Input_Line,
-	position: [2]f32,
+	editor:     ^Editor,
+	commands:   ^[dynamic]Draw_Command,
+	input:      ^Input_Line,
+	position:   [2]f32,
 	delta_time: f32,
 	default := "",
 ) -> (width: f32) {
@@ -1801,7 +1850,7 @@ input_line_render :: proc(
 		position,
 	)
 	animation_set_target(&input.cursor_anim, width)
-	anim := animation_update(&input.cursor_anim, delta_time, editor.config.cursor_animation_speed)
+	anim   := animation_update(&input.cursor_anim, delta_time, editor.config.cursor_animation_speed)
 	height := (f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale
 	draw_rect(commands,
 		offset = position + { anim, -(height + f32(editor.font.descender) * editor.font.scale), },

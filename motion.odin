@@ -132,6 +132,7 @@ Motion :: enum {
 	Search_Symbols,
 	Command_Palette,
 	Diagnostics,
+	Buffers,
 
 	Save,
 	Save_As,
@@ -263,13 +264,13 @@ parse_motion :: proc(s: string) -> (motion: Action, ok: bool) {
 	return primary_motion_from_name_table[name]
 }
 
-argument_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, motion: Argument_Motion, arg: rune) {
+argument_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, motion: Argument_Motion, arg: rune) {
 	for &selection in buffer.selections {
 		argument_motion_apply_single(editor, buffer, &selection, motion, arg)
 	}
 }
 
-argument_motion_apply_single :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, motion: Argument_Motion, arg: rune) {
+argument_motion_apply_single :: proc(editor: ^Editor, buffer: ^Buffer_View, selection: ^Selection, motion: Argument_Motion, arg: rune) {
 	vertical_move: bool
 	defer if !vertical_move {
 		selection.target_cursor = selection.cursor
@@ -330,7 +331,7 @@ argument_motion_apply_single :: proc(editor: ^Editor, buffer: ^Buffer, selection
 	}
 }
 
-buffer_remove :: proc(buffer: ^Buffer, start, end: Offset) {
+buffer_remove :: proc(buffer: ^Buffer_View, start, end: Offset) {
 	btree_remove_range(&buffer.btree, start, end)
 	for &selection in buffer.selections {
 		if selection.cursor >= start {
@@ -347,7 +348,7 @@ buffer_insert :: proc {
 	buffer_insert_string,
 }
 
-_buffer_insert :: proc(buffer: ^Buffer, arg: $T, offset: Offset) -> Offset {
+_buffer_insert :: proc(buffer: ^Buffer_View, arg: $T, offset: Offset) -> Offset {
 	n := btree_insert(&buffer.btree, offset, arg)
 	for &selection in buffer.selections {
 		if selection.cursor >= offset {
@@ -368,7 +369,7 @@ _buffer_insert :: proc(buffer: ^Buffer, arg: $T, offset: Offset) -> Offset {
 	return n
 }
 
-buffer_insert_rune   :: proc(editor: ^Editor, buffer: ^Buffer, offset: Offset, r: rune)   -> Offset {
+buffer_insert_rune   :: proc(editor: ^Editor, buffer: ^Buffer_View, offset: Offset, r: rune)   -> Offset {
 	buf, n := utf8.encode_rune(r)
 	buffer.version += 1
 	if lsp := editor_get_lsp_server(editor, buffer.language); lsp != nil {
@@ -377,7 +378,7 @@ buffer_insert_rune   :: proc(editor: ^Editor, buffer: ^Buffer, offset: Offset, r
 	return _buffer_insert(buffer, r, offset)
 }
 
-buffer_insert_string :: proc(editor: ^Editor, buffer: ^Buffer, offset: Offset, s: string) -> Offset {
+buffer_insert_string :: proc(editor: ^Editor, buffer: ^Buffer_View, offset: Offset, s: string) -> Offset {
 	buffer.version += 1
 	if lsp := editor_get_lsp_server(editor, buffer.language); lsp != nil {
 		lsp_apply_change(lsp, buffer, offset, offset, s, buffer.version)
@@ -405,7 +406,7 @@ position_to_offset_normalized :: proc(buffer: ^Buffer, position: Position, verti
 	return vertical_move
 }
 
-motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, motion: Motion) {
+motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, motion: Motion) {
 	switch motion {
 	case .View_Line_Up:
 		buffer.scroll -= editor.repeat_count
@@ -435,6 +436,8 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, motion: Motion) {
 		picker_open(editor, .Commands)
 	case .Diagnostics:
 		picker_open(editor, .Diagnostics)
+	case .Buffers:
+		picker_open(editor, .Buffers)
 
 	case .Save:
 		unimplemented()
@@ -448,7 +451,7 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, motion: Motion) {
 	}
 }
 
-primary_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, motion: Primary_Motion) {
+primary_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection: ^Selection, motion: Primary_Motion) {
 	switch motion {
 	case .Show_Hover_Information:
 		lsp_get_hover_information(editor, buffer)
@@ -521,7 +524,7 @@ primary_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selec
 	}
 }
 
-selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Selection, motion: Selection_Motion, primary: bool) {
+selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection: ^Selection, motion: Selection_Motion, primary: bool) {
 	vertical_move: bool
 	defer if !vertical_move {
 		selection.target_cursor = selection.cursor
@@ -1135,7 +1138,7 @@ selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer, selection: ^Sel
 			}
 		}
 
-		indent :: proc(editor: ^Editor, buffer: ^Buffer, offset: Offset, n: int) {
+		indent :: proc(editor: ^Editor, buffer: ^Buffer_View, offset: Offset, n: int) {
 			N :: BTREE_LEAF_SIZE
 			@(static, rodata)
 			tab_buf: [N]u8 = '\t'

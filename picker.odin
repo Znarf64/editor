@@ -12,6 +12,11 @@ Picker_Symbol :: struct {
 	location: Location,
 }
 
+Picker_File :: struct {
+	path: Normalized_Path,
+	type: os.File_Type,
+}
+
 Picker :: struct {
 	mode:        Picker_Mode,
 	input:       Input_Line,
@@ -20,12 +25,14 @@ Picker :: struct {
 	matching:    int,
 	arena:       vmem.Arena,
 
-	files:       []os.File_Info,
+	active_anim: Animation(f32),
+
+	files:       []Picker_File,
 	symbols:     []Picker_Symbol,
 	diagnostics: []Diagnostic,
 
 	rect:        Animation(Rect),
-	rect2:       Animation(Rect),
+	// preview_rect: Animation(Rect),
 }
 
 Picker_Mode :: enum {
@@ -35,6 +42,7 @@ Picker_Mode :: enum {
 	Symbols,
 	Diagnostics,
 	Commands,
+	Buffers,
 }
 
 Picker_Item :: struct {
@@ -66,9 +74,9 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 				break
 			}
 		}
-		editor.picker.files, err = os.read_all_directory_by_path(path, allocator)
-		for &file in editor.picker.files {
-			file.fullpath = normalize_path(file.fullpath, allocator)
+		files := os.read_all_directory_by_path(path, context.temp_allocator) or_break
+		for file, i in files {
+			editor.picker.files[i].path = normalize_path(file.fullpath, allocator)
 		}
 		if err != nil {
 			editor_set_status(editor, "Failed to read directory: %v", err)
@@ -93,7 +101,7 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 		w := os.walker_create(path)
 		defer os.walker_destroy(&w)
 
-		files := make([dynamic]os.File_Info, allocator)
+		files := make([dynamic]Picker_File, allocator)
 		clear(&editor.picker.items)
 		for info in os.walker_walk(&w) {
 			_ = os.walker_error(&w) or_break
@@ -107,17 +115,19 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 				continue
 			}
 
-			info         := os.file_info_clone(info, allocator) or_break
-			info.fullpath = normalize_path(info.fullpath, allocator)
-			info.name     = strings.trim_prefix(info.fullpath, path)
-			info.name     = strings.trim_prefix(info.name, "/")
+			name := strings.trim_prefix(info.fullpath, path)
+			name  = strings.trim_prefix(name, "/")
+			name  = strings.clone(name, allocator)
 
 			append(&editor.picker.items, Picker_Item {
-				name = info.name,
+				name = name,
 				id   = len(files),
 			})
 
-			append(&files, info)
+			append(&files, Picker_File {
+				path = normalize_path(info.fullpath, allocator),
+				type = info.type,
+			})
 		}
 		editor.picker.files = files[:]
 	case .Symbols:
@@ -163,12 +173,34 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 
 		editor.picker.diagnostics = diagnostics
 	case .Commands:
+	case .Buffers:
+		resize(&editor.picker.items, len(editor.buffers))
+		for b, i in editor.buffers {
+			editor.picker.items[i] = {
+				name = string(b.path),
+				id   = i,
+			}
+		}
 	}
 
 	editor.mode        = .Picker
 	editor.picker.mode = mode
 
 	picker_update(editor)
+}
+
+picker_focus_next :: proc(editor: ^Editor) {
+	editor.picker.active += 1
+	if editor.picker.active >= editor.picker.matching {
+		editor.picker.active = 0
+	}
+}
+
+picker_focus_prev :: proc(editor: ^Editor, n := 1) {
+	editor.picker.active -= 1
+	if editor.picker.active < 0 {
+		editor.picker.active = editor.picker.matching - 1
+	}
 }
 
 picker_update :: proc(editor: ^Editor) {
@@ -203,27 +235,24 @@ picker_submit :: proc(editor: ^Editor) {
 		return
 	}
 
-	active := picker.items[picker.active]
+	active := picker.items[picker.active].id
 
 	switch picker.mode {
 	case .Global_Search:
 		editor.mode = .Normal
 	case .Files, .Files_Recursive:
-		file := picker.files[active.id]
+		file := picker.files[active]
 		if file.type == .Directory {
-			picker_open(editor, .Files, strings.clone(file.fullpath, context.temp_allocator))
+			picker_open(editor, .Files, strings.clone(string(file.path), context.temp_allocator))
 		} else {
-			buffer_destroy(&editor.buffer)
-			buffer_init(editor, &editor.buffer, file.fullpath, context.allocator)
-			editor.mode = .Normal
+			file_open(editor, file.path)
 		}
 	case .Symbols:
-		symbol := picker.symbols[active.id]
+		symbol := picker.symbols[active]
 
 		if symbol.location.uri != editor.buffer.uri {
 			path := uri_to_path(symbol.location.uri, context.temp_allocator) or_break
-			buffer_destroy(&editor.buffer)
-			buffer_init(editor, &editor.buffer, path, context.allocator)
+			file_open(editor, normalize_path(path, context.temp_allocator))
 		}
 
 		if symbol.location.range.end.character > 0 {
@@ -241,7 +270,7 @@ picker_submit :: proc(editor: ^Editor) {
 
 		editor.mode = .Normal
 	case .Diagnostics:
-		diagnostic := picker.diagnostics[active.id]
+		diagnostic := picker.diagnostics[active]
 
 		editor.buffer.primary = 0
 		resize(&editor.buffer.selections, 1)
@@ -252,6 +281,11 @@ picker_submit :: proc(editor: ^Editor) {
 		editor.mode = .Normal
 	case .Commands:
 		editor.mode = .Normal
+	case .Buffers:
+		editor.buffer = {
+			selections = make([dynamic]Selection, 1, context.allocator),
+			buffer     = editor.buffers[active],
+		}
 	}
 }
 
@@ -348,7 +382,10 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 
 		pattern := strings.to_string(picker.input.buffer)
 
-		x += draw_text(&editor.font, commands, ">", editor.config.theme[.Ui_Focus].fg, { x, y + line_height * f32(picker.active), }) + padding
+		animation_set_target(&picker.active_anim, f32(picker.active))
+		active := animation_update(&picker.active_anim, delta_time, editor.config.cursor_animation_speed)
+
+		x += draw_text(&editor.font, commands, ">", editor.config.theme[.Ui_Focus].fg, { x, y + line_height * active, }) + padding
 
 		has_upper: bool
 		for r in pattern {

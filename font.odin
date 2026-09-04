@@ -68,7 +68,9 @@ measure_multiline_text :: proc(font: ^Font, text: string) -> (w, h: f32) {
 }
 
 @(require_results)
-measure_text :: proc(font: ^Font, text: string) -> (w: f32) {
+measure_text :: proc(font: ^Font, text: $S/string) -> (w: f32) {
+	text := string(text)
+
 	for r in text {
 		w += get_glyph_info(font, r).x_advance
 	}
@@ -76,7 +78,9 @@ measure_text :: proc(font: ^Font, text: string) -> (w: f32) {
 	return w
 }
 
-draw_text :: proc(font: ^Font, commands: ^[dynamic]Draw_Command, text: string, color: [4]f32, position: [2]f32) -> (width: f32) {
+draw_text :: proc(font: ^Font, commands: ^[dynamic]Draw_Command, text: $S/string, color: [4]f32, position: [2]f32) -> (width: f32) {
+	text := string(text)
+
 	line_height := la.round(((f32(font.ascender) - f32(font.descender)) * font.scale))
 	pos := position
 	for r in text {

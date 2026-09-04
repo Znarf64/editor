@@ -50,6 +50,7 @@ Theme :: [Style_Key]Style
 
 Config :: struct {
 	arena:                  vmem.Arena,
+
 	enable_animations:      bool,
 	blur_strength:          int,
 	relative_line_numbers:  bool,
@@ -58,6 +59,8 @@ Config :: struct {
 	popup_animation_speed:  f32,
 	tab_width:              int,
 	scroll_scale:           f32,
+	padding:                f32,
+
 	theme:                  Theme,
 	keybinds:               [Mode]Keybinds,
 	styles:                 map[string]Style_Key,

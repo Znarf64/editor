@@ -34,7 +34,7 @@ LSP_Server :: struct {
 	responses:      map[int]LSP_Response_Proc,
 	capabilities:   bit_set[LSP_Capability],
 	initialized:    bool,
-	pending_files:  map[string]struct{}, // files opened before the server is initialized
+	pending_files:  map[Normalized_Path]struct{}, // files opened before the server is initialized
 }
 
 LSP_Response_Proc :: proc(editor: ^Editor, lsp_server: ^LSP_Server, content: []byte) -> LSP_Error
@@ -76,6 +76,9 @@ lsp_init :: proc(lsp: ^LSP_Server, command: []string) -> (err: LSP_Error) {
 
 	lsp.process = os.process_start(desc) or_return
 
+	os.close(desc.stdin)
+	os.close(desc.stdout)
+
 	r: Initialize_Request_Params = {
 		clientInfo = {
 			name = "Hello",
@@ -90,9 +93,9 @@ lsp_init :: proc(lsp: ^LSP_Server, command: []string) -> (err: LSP_Error) {
 		lsp_server.initialized = true
 
 		for path in lsp_server.pending_files {
-			data := os.read_entire_file(path, context.temp_allocator) or_continue
+			data := os.read_entire_file(string(path), context.temp_allocator) or_continue
 			lsp_open_file(lsp_server, path, string(data))
-			delete(path)
+			delete(string(path))
 		}
 		delete(lsp_server.pending_files)
 		lsp_server.pending_files = {}
@@ -237,15 +240,15 @@ Text_Document_Position_Params :: struct {
 	position:     LSP_Position,
 }
 
-lsp_open_file :: proc(lsp: ^LSP_Server, path, content: string) {
+lsp_open_file :: proc(lsp: ^LSP_Server, path: Normalized_Path, content: string) {
 	if !lsp.initialized {
 		if path not_in lsp.pending_files {
-			lsp.pending_files[strings.clone(path)] = {}
+			lsp.pending_files[path_clone(path, context.allocator)] = {}
 		}
 		return
 	}
 
-	uri := uri_from_path(path, context.temp_allocator) or_else panic("failed to get file uri")
+	uri := uri_from_path(path, context.temp_allocator)
 	_ = send_notification(lsp, "textDocument/didOpen", Did_Open_Text_Document_Params {
 		textDocument = {
 			uri  = uri,
@@ -299,14 +302,14 @@ lsp_save :: proc(lsp: ^LSP_Server, buffer: ^Buffer) {
 	})
 }
 
-lsp_go_to_definition :: proc(editor: ^Editor, buffer: ^Buffer) {
+lsp_go_to_definition :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 	lsp := editor_get_lsp_server(editor, buffer.language)
 	if lsp == nil || !lsp.initialized {
 		editor_set_popup_text(editor, "no lsp server available")
 		return
 	}
 
-	uri        := uri_from_path(buffer.path, context.temp_allocator) or_else panic("failed to get file uri")
+	uri        := uri_from_path(buffer.path, context.temp_allocator)
 	cursor     := buffer.selections[buffer.primary].cursor
 	position   := btree_offset_to_position(&buffer.btree, cursor)
 	line_start := btree_line_to_offset(&buffer.btree, position.line)
@@ -351,8 +354,7 @@ lsp_go_to_definition :: proc(editor: ^Editor, buffer: ^Buffer) {
 			if !ok {
 				return nil
 			}
-			buffer_destroy(&editor.buffer)
-			buffer_init(editor, &editor.buffer, path, context.allocator)
+			file_open(editor, normalize_path(path, context.temp_allocator))
 		}
 
 		if location.range.end.character > 0 {
@@ -372,13 +374,13 @@ lsp_go_to_definition :: proc(editor: ^Editor, buffer: ^Buffer) {
 	})
 }
 
-lsp_get_hover_information :: proc(editor: ^Editor, buffer: ^Buffer) {
+lsp_get_hover_information :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 	lsp := editor_get_lsp_server(editor, buffer.language)
 	if lsp == nil || !lsp.initialized {
 		editor_set_popup_text(editor, "no lsp server available")
 		return
 	}
-	uri        := uri_from_path(buffer.path, context.temp_allocator) or_else panic("failed to get file uri")
+	uri        := uri_from_path(buffer.path, context.temp_allocator)
 	cursor     := buffer.selections[buffer.primary].cursor
 	position   := btree_offset_to_position(&buffer.btree, cursor)
 	line_start := btree_line_to_offset(&buffer.btree, position.line)

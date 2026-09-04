@@ -2,7 +2,6 @@ package editor
 
 import runtime "base:runtime"
 
-import fmt     "core:fmt"
 import os      "core:os"
 import strconv "core:strconv"
 import strings "core:strings"
@@ -11,23 +10,19 @@ import utf8    "core:unicode/utf8"
 Uri :: distinct string
 
 @(require_results)
-uri_from_path :: proc(path: string, allocator: runtime.Allocator) -> (uri: Uri, ok: bool) {
-	abs, err := os.get_absolute_path(path, context.temp_allocator)
-	if err != nil {
-		return
-	}
-	when ODIN_OS == .Windows {
-		if colon := strings.index(abs, ":"); colon != -1 {
-			abs = abs[colon + 1:]
+uri_from_path :: proc(path: Normalized_Path, allocator: runtime.Allocator) -> (uri: Uri) {
+	b := strings.builder_make(0, len(path) + 7, allocator)
+	strings.write_string(&b, "file://")
+	if !path_is_absolute(path) {
+		wd := os.get_working_directory(context.temp_allocator) or_else panic("Failed to get working directory")
+		if ODIN_OS == .Windows {
+			strings.write_string(&b, "/")
 		}
+		strings.write_string(&b, wd)
+		strings.write_string(&b, "/")
 	}
-	when os.Path_Separator != '/' {
-		abs, err = os.replace_path_separators(abs, '/', context.temp_allocator)
-		if err != nil {
-			return
-		}
-	}
-	return Uri(fmt.aprintf("file://%v", abs, allocator = allocator)), true
+	strings.write_string(&b, string(path))
+	return Uri(strings.to_string(b))
 }
 
 @(require_results)

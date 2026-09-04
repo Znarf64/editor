@@ -100,7 +100,7 @@ Action :: union {
 }
 
 // this is a bit dumb, we should just have a proper data structure to store selections
-deduplicate_selections :: proc(editor: ^Buffer) {
+deduplicate_selections :: proc(editor: ^Buffer_View) {
 	n := len(editor.selections)
 	if n <= 1 {
 		return
@@ -172,12 +172,9 @@ action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 		if editor.repeat_count == 0 {
 			editor.repeat_count = 1
 		}
-		for &selection, i in editor.buffer.selections {
-			primary_motion_apply(editor, &editor.buffer, &selection, v)
-		}
+		primary_motion_apply(editor, &editor.buffer, &editor.buffer.selections[editor.buffer.primary], v)
 	case Command:
 		command_execute(editor, v)
-		editor.repeat_count = 0
 	case Argument_Motion:
 		editor.leader.motion = v
 		strings.write_string(&editor.leader.sequence, keybind_to_string(keybind, &editor.leader.arena))
@@ -186,6 +183,7 @@ action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 		editor.leader.binds  = v.binds
 		editor.leader.active = true
 		strings.write_string(&editor.leader.sequence, keybind_to_string(keybind, &editor.leader.arena))
+		return // avoid resetting repeat count
 	case []Action:
 		for action in v {
 			action_apply(editor, action, keybind)
