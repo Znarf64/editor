@@ -133,6 +133,13 @@ Motion :: enum {
 	Command_Palette,
 	Diagnostics,
 	Buffers,
+	Jumplist,
+
+	Window_Focus_Left,
+	Window_Focus_Right,
+	Window_Focus_Above,
+	Window_Focus_Below,
+	Window_Transpose,
 
 	Save,
 	Save_As,
@@ -348,7 +355,7 @@ buffer_insert :: proc {
 	buffer_insert_string,
 }
 
-_buffer_insert :: proc(buffer: ^Buffer_View, arg: $T, offset: Offset) -> Offset {
+_buffer_insert :: proc(buffer: ^Buffer_View, arg: string, offset: Offset) -> Offset {
 	n := btree_insert(&buffer.btree, offset, arg)
 	for &selection in buffer.selections {
 		if selection.cursor >= offset {
@@ -369,19 +376,21 @@ _buffer_insert :: proc(buffer: ^Buffer_View, arg: $T, offset: Offset) -> Offset 
 	return n
 }
 
-buffer_insert_rune   :: proc(editor: ^Editor, buffer: ^Buffer_View, offset: Offset, r: rune)   -> Offset {
+buffer_insert_rune :: proc(editor: ^Editor, buffer: ^Buffer_View, offset: Offset, r: rune) -> Offset {
 	buf, n := utf8.encode_rune(r)
-	buffer.version += 1
-	if lsp := editor_get_lsp_server(editor, buffer.language); lsp != nil {
-		lsp_apply_change(lsp, buffer, offset, offset, string(buf[:n]), buffer.version)
-	}
-	return _buffer_insert(buffer, r, offset)
+	return buffer_insert_string(editor, buffer, offset, string(buf[:n]))
 }
 
 buffer_insert_string :: proc(editor: ^Editor, buffer: ^Buffer_View, offset: Offset, s: string) -> Offset {
 	buffer.version += 1
 	if lsp := editor_get_lsp_server(editor, buffer.language); lsp != nil {
 		lsp_apply_change(lsp, buffer, offset, offset, s, buffer.version)
+		for char in (lsp.capabilities.signatureHelpProvider.? or_else {}).triggerCharacters {
+			if strings.contains(s, char) {
+				lsp_get_signature_help(editor, buffer)
+				break
+			}
+		}
 	}
 	return _buffer_insert(buffer, s, offset)
 }
@@ -438,6 +447,8 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, motion: Motion) {
 		picker_open(editor, .Diagnostics)
 	case .Buffers:
 		picker_open(editor, .Buffers)
+	case .Jumplist:
+		picker_open(editor, .Jumplist)
 
 	case .Save:
 		unimplemented()
@@ -448,6 +459,17 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, motion: Motion) {
 		picker_open(editor, .Files_Recursive)
 	case .Close_File:
 		unimplemented()
+
+	case .Window_Focus_Left:
+		window_focus(editor, true, false)
+	case .Window_Focus_Right:
+		window_focus(editor, true, true)
+	case .Window_Focus_Above:
+		window_focus(editor, false, false)
+	case .Window_Focus_Below:
+		window_focus(editor, false, true)
+	case .Window_Transpose:
+		window_transpose(editor)
 	}
 }
 
@@ -456,6 +478,7 @@ primary_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection: ^
 	case .Show_Hover_Information:
 		lsp_get_hover_information(editor, buffer)
 	case .Go_To_Definition:
+		jumplist_add(editor, selection^)
 		lsp_go_to_definition(editor, buffer)
 	case .Show_Code_Actions:
 		unimplemented()
@@ -525,6 +548,18 @@ primary_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection: ^
 }
 
 selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection: ^Selection, motion: Selection_Motion, primary: bool) {
+	indent :: proc(editor: ^Editor, buffer: ^Buffer_View, offset: Offset, n: int) {
+		N :: BTREE_LEAF_SIZE
+		@(static, rodata)
+		tab_buf: [N]u8 = '\t'
+
+		n := n
+		for n > 0 {
+			buffer_insert(editor, buffer, offset, string(tab_buf[:min(n, N)]))
+			n -= N
+		}
+	}
+
 	vertical_move: bool
 	defer if !vertical_move {
 		selection.target_cursor = selection.cursor
@@ -753,9 +788,11 @@ selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection:
 		unimplemented()
 
 	case .Go_To_Line:
+		jumplist_add(editor, selection^)
 		vertical_move    = position_to_offset_normalized(buffer, { line = editor.repeat_count - 1, }, false, selection)
 		selection.anchor = selection.cursor
 	case .Go_To_File_End:
+		jumplist_add(editor, selection^)
 		vertical_move    = position_to_offset_normalized(buffer, { line = int(buffer.btree.lines) - 1, }, false, selection)
 		selection.anchor = selection.cursor
 	case .Go_To_Line_Start:
@@ -1075,22 +1112,31 @@ selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection:
 	case .Normal:
 		editor.mode = .Normal
 	case .Insert_Newline:
+		line := btree_offset_to_line(&buffer.btree, selection.cursor)
+		iter := btree_iterator(&buffer.btree, line = line)
+
+		indentation: int
+		for r in btree_iter(&iter) {
+			if r != '\t' {
+				break
+			}
+			indentation += 1
+		}
+
+		switch r := btree_get_rune(buffer.btree, btree_offset_before(&buffer.btree, selection.cursor)); r {
+		case '(', '{', '[':
+			indentation += 1
+		}
+
 		buffer_insert(editor, buffer, selection.cursor, '\n')
+		indent(editor, buffer, selection.cursor, indentation)
 	case .Insert_Tab:
 		buffer_insert(editor, buffer, selection.cursor, '\t')
 
 	case .Open_Below:
-		iter := btree_iterator(&buffer.btree, offset = selection.cursor)
-		for r in btree_iter(&iter) {
-			if r == '\n' {
-				break
-			}
-		}
-
-		buffer_insert(editor, buffer, iter.offset, '\n')
-		selection.cursor = iter.offset + 1
-		selection.anchor = selection.cursor
-
+		selection_motion_apply(editor, buffer, selection, .Go_To_Line_End,  primary)
+		selection_motion_apply(editor, buffer, selection, .Character_Right, primary)
+		selection_motion_apply(editor, buffer, selection, .Insert_Newline,  primary)
 		editor.mode = .Insert
 
 	case .Open_Above:
@@ -1135,18 +1181,6 @@ selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection:
 			}
 			if r == '\n' {
 				indent(editor, buffer, iter.offset + 1, editor.repeat_count)
-			}
-		}
-
-		indent :: proc(editor: ^Editor, buffer: ^Buffer_View, offset: Offset, n: int) {
-			N :: BTREE_LEAF_SIZE
-			@(static, rodata)
-			tab_buf: [N]u8 = '\t'
-
-			n := n
-			for n > 0 {
-				buffer_insert(editor, buffer, offset, string(tab_buf[:min(n, N)]))
-				n -= N
 			}
 		}
 	case .Outdent:

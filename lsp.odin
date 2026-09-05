@@ -17,24 +17,17 @@ LSP_Error :: union #shared_nil {
 	json.Marshal_Error,
 }
 
-LSP_Capability :: enum {
-	Hover,
-	// Definition,
-	// Rename,
-	// Format,
-	// References,
-	// Signature_Help,
-}
-
 LSP_Server :: struct {
+	language_id:    string,
 	process:        os.Process,
 	stdin, stdout: ^os.File,
 	read_buf:       [dynamic]byte,
 	request_id:     int,
 	responses:      map[int]LSP_Response_Proc,
-	capabilities:   bit_set[LSP_Capability],
+	capabilities:   Server_Capabilities,
 	initialized:    bool,
-	pending_files:  map[Normalized_Path]struct{}, // files opened before the server is initialized
+	pending_files:  map[Uri]struct{}, // files opened before the server is initialized
+	arena:          vmem.Arena,
 }
 
 LSP_Response_Proc :: proc(editor: ^Editor, lsp_server: ^LSP_Server, content: []byte) -> LSP_Error
@@ -68,6 +61,8 @@ send_notification :: proc(lsp: ^LSP_Server, name: string, params: $Params) -> (e
 
 @(require_results)
 lsp_init :: proc(lsp: ^LSP_Server, command: []string) -> (err: LSP_Error) {
+	vmem.arena_init_growing(&lsp.arena) or_else panic("Failed to create arena")
+
 	desc: os.Process_Desc = {
 		command = command,
 	}
@@ -79,36 +74,57 @@ lsp_init :: proc(lsp: ^LSP_Server, command: []string) -> (err: LSP_Error) {
 	os.close(desc.stdin)
 	os.close(desc.stdout)
 
-	r: Initialize_Request_Params = {
-		clientInfo = {
-			name = "Hello",
+	send_request(
+		lsp,
+		"initialize",
+		Initialize_Request_Params {
+			clientInfo = {
+				name = "Editor",
+			},
+			capabilities = {
+				general = {
+					positionEncodings = { "utf-8", },
+				},
+				textDocument = {
+					hover = { contentFormat = { "markdown", "plaintext", }, },
+				},
+			},
 		},
-	}
-	send_request(lsp, "initialize", r, proc(editor: ^Editor, lsp_server: ^LSP_Server, content: []byte) -> LSP_Error {
-		response: Response(Initialize_Result)
-		json.unmarshal(content, &response, allocator = context.temp_allocator) or_return
+		proc(editor: ^Editor, lsp_server: ^LSP_Server, content: []byte) -> LSP_Error {
+			allocator := vmem.arena_allocator(&lsp_server.arena)
 
-		send_notification(lsp_server, "initialized", struct{}{}) or_return
+			response: Response(Initialize_Result)
+			err := json.unmarshal(content, &response, allocator = allocator)
+			if err != nil {
+				fmt.println(string(content))
+				return err
+			}
 
-		lsp_server.initialized = true
+			send_notification(lsp_server, "initialized", struct{}{}) or_return
 
-		for path in lsp_server.pending_files {
-			data := os.read_entire_file(string(path), context.temp_allocator) or_continue
-			lsp_open_file(lsp_server, path, string(data))
-			delete(string(path))
-		}
-		delete(lsp_server.pending_files)
-		lsp_server.pending_files = {}
+			lsp_server.initialized  = true
+			lsp_server.capabilities = response.result.capabilities
 
-		log.info("LSP server initialized")
+			for uri in lsp_server.pending_files {
+				path := uri_to_path(uri, context.temp_allocator) or_else panic("")
+				data := os.read_entire_file(path, context.temp_allocator) or_continue
+				lsp_open_file(lsp_server, uri, string(data))
+			}
+			delete(lsp_server.pending_files)
+			lsp_server.pending_files = {}
 
-		return nil
-	}) or_return
+			log.info("LSP server initialized")
+			log.debug("LSP server capabilities:", lsp_server.capabilities)
+
+			return nil
+		},
+	) or_return
 
 	return
 } 
 
 lsp_destroy :: proc(lsp: ^LSP_Server) {
+	vmem.arena_destroy(&lsp.arena)
 	_ = os.process_kill(lsp.process)
 	os.close(lsp.stdout)
 	os.close(lsp.stdin)
@@ -212,7 +228,7 @@ Text_Document_Item :: struct {
 	/**
 	 * The text document's language identifier.
 	 */
-	// languageId: string,
+	languageId: string `json:,omitempty`,
 
 	/**
 	 * The version number of this document (it will increase after each
@@ -231,28 +247,24 @@ Did_Save_Text_Document_Params :: struct {
 	text:         Maybe(string),
 }
 
-lsp_save_file :: proc(lsp: ^LSP_Server, path: string) {
-	
-}
-
 Text_Document_Position_Params :: struct {
 	textDocument: Text_Document_Identifier,
 	position:     LSP_Position,
 }
 
-lsp_open_file :: proc(lsp: ^LSP_Server, path: Normalized_Path, content: string) {
+lsp_open_file :: proc(lsp: ^LSP_Server, uri: Uri, content: string) {
 	if !lsp.initialized {
-		if path not_in lsp.pending_files {
-			lsp.pending_files[path_clone(path, context.allocator)] = {}
+		if uri not_in lsp.pending_files {
+			lsp.pending_files[uri] = {}
 		}
 		return
 	}
 
-	uri := uri_from_path(path, context.temp_allocator)
 	_ = send_notification(lsp, "textDocument/didOpen", Did_Open_Text_Document_Params {
 		textDocument = {
-			uri  = uri,
-			text = content,
+			languageId = lsp.language_id,
+			uri        = uri,
+			text       = content,
 		},
 	})
 
@@ -309,12 +321,11 @@ lsp_go_to_definition :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 		return
 	}
 
-	uri        := uri_from_path(buffer.path, context.temp_allocator)
 	cursor     := buffer.selections[buffer.primary].cursor
 	position   := btree_offset_to_position(&buffer.btree, cursor)
 	line_start := btree_line_to_offset(&buffer.btree, position.line)
 	_ = send_request(lsp, "textDocument/definition", Text_Document_Position_Params {
-		textDocument = { uri = uri, },
+		textDocument = { uri = buffer.uri, },
 		position     = {
 			line      = position.line,
 			character = int(cursor - line_start),
@@ -374,30 +385,29 @@ lsp_go_to_definition :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 	})
 }
 
+Markup_Kind :: distinct string
+
+Markup_Content :: struct {
+	kind:  Markup_Kind,
+	value: string,
+}
+
 lsp_get_hover_information :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 	lsp := editor_get_lsp_server(editor, buffer.language)
 	if lsp == nil || !lsp.initialized {
 		editor_set_popup_text(editor, "no lsp server available")
 		return
 	}
-	uri        := uri_from_path(buffer.path, context.temp_allocator)
 	cursor     := buffer.selections[buffer.primary].cursor
 	position   := btree_offset_to_position(&buffer.btree, cursor)
 	line_start := btree_line_to_offset(&buffer.btree, position.line)
 	_ = send_request(lsp, "textDocument/hover", Text_Document_Position_Params {
-		textDocument = { uri = uri, },
+		textDocument = { uri = buffer.uri, },
 		position     = {
 			line      = position.line,
 			character = int(cursor - line_start),
 		},
 	}, proc(editor: ^Editor, lsp: ^LSP_Server, content: []byte) -> LSP_Error {
-		Markup_Kind :: distinct string
-
-		Markup_Content :: struct {
-			kind:  Markup_Kind,
-			value: string,
-		}
-
 		response: Response(struct {
 			contents: union {
 				Markup_Content,
@@ -414,6 +424,49 @@ lsp_get_hover_information :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 			text = v
 		}
 		editor_set_popup_text(editor, "%v", text)
+		return nil
+	})
+}
+
+lsp_get_signature_help :: proc(editor: ^Editor, buffer: ^Buffer_View) {
+	lsp := editor_get_lsp_server(editor, buffer.language)
+	if lsp == nil || !lsp.initialized {
+		editor_set_popup_text(editor, "no lsp server available")
+		return
+	}
+
+	cursor     := buffer.selections[buffer.primary].cursor
+	position   := btree_offset_to_position(&buffer.btree, cursor)
+	line_start := btree_line_to_offset(&buffer.btree, position.line)
+	_ = send_request(lsp, "textDocument/signatureHelp", Signature_Help_Params {
+		textDocument = { uri = buffer.uri, },
+		position     = {
+			line      = position.line,
+			character = int(cursor - line_start),
+		},
+	}, proc(editor: ^Editor, lsp: ^LSP_Server, content: []byte) -> LSP_Error {
+		response: Response(Signature_Help)
+		json.unmarshal(content, &response, allocator = context.temp_allocator) or_return
+
+		if len(response.result.signatures) == 0 {
+			editor_set_popup_text(editor, "")
+			return nil
+		}
+
+		signature := response.result.signatures[response.result.activeSignature]
+		highlight: [2]int
+		if len(signature.parameters) > response.result.activeParameter {
+			switch v in signature.parameters[response.result.activeParameter].label {
+			case string:
+				highlight     = strings.index(signature.label, v)
+				highlight[1] += len(v)
+			case [2]int:
+				highlight = v
+			}
+		}
+
+		editor_set_popup_text(editor, "```%s\n%v\n```", lsp.language_id, signature.label, below = true, highlight = highlight)
+
 		return nil
 	})
 }
@@ -511,16 +564,21 @@ Request :: struct($Params: typeid) {
 	params:  Params,
 }
 
+Client_Capabilities :: struct {
+	general: struct {
+		positionEncodings: []string,
+	},
+	textDocument: struct {
+		hover: struct { contentFormat: []string, },
+	},
+}
+
 Initialize_Request_Params :: struct {
 	clientInfo: struct {
 		name:    string,
 		version: Maybe(string),
 	},
-	capabilities: struct {
-		textDocument: struct {
-			publishDiagnostics: struct {},
-		},
-	},
+	capabilities: Client_Capabilities,
 }
 
 Base_Response :: struct {
@@ -550,12 +608,55 @@ Signature_Help_Options :: struct {
 
 Server_Info :: struct {
 	name:    string,
-	version: Maybe(string),
+	version: string,
 }
 
+Text_Document_Sync_Options :: struct {
+	openClose: bool,
+	change:    Text_Document_Sync_Kind,
+}
+
+Server_Capabilities :: struct {
+	positionEncoding: string,
+	textDocumentSync: union {
+		Text_Document_Sync_Kind,
+		Text_Document_Sync_Options,
+	},
+	completionProvider: struct {
+		triggerCharacters: []string,
+	},
+	hoverProvider: union {
+		bool,
+		json.Value,
+	},
+	signatureHelpProvider: Maybe(struct {
+		triggerCharacters:   []string,
+		retriggerCharacters: []string,
+	}),
+	declarationProvider:       union { bool, Declaration_Registration_Options,     },
+	definitionProvider:        union { bool, Definition_Options,                   },
+	typeDefinitionProvider:    union { bool, Type_Definition_Registration_Options, },
+	implementationProvider:    union { bool, Implementation_Registration_Options,  },
+	referencesProvider:        union { bool, Reference_Options,                    },
+	documentHighlightProvider: union { bool, Document_Highlight_Options,           },
+	documentSymbolProvider:    union { bool, Document_Symbol_Options,              },
+	codeActionProvider:        union { bool, Code_Action_Options,                  },
+	renameProvider:            union { bool, Rename_Options,                       },
+}
+
+Declaration_Registration_Options     :: struct {}
+Definition_Options                   :: struct {}
+Type_Definition_Registration_Options :: struct {}
+Implementation_Registration_Options  :: struct {}
+Reference_Options                    :: struct {}
+Document_Highlight_Options           :: struct {}
+Document_Symbol_Options              :: struct { label: bool, }
+Code_Action_Options                  :: struct {}
+Rename_Options                       :: struct {}
+
 Initialize_Result :: struct {
-	capabilities: json.Value,
-	serverInfo:   Maybe(Server_Info),
+	capabilities: Server_Capabilities,
+	serverInfo:   Server_Info,
 }
 
 @(require_results)
@@ -575,4 +676,40 @@ offset_to_lsp_position :: proc(btree: ^BTree, offset: Offset) -> (position: LSP_
 	}
 
 	return
+}
+
+Signature_Help_Params :: struct {
+	using _:  Text_Document_Position_Params,
+	context_: Signature_Help_Context `json:"context"`,
+}
+
+Signature_Help_Trigger_Kind :: enum int {
+	Invoked          = 1,
+	TriggerCharacter = 2,
+	ContentChange    = 3,
+}
+
+Signature_Help_Context :: struct {
+	triggerKind:         Signature_Help_Trigger_Kind,
+	triggerCharacter:    string,
+	isRetrigger:         bool,
+	activeSignatureHelp: Signature_Help,
+}
+
+Signature_Help :: struct {
+	signatures:      []Signature_Information,
+	activeSignature: int,
+	activeParameter: int,
+}
+
+Signature_Information :: struct {
+	label:           string,
+	documentation:   union { string, Markup_Content, },
+	parameters:      []Parameter_Information,
+	activeParameter: int,
+}
+
+Parameter_Information :: struct {
+	label:         union { string, [2]int,         },
+	documentation: union { string, Markup_Content, },
 }

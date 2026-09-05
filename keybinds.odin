@@ -154,25 +154,25 @@ deduplicate_selections :: proc(editor: ^Buffer_View) {
 
 action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 	strings.builder_reset(&editor.status)
-	strings.builder_reset(&editor.popup_text)
+	strings.builder_reset(&editor.popup.text)
 	switch v in action {
 	case Motion:
 		if editor.repeat_count == 0 {
 			editor.repeat_count = 1
 		}
-		motion_apply(editor, &editor.buffer, v)
+		motion_apply(editor, editor.buffer, v)
 	case Selection_Motion:
 		if editor.repeat_count == 0 {
 			editor.repeat_count = 1
 		}
 		for &selection, i in editor.buffer.selections {
-			selection_motion_apply(editor, &editor.buffer, &selection, v, i == editor.buffer.primary)
+			selection_motion_apply(editor, editor.buffer, &selection, v, i == editor.buffer.primary)
 		}
 	case Primary_Motion:
 		if editor.repeat_count == 0 {
 			editor.repeat_count = 1
 		}
-		primary_motion_apply(editor, &editor.buffer, &editor.buffer.selections[editor.buffer.primary], v)
+		primary_motion_apply(editor, editor.buffer, &editor.buffer.selections[editor.buffer.primary], v)
 	case Command:
 		command_execute(editor, v)
 	case Argument_Motion:
@@ -199,7 +199,7 @@ action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 	}
 	clear(&editor.new_selections)
 	editor.repeat_count = 0
-	deduplicate_selections(&editor.buffer)
+	deduplicate_selections(editor.buffer)
 }
 
 Keybinds :: distinct map[Keybind]Action

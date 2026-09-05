@@ -2,15 +2,15 @@ package editor
 
 import intrinsics "base:intrinsics"
 
-import bufio      "core:bufio"
 import bytes      "core:bytes"
 import fmt        "core:fmt"
-import io         "core:io"
 import json       "core:encoding/json"
 import log        "core:log"
 import os         "core:os"
 import strconv    "core:strconv"
 import strings    "core:strings"
+
+ENABLE_LSP_LOG_MESSAGES :: #config(ENABLE_LSP_LOG_MESSAGES, false)
 
 Base_Message :: struct {
 	method: string,
@@ -67,6 +67,10 @@ jrpc_decode_message :: proc(data: []byte) -> (
 		return
 	}
 
+	when ENABLE_LSP_LOG_MESSAGES {
+		log.info(string(content))
+	}
+
 	method  = msg.method
 	id      = msg.id
 	content = content[:content_len]
@@ -82,41 +86,11 @@ jrpc_send_message :: proc(lsp: ^LSP_Server, data: $T) -> (error: LSP_Error) wher
 	fmt.fprintf(lsp.stdin, "Content-Length: %d\r\n\r\n", len(content))
 	os.write(lsp.stdin, content)
 
+	when ENABLE_LSP_LOG_MESSAGES {
+		log.info(string(content))
+	}
+
 	return nil
-}
-
-jrpc_split :: proc(data: []byte, _: bool) -> (
-	advance:     int,
-	token:       []byte,
-	err:         bufio.Scanner_Error,
-	final_token: bool,
-) {
-	data := string(data)
-	header_len := strings.index(data, "\r\n\r\n")
-	if header_len == -1 {
-		return
-	}
-
-	header := data[:header_len]
-	content_len: int
-
-	for line in strings.split_lines_iterator(&header) {
-		l := len("Content-Length: ")
-		if len(line) > l && line[:l] == "Content-Length: " {
-			err         = io.Error.Unknown
-			content_len = strconv.parse_int(line[l:]) or_return
-			err         = nil
-		}
-	}
-
-	if len(data) - header_len - 4 < content_len {
-		return
-	}
-
-	advance = header_len + 4 + content_len
-	token   = transmute([]byte)data[:advance]
-
-	return
 }
 
 Response_Error :: struct {

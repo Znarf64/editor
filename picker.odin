@@ -43,6 +43,7 @@ Picker_Mode :: enum {
 	Diagnostics,
 	Commands,
 	Buffers,
+	Jumplist,
 }
 
 Picker_Item :: struct {
@@ -61,6 +62,8 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 	input_line_reset(&editor.picker.input)
 	vmem.arena_free_all(&editor.picker.arena)
 	allocator := vmem.arena_allocator(&editor.picker.arena)
+
+	clear(&editor.picker.items)
 
 	switch mode {
 	case .Global_Search:
@@ -173,11 +176,20 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 
 		editor.picker.diagnostics = diagnostics
 	case .Commands:
+		unimplemented()
 	case .Buffers:
 		resize(&editor.picker.items, len(editor.buffers))
 		for b, i in editor.buffers {
 			editor.picker.items[i] = {
 				name = string(b.path),
+				id   = i,
+			}
+		}
+	case .Jumplist:
+		resize(&editor.picker.items, len(editor.jumplist.entries))
+		for b, i in editor.jumplist.entries {
+			editor.picker.items[i] = {
+				name = b.content,
 				id   = i,
 			}
 		}
@@ -230,7 +242,7 @@ picker_update :: proc(editor: ^Editor) {
 picker_submit :: proc(editor: ^Editor) {
 	picker := &editor.picker
 
-	if len(picker.items) == 0 {
+	if picker.matching == 0 {
 		editor.mode = .Normal
 		return
 	}
@@ -282,10 +294,14 @@ picker_submit :: proc(editor: ^Editor) {
 	case .Commands:
 		editor.mode = .Normal
 	case .Buffers:
-		editor.buffer = {
-			selections = make([dynamic]Selection, 1, context.allocator),
-			buffer     = editor.buffers[active],
-		}
+		editor_open_buffer(editor, editor.buffers[active])
+	case .Jumplist:
+		entry := editor.jumplist.entries[active]
+		file_open(editor, entry.path)
+		resize(&editor.buffer.selections, 1)
+		editor.buffer.selections[0].anchor        = entry.start
+		editor.buffer.selections[0].cursor        = entry.end
+		editor.buffer.selections[0].target_cursor = entry.end
 	}
 }
 
