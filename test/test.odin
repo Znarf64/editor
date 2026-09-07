@@ -26,4 +26,6 @@ main :: proc() {
 	asdf
 
 	ERROR
+	
+	alkjdflkaslkjdlkj
 }

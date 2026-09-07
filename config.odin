@@ -17,6 +17,9 @@ Style_Key :: enum {
 	Gutter,
 
 	Error,
+	Warning,
+	Information,
+	Hint,
 
 	Ui_Focus,
 	Ui_Highlight,

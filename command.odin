@@ -3,6 +3,7 @@ package editor
 import os      "core:os"
 import strconv "core:strconv"
 import strings "core:strings"
+import vmem    "core:mem/virtual"
 
 Command :: distinct string
 
@@ -42,6 +43,19 @@ command_execute :: proc(editor: ^Editor, command: Command) {
 		window_split(editor, vertical = true)
 	case "hs", "hsplit":
 		window_split(editor, vertical = false)
+	case "config-reload":
+		allocator   := vmem.arena_allocator(&editor.config.arena)
+		source, err := os.read_entire_file("config.ini", allocator)
+		if err != nil {
+			editor_set_status(editor, "Failed to read config file")
+			break
+		}
+		ok := load_config_file(&editor.config, string(source), allocator)
+		if ok {
+			editor_set_status(editor, "Config reloaded")
+		} else {
+			editor_set_status(editor, "Failed to reload config")
+		}
 	case:
 		editor_set_status(editor, "invalid command: '%s'", command)
 	}

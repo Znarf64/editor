@@ -154,7 +154,9 @@ deduplicate_selections :: proc(editor: ^Buffer_View) {
 
 action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 	strings.builder_reset(&editor.status)
-	strings.builder_reset(&editor.popup.text)
+	for &popup in editor.popups {
+		strings.builder_reset(&popup.text)
+	}
 	switch v in action {
 	case Motion:
 		if editor.repeat_count == 0 {

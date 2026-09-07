@@ -86,6 +86,7 @@ New_Selection :: struct {
 Diagnostic :: struct {
 	start, end:    Offset,
 	message, code: string,
+	severity:      Diagnostic_Severity,
 }
 
 Buffer_View :: struct {
@@ -460,8 +461,14 @@ Window :: union {
 Popup :: struct {
 	rect:      Animation(Rect),
 	text:      strings.Builder,
-	above:     bool,
-	highlight: [2]int,
+	highlight: Range,
+}
+
+// Relative to the primary cursor
+Popup_Location :: enum {
+	Below,
+	Right,
+	Above,
 }
 
 Editor :: struct {
@@ -479,7 +486,7 @@ Editor :: struct {
 
 	leader:           Leader,
 
-	popup:            Popup,
+	popups:           [Popup_Location]Popup,
 
 	picker:           Picker,
 
@@ -610,7 +617,9 @@ main :: proc() {
 		input_line_destroy(editor.prompt.input)
 		strings.builder_destroy(&editor.status)
 		strings.builder_destroy(&editor.clipboard)
-		strings.builder_destroy(&editor.popup.text)
+		for &popup in editor.popups {
+			strings.builder_destroy(&popup.text)
+		}
 		picker_destroy(&editor.picker)
 		window_tree_destroy(editor.window_tree)
 	}
@@ -801,6 +810,9 @@ main :: proc() {
 				if lsp.capabilities.signatureHelpProvider != nil {
 					lsp_get_signature_help(&editor, editor.buffer)
 				}
+				// if lsp.capabilities.completionProvider != nil {
+				// 	lsp_get_completion(&editor, editor.buffer)
+				// }
 			}
 		}
 
@@ -810,6 +822,10 @@ main :: proc() {
 		current_time := time.duration_seconds(time.since(start_time))
 		delta_time   := current_time - prev_time
 		prev_time     = current_time
+
+		if !editor.config.enable_animations {
+			delta_time = max(f64)
+		}
 
 		clear(&draw_commands)
 
@@ -1240,11 +1256,11 @@ editor_set_status :: proc(editor: ^Editor, format: string, args: ..any) {
 	fmt.sbprintf(&editor.status, format, ..args)
 }
 
-editor_set_popup_text :: proc(editor: ^Editor, format: string, args: ..any, below := false, highlight: [2]int = 0) {
-	strings.builder_reset(&editor.popup.text)
-	fmt.sbprintf(&editor.popup.text, format, ..args)
-	editor.popup.above     = below
-	editor.popup.highlight = highlight
+editor_set_popup_text :: proc(editor: ^Editor, format: string, args: ..any, location: Popup_Location = .Below, highlight: Range = {}) { popup := &editor.popups[location]
+
+	strings.builder_reset(&popup.text)
+	fmt.sbprintf(&popup.text, format, ..args)
+	popup.highlight = highlight
 }
 
 regex_search :: proc(editor: ^Editor, buffer: ^Buffer_View, pattern_string: string) -> (ok: bool) {
@@ -1514,6 +1530,224 @@ draw_rect :: proc(
 	})
 }
 
+popup_render :: proc(
+	editor:     ^Editor,
+	popup:      ^Popup,
+	commands:   ^[dynamic]Draw_Command,
+	delta_time: f32,
+	position:   [2]f32,
+	location:   Popup_Location,
+) {
+	cell_size: [2]f32 = {
+		la.round(get_glyph_info(&editor.font, 0).x_advance),
+		la.round((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale),
+	}
+
+	popup_rect       := animation_update(&popup.rect, delta_time, editor.config.popup_animation_speed)
+	popup_rect.min   += position
+	popup_rect.max   += position
+
+	draw_rect(commands,
+		offset        = popup_rect.min,
+		size          = rect_size(popup_rect),
+		color         = editor.config.theme[.Popup_Background].fg,
+		border_color  = editor.config.theme[.Popup_Border].fg,
+		border_radius = 8,
+		border_width  = 2,
+		shadow_width  = 16,
+
+		blur_radius   = f32(editor.config.blur_strength),
+	)
+
+	line_height := FONT_HEIGHT + editor.config.padding
+	width: f32
+
+	text_base := popup_rect.min + { editor.config.padding, editor.config.padding + FONT_HEIGHT, }
+
+	x, y: f32
+	indentation: f32
+
+	root := cm.parse_document(raw_data(popup.text.buf), uint(strings.builder_len(popup.text)), cm.DEFAULT_OPTIONS)
+	defer cm.node_free(root)
+	iter := cm.iter_new(root)
+	defer cm.iter_free(iter)
+	for {
+		ev_type := cm.iter_next(iter)
+		if ev_type == .Done {
+			break
+		}
+		cur := cm.iter_get_node(iter)
+
+		text := string(cur.data[:cur.len])
+
+		switch cur.type {
+		case .None:
+		case .Document:
+		case .Block_Quote:
+			x += draw_text(&editor.font, commands, "Block_Quote",    editor.config.theme[.Operator].fg, { x, y, } + text_base)
+
+			width = max(width, x)
+			y    += line_height
+			x     = indentation
+		case .List:
+			if ev_type == .Exit {
+				width = max(width, x)
+				y    += line_height
+				x     = indentation
+			}
+		case .Item:
+			if ev_type == .Enter {
+				RADIUS :: 2
+				draw_rect(commands, { cell_size.x - RADIUS, y - FONT_HEIGHT / 2 - RADIUS, } + text_base, RADIUS * 2, editor.config.theme[.Ui_Text].fg, border_radius = RADIUS)
+				x           += cell_size.x * 2
+				indentation += cell_size.x * 2
+			} else if ev_type == .Exit {
+				indentation -= cell_size.x * 2
+				x            = indentation
+			}
+		case .Code_Block:
+			// language := string(cur.as.code.info)
+
+			text = strings.trim_right(text, "\n")
+
+			highlighter: Highlighter = {
+				text     = text,
+				keywords = editor.config.styles,
+			}
+
+			column: int
+			render_code: for {
+				start := highlighter.pos
+				style := highlighter_advance(&highlighter)
+				if style == .Invalid {
+					break
+				}
+
+				for r, offset in text[start:highlighter.pos] {
+					offset := Offset(start + offset)
+
+					if r == '\n' {
+						width  = max(width, x + cell_size.x * f32(column))
+						y     += line_height
+						column = 0
+						continue
+					}
+
+					if r == '\t' {
+						column = next_column_after_tab(column, editor.config.tab_width)
+						continue
+					}
+
+					if popup.highlight.start <= offset && offset < popup.highlight.end {
+						draw_rect(
+							commands,
+							offset = { x + cell_size.x * f32(column), y - la.round(f32(editor.font.ascender) * editor.font.scale), } + text_base,
+							size   = cell_size,
+							color  = editor.config.theme[.Selection].bg,
+						)
+					}
+
+					defer column += 1
+
+					if unicode.is_space(r) {
+						continue
+					}
+
+					append(commands, Draw_Command_Char {
+						position = { x + cell_size.x * f32(column), y, } + text_base,
+						char     = r,
+						color    = editor.config.theme[style].fg,
+					})
+				}
+			}
+
+			width = max(width, x + cell_size.x * f32(column))
+			y    += line_height
+		case .HTML_Block:
+			x += draw_text(&editor.font, commands, "HTML_Block",     editor.config.theme[.Operator].fg, { x, y, } + text_base)
+
+			width = max(width, x)
+			y    += line_height
+			x     = indentation
+		case .Custom_Block:
+			x += draw_text(&editor.font, commands, "Custom_Block",   editor.config.theme[.Operator].fg, { x, y, } + text_base)
+
+			width = max(width, x)
+			y    += line_height
+			x     = indentation
+		case .Paragraph:
+			if ev_type == .Exit {
+				width = max(width, x)
+				y    += line_height
+				x     = indentation
+			}
+		case .Heading:
+			width = max(width, x)
+			y    += line_height
+
+			if ev_type == .Exit {
+				draw_rect(commands, { 0, y - FONT_HEIGHT, } + text_base, { x, 1, }, editor.config.theme[.Ui_Text].fg)
+				y += line_height
+			}
+
+			x = indentation
+		case .Thematic_Break:
+			draw_rect(commands, { 0, y - FONT_HEIGHT / 2 - 1, } + text_base, { popup_rect.max.x - popup_rect.min.x - editor.config.padding * 2, 1, }, editor.config.theme[.Ui_Text].fg)
+
+			width = max(width, x)
+			y    += line_height
+			x     = indentation
+		case .Soft_Break, .Line_Break:
+			width = max(width, x)
+			y    += line_height
+			x     = indentation
+		case .Text:
+			x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
+		case .Code:
+			x += draw_text(&editor.font, commands, text, editor.config.theme[.String].fg,   { x, y, } + text_base)
+		case .HTML_Inline:
+			x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
+		case .Custom_Inline:
+			x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
+		case .Emph:
+			x += draw_text(&editor.font, commands, text, editor.config.theme[.Keyword].fg,  { x, y, } + text_base)
+		case .Strong:
+			x += draw_text(&editor.font, commands, text, editor.config.theme[.Operator].fg, { x, y, } + text_base)
+		case .Link:
+			x += draw_text(&editor.font, commands, text, editor.config.theme[.String].fg,   { x, y, } + text_base)
+		case .Image:
+			x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
+		}
+	}
+
+	if y == 0 {
+		y += line_height
+	}
+
+	rect_base: [2]f32
+
+	switch location {
+	case .Right:
+		rect_base.x += cell_size.x
+		rect_base.y -= cell_size.y
+	case .Above:
+		rect_base.y -= y + cell_size.y + editor.config.padding
+	case .Below:
+	}
+
+	target := Rect {
+		min = rect_base,
+		max = rect_base + { width, y - editor.config.padding, } + editor.config.padding * 2,
+	}
+
+	if width == 0 {
+		center    := rect_center(target)
+		target.min = center
+		target.max = center
+	}
+	animation_set_target(&popup.rect, target)
+}
+
 buffer_render :: proc(
 	editor:         ^Editor,
 	buffer:         ^Buffer_View,
@@ -1709,13 +1943,25 @@ buffer_render :: proc(
 
 				line_diagnostic = diagnostic
 
+				style: Style_Key
+				switch diagnostic.severity {
+				case .Error:
+					style = .Error
+				case .Warning:
+					style = .Warning
+				case .Information:
+					style = .Information
+				case .Hint:
+					style = .Hint
+				}
+
 				draw_rect(commands,
 					offset = {
 						f32(position.column) * cell_size.x + gutter_width,
 						cell_size.y * (1 + f32(position.line) - scroll),
 					} + rect.min,
 					size   = { cell_size.x * f32(max(1, next_column - position.column)), 1, },
-					color  = editor.config.theme[.Error].fg,
+					color  = editor.config.theme[style].fg,
 				)
 			}
 
@@ -1768,6 +2014,7 @@ buffer_render :: proc(
 		}
 	}
 
+	primary_render_position: [2]f32
 	for &selection, i in buffer.selections {
 		line := btree_offset_to_line(&buffer.btree, offset = selection.cursor)
 		iter := btree_iterator(&buffer.btree, line = line)
@@ -1799,22 +2046,26 @@ buffer_render :: proc(
 
 		animation_set_target(&selection.anim, target)
 
+		cursor_rect := animation_update(&selection.anim, delta_time, editor.config.cursor_animation_speed)
+
+		render_position := cursor_rect.min - { 0, scroll * cell_size.y, } + rect.min
+
 		style := Style_Key.Cursor_Secondary
 		if i == buffer.primary {
-			style = .Cursor
+			style                   = .Cursor
+			primary_render_position = render_position
 		}
 
-		cursor_rect := animation_update(&selection.anim, delta_time, editor.config.cursor_animation_speed)
 		if active {
 			draw_rect(commands,
-				offset        = cursor_rect.min - { 0, scroll * cell_size.y, } + rect.min,
+				offset        = render_position,
 				size          = rect_size(cursor_rect),
 				color         = editor.config.theme[style].bg,
 				border_radius = 2,
 			)
 		} else {
 			draw_rect(commands,
-				offset        = cursor_rect.min - { 0, scroll * cell_size.y, } + rect.min,
+				offset        = render_position,
 				size          = rect_size(cursor_rect),
 				color         = 0,
 				border_color  = editor.config.theme[style].bg,
@@ -1826,7 +2077,18 @@ buffer_render :: proc(
 
 	append(commands, ..text_commands[:])
 
-	if !active {
+	if active {
+		for &popup, location in editor.popups {
+			popup_render(
+				editor,
+				&popup,
+				popup_commands,
+				delta_time,
+				primary_render_position + { 0, cell_size.y, },
+				location,
+			)
+		}
+	} else {
 		w := measure_text(&editor.font, buffer.path)
 		draw_rect(
 			commands,
@@ -1845,218 +2107,7 @@ buffer_render :: proc(
 			editor.config.theme[.Ui_Text].fg,
 			rect.max - { w, 0, } - editor.config.padding,
 		)
-		return
 	}
-
-	////////////////
-	// draw popup //
-	////////////////
-
-	commands := popup_commands
-
-	popup_rect       := animation_update(&editor.popup.rect, delta_time, editor.config.popup_animation_speed)
-	popup_rect.min.y -= scroll * cell_size.y
-	popup_rect.max.y -= scroll * cell_size.y
-	popup_rect.min   += rect.min
-	popup_rect.max   += rect.min
-
-	draw_rect(commands,
-		offset        = popup_rect.min,
-		size          = rect_size(popup_rect),
-		color         = editor.config.theme[.Popup_Background].fg,
-		border_color  = editor.config.theme[.Popup_Border].fg,
-		border_radius = 8,
-		border_width  = 2,
-		shadow_width  = 16,
-
-		blur_radius   = f32(editor.config.blur_strength),
-	)
-
-	line_height := FONT_HEIGHT + editor.config.padding
-	width: f32
-
-	text_base := popup_rect.min + { editor.config.padding, editor.config.padding + FONT_HEIGHT, }
-
-	x, y: f32
-	indentation: f32
-
-	root := cm.parse_document(raw_data(editor.popup.text.buf), uint(strings.builder_len(editor.popup.text)), cm.DEFAULT_OPTIONS)
-	defer cm.node_free(root)
-	iter := cm.iter_new(root)
-	defer cm.iter_free(iter)
-	for {
-		ev_type := cm.iter_next(iter)
-		if ev_type == .Done {
-			break
-		}
-		cur := cm.iter_get_node(iter)
-
-		text := string(cur.data[:cur.len])
-
-		switch cur.type {
-		case .None:
-		case .Document:
-		case .Block_Quote:
-			x += draw_text(&editor.font, commands, "Block_Quote",    editor.config.theme[.Operator].fg, { x, y, } + text_base)
-
-			width = max(width, x)
-			y    += line_height
-			x     = indentation
-		case .List:
-			if ev_type == .Exit {
-				width = max(width, x)
-				y    += line_height
-				x     = indentation
-			}
-		case .Item:
-			if ev_type == .Enter {
-				RADIUS :: 2
-				draw_rect(commands, { cell_size.x - RADIUS, y - FONT_HEIGHT / 2 - RADIUS, } + text_base, RADIUS * 2, editor.config.theme[.Ui_Text].fg, border_radius = RADIUS)
-				x           += cell_size.x * 2
-				indentation += cell_size.x * 2
-			} else if ev_type == .Exit {
-				indentation -= cell_size.x * 2
-				x            = indentation
-			}
-		case .Code_Block:
-			// language := string(cur.as.code.info)
-
-			text = strings.trim_right(text, "\n")
-
-			highlighter: Highlighter = {
-				text     = text,
-				keywords = editor.config.styles,
-			}
-
-			column: int
-			render_code: for {
-				start := highlighter.pos
-				style := highlighter_advance(&highlighter)
-				if style == .Invalid {
-					break
-				}
-
-				for r, offset in text[start:highlighter.pos] {
-					offset := start + offset
-
-					if r == '\n' {
-						width  = max(width, x + cell_size.x * f32(column))
-						y     += line_height
-						column = 0
-						continue
-					}
-
-					if r == '\t' {
-						column = next_column_after_tab(column, editor.config.tab_width)
-						continue
-					}
-
-					if editor.popup.highlight[0] <= offset && offset < editor.popup.highlight[1] {
-						draw_rect(
-							commands,
-							offset = { x + cell_size.x * f32(column), y - la.round(f32(editor.font.ascender) * editor.font.scale), } + text_base,
-							size   = cell_size,
-							color  = editor.config.theme[.Selection].bg,
-						)
-					}
-
-					defer column += 1
-
-					if unicode.is_space(r) {
-						continue
-					}
-
-					append(commands, Draw_Command_Char {
-						position = { x + cell_size.x * f32(column), y, } + text_base,
-						char     = r,
-						color    = editor.config.theme[style].fg,
-					})
-				}
-			}
-
-			width = max(width, x + cell_size.x * f32(column))
-			y    += line_height
-		case .HTML_Block:
-			x += draw_text(&editor.font, commands, "HTML_Block",     editor.config.theme[.Operator].fg, { x, y, } + text_base)
-
-			width = max(width, x)
-			y    += line_height
-			x     = indentation
-		case .Custom_Block:
-			x += draw_text(&editor.font, commands, "Custom_Block",   editor.config.theme[.Operator].fg, { x, y, } + text_base)
-
-			width = max(width, x)
-			y    += line_height
-			x     = indentation
-		case .Paragraph:
-			if ev_type == .Exit {
-				width = max(width, x)
-				y    += line_height
-				x     = indentation
-			}
-		case .Heading:
-			width = max(width, x)
-			y    += line_height
-
-			if ev_type == .Exit {
-				draw_rect(commands, { 0, y - FONT_HEIGHT, } + text_base, { x, 1, }, editor.config.theme[.Ui_Text].fg)
-				y += line_height
-			}
-
-			x = indentation
-		case .Thematic_Break:
-			draw_rect(commands, { 0, y - FONT_HEIGHT / 2 - 1, } + text_base, { popup_rect.max.x - popup_rect.min.x - editor.config.padding * 2, 1, }, editor.config.theme[.Ui_Text].fg)
-
-			width = max(width, x)
-			y    += line_height
-			x     = indentation
-		case .Soft_Break, .Line_Break:
-			width = max(width, x)
-			y    += line_height
-			x     = indentation
-		case .Text:
-			x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
-		case .Code:
-			x += draw_text(&editor.font, commands, text, editor.config.theme[.String].fg,   { x, y, } + text_base)
-		case .HTML_Inline:
-			x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
-		case .Custom_Inline:
-			x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
-		case .Emph:
-			x += draw_text(&editor.font, commands, text, editor.config.theme[.Keyword].fg,  { x, y, } + text_base)
-		case .Strong:
-			x += draw_text(&editor.font, commands, text, editor.config.theme[.Operator].fg, { x, y, } + text_base)
-		case .Link:
-			x += draw_text(&editor.font, commands, text, editor.config.theme[.String].fg,   { x, y, } + text_base)
-		case .Image:
-			x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + text_base)
-		}
-	}
-
-	if y == 0 {
-		y += line_height
-	}
-
-	rect_base: [2]f32 = {
-		f32(primary_position.column) * cell_size.x + gutter_width,
-		cell_size.y * (1 + f32(primary_position.line)),
-	}
-
-	if editor.popup.above {
-		rect_base.y -= y + cell_size.y + editor.config.padding
-	}
-
-	target := Rect {
-		min = rect_base,
-		max = rect_base + { width, y - editor.config.padding, } + editor.config.padding * 2,
-	}
-
-	if width == 0 {
-		center    := rect_center(target)
-		target.min = center
-		target.max = center
-	}
-	animation_set_target(&editor.popup.rect, target)
 }
 
 Input_Line :: struct {

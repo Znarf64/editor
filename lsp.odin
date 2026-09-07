@@ -202,10 +202,11 @@ lsp_methods: map[string]proc(editor: ^Editor, content: []byte) = {
 				diagnostic.range.end.character -= 1
 			}
 			d = {
-				code    = strings.clone(diagnostic.code,    allocator),
-				message = strings.clone(diagnostic.message, allocator),
-				start   = lsp_position_to_offset(&editor.buffer.btree, diagnostic.range.start),
-				end     = lsp_position_to_offset(&editor.buffer.btree, diagnostic.range.end),
+				code     = strings.clone(diagnostic.code,    allocator),
+				message  = strings.clone(diagnostic.message, allocator),
+				start    = lsp_position_to_offset(&editor.buffer.btree, diagnostic.range.start),
+				end      = lsp_position_to_offset(&editor.buffer.btree, diagnostic.range.end),
+				severity = diagnostic.severity.? or_else .Error,
 			}
 		}
 	},
@@ -454,21 +455,113 @@ lsp_get_signature_help :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 		}
 
 		signature := response.result.signatures[response.result.activeSignature]
-		highlight: [2]int
+		highlight: Range
 		if len(signature.parameters) > response.result.activeParameter {
 			switch v in signature.parameters[response.result.activeParameter].label {
 			case string:
-				highlight     = strings.index(signature.label, v)
-				highlight[1] += len(v)
+				highlight.start = Offset(strings.index(signature.label, v))
+				highlight.end   = highlight.start + Offset(len(v))
 			case [2]int:
-				highlight = v
+				highlight = {
+					start = Offset(v[0]),
+					end   = Offset(v[1]),
+				}
 			}
 		}
 
-		editor_set_popup_text(editor, "```%s\n%v\n```", lsp.language_id, signature.label, below = true, highlight = highlight)
+		editor_set_popup_text(editor, "```%s\n%v\n```", lsp.language_id, signature.label, location = .Above, highlight = highlight)
 
 		return nil
 	})
+}
+
+lsp_get_completion :: proc(editor: ^Editor, buffer: ^Buffer_View) {
+	lsp := editor_get_lsp_server(editor, buffer.language)
+	if lsp == nil || !lsp.initialized {
+		editor_set_popup_text(editor, "no lsp server available")
+		return
+	}
+
+	cursor     := buffer.selections[buffer.primary].cursor
+	position   := btree_offset_to_position(&buffer.btree, cursor)
+	line_start := btree_line_to_offset(&buffer.btree, position.line)
+	_ = send_request(lsp, "textDocument/completion", Text_Document_Position_Params {
+		textDocument = { uri = buffer.uri, },
+		position     = {
+			line      = position.line,
+			character = int(cursor - line_start),
+		},
+	}, proc(editor: ^Editor, lsp: ^LSP_Server, content: []byte) -> LSP_Error {
+		Edit_Range_With_Insert_Replace :: struct {
+			insert, replace: LSP_Range,
+		}
+		Completion_Item_Defaults :: struct {
+			commitCharacters: []string,
+			editRange:        union { LSP_Range, Edit_Range_With_Insert_Replace, },
+			insertTextFormat: string,
+			insertTextMode:   string,
+		}
+
+		Completion_List :: struct {
+			isIncomplete: bool,
+			itemDefaults: Completion_Item_Defaults,
+			items:        []Completion_Item,
+		}
+
+		Completion_Item :: struct {
+			label: string,
+			// labelDetails: CompletionItemLabelDetails,
+			// kind: CompletionItemKind,
+			// tags: CompletionItemTag[],
+			detail: string,
+			documentation: union{ string, Markup_Content, },
+			preselect: bool,
+			// sortText: string,
+			// filterText: string,
+			// insertText: string,
+			// insertTextFormat: InsertTextFormat,
+			// insertTextMode: InsertTextMode,
+			textEdit: union{ Text_Edit, Insert_Replace_Edit, },
+			textEditText: string,
+			// additionalTextEdits: TextEdit[],
+			// commitCharacters: string[],
+			// command: Command,
+		}
+		response: Response(union {
+			[]Completion_Item,
+			Completion_List,
+		})
+		json.unmarshal(content, &response, allocator = context.temp_allocator) or_return
+
+		b := strings.builder_make(context.temp_allocator)
+		switch v in response.result {
+		case []Completion_Item:
+			for item in v {
+				fmt.sbprintln(&b, item.label)
+			}
+		case Completion_List:
+			for item in v.items {
+				fmt.sbprintln(&b, item.label)
+			}
+		}
+
+		if strings.builder_len(b) != 0 {
+			editor_set_popup_text(editor, "%s", strings.to_string(b), location = .Below)
+		}
+
+		return nil
+	})
+}
+
+Text_Edit :: struct {
+	range:   LSP_Range,
+	newText: string,
+}
+
+Insert_Replace_Edit :: struct {
+	insert:  LSP_Range,
+	replace: LSP_Range,
+	newText: string,
 }
 
 @(require_results)
@@ -496,16 +589,23 @@ lsp_update :: proc(editor: ^Editor, lsp: ^LSP_Server) -> LSP_Error {
 		read_cursor += n
 
 		if id != 0 {
-			fn, found := lsp.responses[id]
-			assert(found, "Invalid response id")
-			delete_key(&lsp.responses, id)
-			fn(editor, lsp, content) or_return
+			if method != "" {
+				log.warn("LSP: ignoring request from server:", method)
+				continue
+			}
+
+			_, fn := delete_key(&lsp.responses, id)
+			if fn == nil {
+				log.error("LSP: Invalid response id:", id, method)
+			} else {
+				fn(editor, lsp, content) or_return
+			}
 			continue
 		}
 
 		fn, found := lsp_methods[method]
 		if !found {
-			fmt.eprintln("Unknown lsp method:", method)
+			log.warn("Unknown lsp method:", method)
 			continue
 		}
 
@@ -622,9 +722,9 @@ Server_Capabilities :: struct {
 		Text_Document_Sync_Kind,
 		Text_Document_Sync_Options,
 	},
-	completionProvider: struct {
+	completionProvider: Maybe(struct {
 		triggerCharacters: []string,
-	},
+	}),
 	hoverProvider: union {
 		bool,
 		json.Value,

@@ -391,6 +391,22 @@ buffer_insert_string :: proc(editor: ^Editor, buffer: ^Buffer_View, offset: Offs
 				break
 			}
 		}
+		// needs_completion: bool
+		// for char in s {
+		// 	if char == '_' || unicode.is_letter(char) || unicode.is_digit(char) {
+		// 		needs_completion = true
+		// 		break
+		// 	}
+		// }
+		// for char in (lsp.capabilities.completionProvider.? or_else {}).triggerCharacters {
+		// 	if strings.contains(s, char) {
+		// 		needs_completion = true
+		// 		break
+		// 	}
+		// }
+		// if needs_completion {
+		// 	lsp_get_completion(editor, buffer)
+		// }
 	}
 	return _buffer_insert(buffer, s, offset)
 }
