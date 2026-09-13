@@ -24,6 +24,10 @@ void main() {
 	float shadow_strength = 1.0 - (sdf_rounded_box(v_position - v_size / 2.0 - v_shadow_width / 2.0, v_size / 2.0 - v_shadow_width / 2.0, v_border_radius) - 0.5) / v_shadow_width;
 	shadow_strength = smoothstep(0.0, 1.0, shadow_strength);
 
+	if (v_shadow_width == 0.0) {
+		shadow_strength = 0;
+	}
+
 	vec4 shadow = vec4(0.0, 0.0, 0.0, 0.3) * shadow_strength;
 
 	float d = sdf_rounded_box(v_position - v_size / 2.0, v_size / 2.0, v_border_radius) - 0.5;
@@ -31,11 +35,13 @@ void main() {
 
 	if (v_border_width != 0.0) {
 		if (d > 0.0) {
-			f_color = shadow;
+			f_color      = shadow;
+			f_color.rgb *= f_color.a;
 			return;
 		} else if (d > -1.0) {
-			shadow.rgb = mix(v_border_color.rgb, shadow.rgb, shadow_strength);
-			f_color = mix(shadow, v_border_color, -d);
+			shadow.rgb   = mix(v_border_color.rgb, shadow.rgb, shadow_strength);
+			f_color      = mix(shadow, v_border_color, -d);
+			f_color.rgb *= f_color.a;
 			return;
 		} else if (d > -v_border_width) {
 			border_weight = 1.0;
@@ -44,7 +50,7 @@ void main() {
 		}
 	} else {
 		if (d > 0.0) {
-			f_color.a = 0.0;
+			f_color = vec4(0);
 			return;
 		} else if (d > -1.0) {
 			f_color.a = -d;
@@ -58,5 +64,6 @@ void main() {
 		f_color.a *= texture(u_texture_font, texel).r;
 	}
 
-	f_color = mix(f_color, v_border_color, border_weight);
+	f_color      = mix(f_color, v_border_color, border_weight);
+	f_color.rgb *= f_color.a;
 }

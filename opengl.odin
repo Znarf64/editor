@@ -228,7 +228,7 @@ opengl_renderer_init :: proc(
 	opengl_framebuffer_init(renderer)
 
 	gl.Enable(gl.BLEND)
-	gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+	gl.BlendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
 	gl.PixelStorei(gl.PACK_ALIGNMENT,   1)
 	gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1)
 

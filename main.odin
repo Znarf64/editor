@@ -104,7 +104,7 @@ Buffer :: struct {
 	btree:             BTree,
 
 	uri:               Uri,
-	language:          string,
+	language:          Language,
 	diagnostics:       []Diagnostic,
 	diagnostics_arena: vmem.Arena,
 	version:           int,
@@ -347,7 +347,7 @@ editor_go_to :: proc(editor: ^Editor, path: Normalized_Path, start: Offset, end:
 	editor.buffer.selections[0].target_cursor = end
 }
 
-buffer_init :: proc(editor: ^Editor, buffer: ^Buffer, path: Normalized_Path, language: string = "") {
+buffer_init :: proc(editor: ^Editor, buffer: ^Buffer, path: Normalized_Path, language: Language = "") {
 	data := os.read_entire_file(string(path), context.temp_allocator) or_else { '\n', }
 	b    := strings.builder_make(0, len(data), context.temp_allocator)
 	// iterating byte-wise is fine here
@@ -363,7 +363,7 @@ buffer_init :: proc(editor: ^Editor, buffer: ^Buffer, path: Normalized_Path, lan
 	buffer_init_with_data(editor, buffer, path, strings.to_string(b), language)
 }
 
-buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path: Normalized_Path, data: string, language: string = "") {
+buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path: Normalized_Path, data: string, language: Language = "") {
 	path := path_clone(path, context.allocator)
 	log.infof("Opening file '%s'", path)
 
@@ -388,7 +388,7 @@ buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path: Normalized
 }
 
 @(require_results)
-get_language_from_extension :: proc(editor: ^Editor, path: $S/string) -> string {
+get_language_from_extension :: proc(editor: ^Editor, path: $S/string) -> Language {
 	extension := string(path)
 	if dot := strings.last_index_byte(extension, '.'); dot != -1 {
 		extension = extension[dot + 1:]
@@ -398,7 +398,7 @@ get_language_from_extension :: proc(editor: ^Editor, path: $S/string) -> string 
 }
 
 @(require_results)
-editor_get_lsp_server :: proc(editor: ^Editor, language: string) -> ^LSP_Server {
+editor_get_lsp_server :: proc(editor: ^Editor, language: Language) -> ^LSP_Server {
 	if lsp, ok := editor.language_servers[language]; ok {
 		return lsp
 	}
@@ -411,7 +411,7 @@ editor_get_lsp_server :: proc(editor: ^Editor, language: string) -> ^LSP_Server 
 
 	lsp := new(LSP_Server, context.allocator)
 	err := lsp_init(lsp, { config.language_server, })
-	lsp.language_id = language
+	lsp.language = language
 	if err != nil {
 		free(lsp, context.allocator)
 		fmt.eprintfln("Failed to initialize lsp for language '%s'", language)
@@ -502,9 +502,11 @@ Editor :: struct {
 
 	font:                Font,
 
-	language_extensions: map[string]string,
-	language_servers:    map[string]^LSP_Server,
+	language_extensions: map[string]Language,
+	language_servers:    map[Language]^LSP_Server,
 }
+
+Language :: distinct string
 
 Range :: struct {
 	start, end: Offset,
@@ -672,7 +674,7 @@ main :: proc() {
 	}
 	defer config_destroy(&editor.config)
 
-	editor.language_extensions = make(map[string]string)
+	editor.language_extensions = make(map[string]Language)
 	defer delete(editor.language_extensions)
 
 	for language, config in editor.config.languages {
@@ -681,7 +683,13 @@ main :: proc() {
 		}
 	}
 
-	file_open(&editor, "test/test.odin")
+	if len(os.args) >= 2 {
+		file_open(&editor, normalize_path(os.args[1], context.temp_allocator))
+	} else {
+		buffer := new(Buffer)
+		buffer_init_with_data(&editor, buffer, "<scratch>", "\n")
+		editor_open_buffer(&editor, buffer)
+	}
 
 	last_print_time    := time.now()
 	frames_since_print := 0
@@ -1061,7 +1069,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 				str: string
 
 				if editor.buffer.language != "" {
-					str = editor.buffer.language
+					str = string(editor.buffer.language)
 					x  -= measure_text(&editor.font, str)
 					draw_text(&editor.font, commands, str, editor.config.theme[.Ui_Text].fg, { x, screen_size.y - padding, })
 					x  -= padding
@@ -1625,10 +1633,10 @@ popup_render :: proc(
 		blur_radius   = f32(editor.config.blur_strength),
 	)
 
-	line_height := FONT_HEIGHT + editor.config.padding
+	line_height := cell_size.y
 	width: f32
 
-	text_base := popup_rect.min + { editor.config.padding, editor.config.padding + FONT_HEIGHT, }
+	text_base := popup_rect.min + editor.config.padding + { 0, la.round(f32(editor.font.ascender) * editor.font.scale), }
 
 	x, y: f32
 	indentation: f32
@@ -1672,11 +1680,26 @@ popup_render :: proc(
 				x            = indentation
 			}
 		case .Code_Block:
-			language := string(cur.as.code.info)
+			language := Language(cur.as.code.info)
 
 			text = strings.trim_right(text, "\n")
 
 			highlighter := highlighter_create(text, editor.config.languages[language], context.temp_allocator)
+
+			rect_index := len(commands)
+			append(commands, nil)
+
+			pad: f32 = 4
+
+			if y != 0 {
+				y += pad
+			}
+
+			start_y := y
+			code_width: f32
+
+			y += pad
+			x += pad
 
 			column: int
 			render_code: for {
@@ -1690,9 +1713,10 @@ popup_render :: proc(
 					offset := Offset(start + offset)
 
 					if r == '\n' {
-						width  = max(width, x + cell_size.x * f32(column))
-						y     += line_height
-						column = 0
+						width      = max(width, x + cell_size.x * f32(column) + pad * 2)
+						code_width = max(code_width, x + cell_size.x * f32(column))
+						y         += line_height
+						column     = 0
 						continue
 					}
 
@@ -1724,8 +1748,26 @@ popup_render :: proc(
 				}
 			}
 
-			width = max(width, x + cell_size.x * f32(column))
-			y    += line_height
+			y += pad
+
+			width      = max(width, x + cell_size.x * f32(column) + pad * 2)
+			code_width = max(code_width, x + cell_size.x * f32(column))
+			y         += line_height - la.round(f32(editor.font.ascender) * editor.font.scale)
+
+			x -= pad
+
+			commands[rect_index] = Draw_Command_Rect {
+				rect          = {
+					min = text_base + { 0,                    start_y - la.round(f32(editor.font.ascender) * editor.font.scale), },
+					max = text_base + { code_width + pad * 2, y                                                                  },
+				},
+				color         = editor.config.theme[.Ui_Code].fg,
+				border_radius = 4,
+				border_color  = editor.config.theme[.Selection].bg,
+				border_width  = 2,
+			}
+
+			y += la.round(f32(editor.font.ascender) * editor.font.scale)
 		case .HTML_Block:
 			x += draw_text(&editor.font, commands, "HTML_Block",     editor.config.theme[.Operator].fg, { x, y, } + text_base)
 
@@ -1783,10 +1825,6 @@ popup_render :: proc(
 		}
 	}
 
-	if y == 0 {
-		y += line_height
-	}
-
 	rect_base: [2]f32
 
 	switch location {
@@ -1800,7 +1838,7 @@ popup_render :: proc(
 
 	target := Rect {
 		min = rect_base,
-		max = rect_base + { width, y - editor.config.padding, } + editor.config.padding * 2,
+		max = rect_base + { width, y, } + editor.config.padding * 2,
 	}
 
 	if width == 0 {

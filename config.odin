@@ -25,6 +25,7 @@ Style_Key :: enum {
 	Ui_Focus,
 	Ui_Highlight,
 	Ui_Text,
+	Ui_Code,
 
 	Whitespace,
 	Ident,
@@ -67,7 +68,7 @@ Config :: struct {
 
 	theme:                  Theme,
 	keybinds:               [Mode]Keybinds,
-	languages:              map[string]Language_Config,
+	languages:              map[Language]Language_Config,
 	colors:                 map[string][4]f32,
 	leaders:                map[string]Leader_Binds,
 }
@@ -154,7 +155,7 @@ config_value_set :: proc(
 		}
 		unmarshal_value(field, value) or_break
 	case "language":
-		_, language, new, _ := map_entry(&config.languages, subsection)
+		_, language, new, _ := map_entry(&config.languages, Language(subsection))
 		if new {
 			language.extensions = make([dynamic]string, allocator)
 			language.keywords   = make([dynamic]string, allocator)
@@ -236,9 +237,9 @@ config_value_get :: proc(config: ^Config, section, key: string, allocator: runti
 load_config_file :: proc(config: ^Config, src: string, allocator: runtime.Allocator) -> (ok: bool) {
 	it := ini.iterator_from_string(src, {})
 
-	config.colors    = make(map[string][4]f32,          allocator)
-	config.leaders   = make(map[string]Leader_Binds,    allocator)
-	config.languages = make(map[string]Language_Config, allocator)
+	config.colors    = make(map[string][4]f32,            allocator)
+	config.leaders   = make(map[string]Leader_Binds,      allocator)
+	config.languages = make(map[Language]Language_Config, allocator)
 
 	for key, value in ini.iterate(&it) {
 		@(require_results)

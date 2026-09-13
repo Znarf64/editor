@@ -18,7 +18,7 @@ LSP_Error :: union #shared_nil {
 }
 
 LSP_Server :: struct {
-	language_id:    string,
+	language:       Language,
 	process:        os.Process,
 	stdin, stdout: ^os.File,
 	read_buf:       [dynamic]byte,
@@ -263,7 +263,7 @@ lsp_open_file :: proc(lsp: ^LSP_Server, uri: Uri, content: string) {
 
 	_ = send_notification(lsp, "textDocument/didOpen", Did_Open_Text_Document_Params {
 		textDocument = {
-			languageId = lsp.language_id,
+			languageId = string(lsp.language),
 			uri        = uri,
 			text       = content,
 		},
@@ -466,7 +466,7 @@ lsp_get_signature_help :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 			}
 		}
 
-		editor_set_popup_text(editor, "```%s\n%v\n```", lsp.language_id, signature.label, location = .Above, highlight = highlight)
+		editor_set_popup_text(editor, "```%s\n%v\n```", lsp.language, signature.label, location = .Above, highlight = highlight)
 
 		return nil
 	})
