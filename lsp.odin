@@ -361,26 +361,23 @@ lsp_go_to_definition :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 			return nil
 		}
 
-		if location.uri != editor.buffer.uri {
-			path, ok := uri_to_path(location.uri, context.temp_allocator)
-			if !ok {
-				return nil
-			}
-			file_open(editor, normalize_path(path, context.temp_allocator))
+		path, ok := uri_to_path(location.uri, context.temp_allocator)
+		if !ok {
+			return nil
 		}
 
 		if location.range.end.character > 0 {
 			location.range.end.character -= 1
 		}
 
+		file_open(editor, normalize_path(path, context.temp_allocator))
+
 		start := lsp_position_to_offset(&editor.buffer.btree, location.range.start)
 		end   := lsp_position_to_offset(&editor.buffer.btree, location.range.end)
 
-		editor.buffer.primary = 0
-		resize(&editor.buffer.selections, 1)
-		editor.buffer.selections[0].anchor        = start
-		editor.buffer.selections[0].cursor        = end
-		editor.buffer.selections[0].target_cursor = end
+		editor_go_to(editor, "", start, end)
+
+		jumplist_add(editor, editor.buffer.selections[editor.buffer.primary])
 
 		return nil
 	})

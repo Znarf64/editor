@@ -1,5 +1,7 @@
 package editor
 
+import runtime "base:runtime"
+
 import unicode "core:unicode"
 import utf8    "core:unicode/utf8"
 
@@ -7,6 +9,24 @@ Highlighter :: struct {
 	pos:      int,
 	text:     string,
 	keywords: map[string]Style_Key,
+}
+
+@(require_results)
+highlighter_create :: proc(text: string, config: Language_Config, allocator: runtime.Allocator) -> (highlighter: Highlighter) {
+	highlighter.keywords = make(map[string]Style_Key, allocator)
+	highlighter.text     = text
+
+	for k in config.keywords {
+		highlighter.keywords[k] = .Keyword
+	}
+	for c in config.constants {
+		highlighter.keywords[c] = .Constant
+	}
+	for t in config.types {
+		highlighter.keywords[t] = .Type
+	}
+
+	return
 }
 
 @(require_results)

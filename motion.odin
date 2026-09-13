@@ -14,6 +14,9 @@ Primary_Motion :: enum {
 	Show_Code_Actions,
 	Go_To_Definition,
 
+	Jumplist_Forward,
+	Jumplist_Backward,
+
 	Search_Next,
 	Search_Previous,
 	Set_Search,
@@ -32,6 +35,7 @@ Selection_Motion :: enum {
 	Match_In_Paragraph,
 	Match_In_Change,
 	Match_Around_Paragraph,
+	Match_Around_Word,
 
 	Match_In_Curly,
 	Match_In_Paren,
@@ -139,6 +143,10 @@ Motion :: enum {
 	Window_Focus_Right,
 	Window_Focus_Above,
 	Window_Focus_Below,
+	Window_Move_Left,
+	Window_Move_Right,
+	Window_Move_Above,
+	Window_Move_Below,
 	Window_Transpose,
 
 	Save,
@@ -161,42 +169,11 @@ Argument_Motion :: enum {
 	Surround_Replace,
 }
 
-@(rodata)
-argument_motion_descriptions: [Argument_Motion]string = {
-	.Insert_Character = "insert character",
-	.Find             = "find",
-	.Find_Backward    = "find backward",
-	.Replace          = "replace",
-
-	.Surround_Add     = "surround add",
-	.Surround_Delete  = "surround delete",
-	.Surround_Replace = "surround replace",
-}
-
-@(require_results)
-parse_argument_motion :: proc(s: string) -> (motion: Argument_Motion, ok: bool) {
-	b := strings.builder_make(0, len(s), context.temp_allocator)
-	for r in s {
-		r := unicode.to_lower(r)
-		if r == '-' || r == '_' {
-			r = ' '
-		}
-		strings.write_rune(&b, r)
-	}
-
-	s := strings.to_string(b)
-
-	for name, m in argument_motion_descriptions {
-		if name == s {
-			return m, true
-		}
-	}
-
-	return
-}
-
 motion_from_name_table: map[string]Motion
 motion_to_name_table:   [Motion]string
+
+argument_motion_from_name_table: map[string]Argument_Motion
+argument_motion_to_name_table:   [Argument_Motion]string
 
 selection_motion_from_name_table: map[string]Selection_Motion
 selection_motion_to_name_table:   [Selection_Motion]string
@@ -253,6 +230,13 @@ initialize_motion_names :: proc "contextless" () {
 		selection_motion_to_name_table[Selection_Motion(field.value)] = name
 	}
 
+	for field in reflect.enum_fields_zipped(Argument_Motion) {
+		name                                                       := canonicalize_motion_name(field.name, &b)
+		name                                                        = strings.clone(name, allocator)
+		argument_motion_from_name_table[name]                       = Argument_Motion(field.value)
+		argument_motion_to_name_table[Argument_Motion(field.value)] = name
+	}
+
 	return
 }
 
@@ -260,14 +244,22 @@ initialize_motion_names :: proc "contextless" () {
 parse_motion :: proc(s: string) -> (motion: Action, ok: bool) {
 	b         := strings.builder_make(0, len(s), context.temp_allocator)
 	name      := canonicalize_motion_name(s, &b)
+
 	motion, ok = motion_from_name_table[name]
 	if ok {
 		return
 	}
+
 	motion, ok = selection_motion_from_name_table[name]
 	if ok {
 		return
 	}
+
+	motion, ok = argument_motion_from_name_table[name]
+	if ok {
+		return
+	}
+
 	return primary_motion_from_name_table[name]
 }
 
@@ -484,6 +476,16 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, motion: Motion) {
 		window_focus(editor, false, false)
 	case .Window_Focus_Below:
 		window_focus(editor, false, true)
+
+	case .Window_Move_Left:
+		window_move(editor, true, false)
+	case .Window_Move_Right:
+		window_move(editor, true, true)
+	case .Window_Move_Above:
+		window_move(editor, false, false)
+	case .Window_Move_Below:
+		window_move(editor, false, true)
+
 	case .Window_Transpose:
 		window_transpose(editor)
 	}
@@ -560,6 +562,10 @@ primary_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection: ^
 			break
 		}
 		append(history, strings.clone(s, vmem.arena_allocator(&editor.prompt.arena)))
+	case .Jumplist_Forward:
+		jumplist_forward(editor)
+	case .Jumplist_Backward:
+		jumplist_backward(editor)
 	}
 }
 
@@ -659,6 +665,8 @@ selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection:
 		selection.cursor = iter.offset
 		selection.anchor = selection.cursor
 
+	case .Match_Around_Word:
+		unimplemented()
 	case .Match_In_Word:
 		start_offset := selection.cursor
 

@@ -122,6 +122,10 @@ buffer_view_clone :: proc(view: Buffer_View) -> Buffer_View {
 }
 
 editor_open_buffer :: proc(editor: ^Editor, buffer: ^Buffer) {
+	if editor.buffer != nil && editor.buffer.buffer == buffer {
+		return
+	}
+
 	w := &editor.window_tree
 	for {
 		switch &v in w {
@@ -183,7 +187,7 @@ window_split :: proc(editor: ^Editor, vertical: bool) {
 	}
 }
 
-window_focus :: proc(editor: ^Editor, vertical: bool, next: bool) {
+window_focus :: proc(editor: ^Editor, vertical: bool, next: bool) -> (changed: bool) {
 	w := &editor.window_tree
 	p: ^Multi_Window
 	for {
@@ -216,10 +220,19 @@ window_focus :: proc(editor: ^Editor, vertical: bool, next: bool) {
 			}
 
 			window_focus_update(editor)
-			return
+			return true
 		case:
 			panic("Corrupted window tree")
 		}
+	}
+
+	return false
+}
+
+window_move :: proc(editor: ^Editor, vertical: bool, next: bool) {
+	b := editor.buffer
+	if window_focus(editor, vertical, next) {
+		editor.buffer^, b^ = b^, editor.buffer^
 	}
 }
 
@@ -317,6 +330,23 @@ file_open :: proc(editor: ^Editor, path: Normalized_Path) {
 	buffer_init(editor, buffer, path)
 }
 
+editor_go_to :: proc(editor: ^Editor, path: Normalized_Path, start: Offset, end: Offset = -1) {
+	end := end
+	if end == -1 {
+		end = start
+	}
+
+	if path != "" {
+		file_open(editor, path)
+	}
+
+	editor.buffer.primary = 0
+	resize(&editor.buffer.selections, 1)
+	editor.buffer.selections[0].anchor        = start
+	editor.buffer.selections[0].cursor        = end
+	editor.buffer.selections[0].target_cursor = end
+}
+
 buffer_init :: proc(editor: ^Editor, buffer: ^Buffer, path: Normalized_Path, language: string = "") {
 	data := os.read_entire_file(string(path), context.temp_allocator) or_else { '\n', }
 	b    := strings.builder_make(0, len(data), context.temp_allocator)
@@ -339,7 +369,7 @@ buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path: Normalized
 
 	language := language
 	if language == "" {
-		language = get_language_from_extension(path)
+		language = get_language_from_extension(editor, path)
 	}
 
 	buffer^ = {
@@ -358,35 +388,13 @@ buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path: Normalized
 }
 
 @(require_results)
-get_language_from_extension :: proc(path: $S/string) -> string {
+get_language_from_extension :: proc(editor: ^Editor, path: $S/string) -> string {
 	extension := string(path)
 	if dot := strings.last_index_byte(extension, '.'); dot != -1 {
 		extension = extension[dot + 1:]
 	}
 
-	switch strings.to_lower(extension, context.temp_allocator) {
-	case "cpp", "cxx", "cc", "hpp":
-		return "cpp"
-	case "rs":
-		return "rust"
-	case "odin":
-		return "odin"
-	case "c", "h":
-		return "c"
-	case "go":
-		return "go"
-    case "glsl", "vert", "tesc", "tese", "geom", "frag", "comp", "mesh", "task", "rgen", "rint", "rahit", "rchit", "rmiss", "rcall":
-		return "glsl"
-	case "sh":
-		return "sh"
-	case "md":
-		return "markdown"
-	case "lua":
-		return "lua"
-	}
-
-	log.info("Unkown language file extension:", extension)
-	return "text"
+	return editor.language_extensions[extension] or_else "text"
 }
 
 @(require_results)
@@ -395,26 +403,18 @@ editor_get_lsp_server :: proc(editor: ^Editor, language: string) -> ^LSP_Server 
 		return lsp
 	}
 
-	command: []string
-	switch language {
-	case "odin":
-		command = { "ols", }
-	case "cpp", "c":
-		command = { "clangd", }
-	case "glsl":
-		command = { "glsl_analyzer", }
-	case "rust":
-		command = { "rust-analyzer", }
-	case:
+	config := editor.config.languages[language]
+	if config.language_server == "" {
 		fmt.eprintfln("No language server available for language '%s'", language)
 		return nil
 	}
+
 	lsp := new(LSP_Server, context.allocator)
-	err := lsp_init(lsp, command)
+	err := lsp_init(lsp, { config.language_server, })
 	lsp.language_id = language
 	if err != nil {
 		free(lsp, context.allocator)
-		fmt.eprintln("Failed to create lsp:", err)
+		fmt.eprintfln("Failed to initialize lsp for language '%s'", language)
 		return nil
 	}
 
@@ -472,37 +472,38 @@ Popup_Location :: enum {
 }
 
 Editor :: struct {
-	backend:          ^Backend,
+	backend:             ^Backend,
 
-	mode:             Mode,
+	mode:                Mode,
 
-	window_tree:      Window,
-	buffers:          [dynamic]^Buffer,
-	buffer:           ^Buffer_View,
+	window_tree:         Window,
+	buffers:             [dynamic]^Buffer,
+	buffer:              ^Buffer_View,
 
-	new_selections:   [dynamic]New_Selection,
+	new_selections:      [dynamic]New_Selection,
 
-	repeat_count:     int,
+	repeat_count:        int,
 
-	leader:           Leader,
+	leader:              Leader,
 
-	popups:           [Popup_Location]Popup,
+	popups:              [Popup_Location]Popup,
 
-	picker:           Picker,
+	picker:              Picker,
 
-	clipboard:        strings.Builder,
+	clipboard:           strings.Builder,
 
-	jumplist:         Jumplist,
+	jumplist:            Jumplist,
 
-	status:           strings.Builder,
+	status:              strings.Builder,
 
-	prompt:           Prompt,
+	prompt:              Prompt,
 
-	config:           Config,
+	config:              Config,
 
-	font:             Font,
+	font:                Font,
 
-	language_servers: map[string]^LSP_Server,
+	language_extensions: map[string]string,
+	language_servers:    map[string]^LSP_Server,
 }
 
 Range :: struct {
@@ -517,17 +518,26 @@ Jumplist_Entry :: struct {
 
 Jumplist :: struct {
 	entries: [dynamic]Jumplist_Entry,
-	arena:   vmem.Arena,
+	cursor:  int,
+	arena:   vmem.Arena `fmt:"-"`,
+}
+
+jumplist_init :: proc(editor: ^Editor) {
+	vmem.arena_init_growing(&editor.jumplist.arena) or_else panic("Failed to initialize arena")
 }
 
 jumplist_add :: proc(editor: ^Editor, selection: Selection) {
+	// we should be using a linear allocator that we can reset to some point since entries will become irrelevant in a linear fashion
 	allocator := vmem.arena_allocator(&editor.jumplist.arena)
 
+	resize(&editor.jumplist.entries, editor.jumplist.cursor)
+	editor.jumplist.cursor += 1
+
 	start := min(selection.anchor, selection.cursor)
-	end   := btree_offset_after(&editor.buffer.btree, max(selection.anchor, selection.cursor))
+	end   := max(selection.anchor, selection.cursor)
 
 	b := strings.builder_make(allocator)
-	btree_to_string(&editor.buffer.btree, &b, start, end)
+	btree_to_string(&editor.buffer.btree, &b, start, btree_offset_after(&editor.buffer.btree, end))
 
 	append(&editor.jumplist.entries, Jumplist_Entry {
 		path    = editor.buffer.path,
@@ -537,11 +547,36 @@ jumplist_add :: proc(editor: ^Editor, selection: Selection) {
 	})
 }
 
+jumplist_forward :: proc(editor: ^Editor) {
+	if editor.jumplist.cursor >= len(editor.jumplist.entries) - 1 {
+		editor_set_status(editor, "End of jumplist")
+		return
+	}
+
+	editor.jumplist.cursor += 1
+	entry                  := editor.jumplist.entries[editor.jumplist.cursor]
+
+	editor_go_to(editor, entry.path, entry.start, entry.end)
+}
+
+jumplist_backward :: proc(editor: ^Editor) {
+	if editor.jumplist.cursor == 0 {
+		editor_set_status(editor, "End of jumplist")
+		return
+	}
+
+	editor.jumplist.cursor -= 1
+	entry                  := editor.jumplist.entries[editor.jumplist.cursor]
+
+	editor_go_to(editor, entry.path, entry.start, entry.end)
+}
+
 Prompt :: struct {
-	mode:    Prompt_Mode,
-	input:   Input_Line,
-	history: [Prompt_Mode][dynamic]string,
-	arena:   vmem.Arena,
+	mode:           Prompt_Mode,
+	input:          Input_Line,
+	history:        [Prompt_Mode][dynamic]string,
+	history_cursor: int,
+	arena:          vmem.Arena,
 }
 
 window_tree_destroy :: proc(window_tree: Window) {
@@ -586,12 +621,12 @@ main :: proc() {
 	}
 	editor.new_selections = make([dynamic]New_Selection)
 
-	err := vmem.arena_init_growing(&editor.prompt.arena)
-	assert(err == nil)
-	err  = vmem.arena_init_growing(&editor.leader.arena)
-	assert(err == nil)
-	err  = vmem.arena_init_growing(&editor.jumplist.arena)
-	assert(err == nil)
+	editor.prompt.history_cursor = -1
+
+	vmem.arena_init_growing(&editor.prompt.arena) or_else panic("Failed to initialize arena")
+	vmem.arena_init_growing(&editor.leader.arena) or_else panic("Failed to initialize arena")
+
+	jumplist_init(&editor)
 
 	defer {
 		editor.backend->destroy()
@@ -637,6 +672,15 @@ main :: proc() {
 	}
 	defer config_destroy(&editor.config)
 
+	editor.language_extensions = make(map[string]string)
+	defer delete(editor.language_extensions)
+
+	for language, config in editor.config.languages {
+		for extension in config.extensions {
+			editor.language_extensions[extension] = language
+		}
+	}
+
 	file_open(&editor, "test/test.odin")
 
 	last_print_time    := time.now()
@@ -678,9 +722,34 @@ main :: proc() {
 					case .Submit:
 						prompt_apply(&editor)
 						editor.mode = .Normal
+						editor.prompt.history_cursor = -1
 					case .Exit:
 						editor.mode = .Normal
+						editor.prompt.history_cursor = -1
 					case .Change:
+						editor.prompt.history_cursor = -1
+					case .Next:
+						history := editor.prompt.history[editor.prompt.mode]
+						if len(history) == 0 {
+							editor.prompt.history_cursor = -1
+							break
+						}
+						if editor.prompt.history_cursor >= len(history) - 1 {
+							editor.prompt.history_cursor = -1
+						}
+						editor.prompt.history_cursor += 1
+						input_line_set_text(&editor.prompt.input, history[editor.prompt.history_cursor])
+					case .Prev:
+						history := editor.prompt.history[editor.prompt.mode]
+						if len(history) == 0 {
+							editor.prompt.history_cursor = -1
+							break
+						}
+						if editor.prompt.history_cursor < 1 {
+							editor.prompt.history_cursor = len(history)
+						}
+						editor.prompt.history_cursor -= 1
+						input_line_set_text(&editor.prompt.input, history[editor.prompt.history_cursor])
 					}
 					break
 				}
@@ -688,18 +757,6 @@ main :: proc() {
 				if editor.mode == .Picker {
 					switch input_line_handle_event(&editor.picker.input, e) {
 					case .None:
-						#partial switch e.key {
-						case .Tab:
-							if .Shift in e.modifiers {
-								picker_focus_prev(&editor)
-							} else {
-								picker_focus_next(&editor)
-							}
-						case .Down:
-							picker_focus_next(&editor)
-						case .Up:
-							picker_focus_prev(&editor)
-						}
 					case .Submit:
 						picker_submit(&editor)
 						editor.mode = .Normal
@@ -707,6 +764,10 @@ main :: proc() {
 						editor.mode = .Normal
 					case .Change:
 						picker_update(&editor)
+					case .Next:
+						picker_focus_next(&editor)
+					case .Prev:
+						picker_focus_prev(&editor)
 					}
 					break
 				}
@@ -1116,7 +1177,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		}
 		w := input_line_render(editor, commands, &editor.prompt.input, { x, screen_size.y - padding, }, delta_time, default)
 
-		text := strings.to_string(editor.prompt.input.buffer)
+		text := input_line_get_text(editor.prompt.input)
 		if text == "" {
 			text = default
 		}
@@ -1377,15 +1438,15 @@ regex_create :: proc(editor: ^Editor, pattern_string: string, extra_flags: regex
 
 prompt_apply :: proc(editor: ^Editor) {
 	history := &editor.prompt.history[editor.prompt.mode]
-	if strings.builder_len(editor.prompt.input.buffer) == 0 {
+	if len(editor.prompt.input.buffer) == 0 {
 		if len(history) != 0 {
-			strings.write_string(&editor.prompt.input.buffer, history[len(history) - 1])
+			append(&editor.prompt.input.buffer, history[len(history) - 1])
 		}
 	} else {
-		append(history, strings.clone(strings.to_string(editor.prompt.input.buffer), vmem.arena_allocator(&editor.prompt.arena)))
+		append(history, strings.clone(input_line_get_text(editor.prompt.input), vmem.arena_allocator(&editor.prompt.arena)))
 	}
 
-	input := strings.to_string(editor.prompt.input.buffer)
+	input := input_line_get_text(editor.prompt.input)
 
 	switch editor.prompt.mode {
 	case .Select:
@@ -1471,7 +1532,12 @@ prompt_apply :: proc(editor: ^Editor) {
 	case .Search:
 		regex_search(editor, editor.buffer, input)
 	case .Command:
-		command_execute(editor, Command(strings.to_string(editor.prompt.input.buffer)))
+		command, ok := parse_command(input_line_get_text(editor.prompt.input), context.temp_allocator)
+		if !ok {
+			editor_set_status(editor, "Failed to parse command")
+			break
+		}
+		command_execute(editor, command)
 	}
 	input_line_reset(&editor.prompt.input)
 }
@@ -1606,14 +1672,11 @@ popup_render :: proc(
 				x            = indentation
 			}
 		case .Code_Block:
-			// language := string(cur.as.code.info)
+			language := string(cur.as.code.info)
 
 			text = strings.trim_right(text, "\n")
 
-			highlighter: Highlighter = {
-				text     = text,
-				keywords = editor.config.styles,
-			}
+			highlighter := highlighter_create(text, editor.config.languages[language], context.temp_allocator)
 
 			column: int
 			render_code: for {
@@ -1843,10 +1906,7 @@ buffer_render :: proc(
 		}
 	}
 
-	highlighter: Highlighter = {
-		text     = text,
-		keywords = editor.config.styles,
-	}
+	highlighter := highlighter_create(text, editor.config.languages[buffer.language], context.temp_allocator)
 
 	cursors := make(map[Offset]int, context.temp_allocator)
 	if active {
@@ -2111,7 +2171,7 @@ buffer_render :: proc(
 }
 
 Input_Line :: struct {
-	buffer:      strings.Builder,
+	buffer:      [dynamic]u8,
 	default:     string,
 	cursor:      int,
 	cursor_anim: Animation(f32),
@@ -2122,11 +2182,24 @@ Input_Line_Result :: enum {
 	Submit,
 	Exit,
 	Change,
+
+	Next,
+	Prev,
+}
+
+input_line_set_text :: proc(input: ^Input_Line, text: string) {
+	clear(&input.buffer)
+	append(&input.buffer, text)
+	input.cursor = len(input.buffer)
 }
 
 @(require_results)
 input_line_handle_event :: proc(input: ^Input_Line, event: Event) -> Input_Line_Result {
-	defer input.cursor = strings.builder_len(input.buffer)
+	@(require_results)
+	is_word :: proc(r: rune) -> bool {
+		return r == '_' || unicode.is_letter(r) || unicode.is_number(r)
+	}
+
 	#partial switch e in event {
 	case Event_Input_Key:
 		if e.action == .Up {
@@ -2134,40 +2207,96 @@ input_line_handle_event :: proc(input: ^Input_Line, event: Event) -> Input_Line_
 		}
 		#partial switch e.key {
 		case .Escape:
-			strings.builder_reset(&input.buffer)
+			clear(&input.buffer)
 			input.cursor = 0
 			return .Exit
 		case .Enter:
 			return .Submit
 		case .Backspace:
-			@(require_results)
-			is_word :: proc(r: rune) -> bool {
-				return r == '_' || unicode.is_letter(r) || unicode.is_number(r)
-			}
+			end := input.cursor
 
-			r, w := strings.pop_rune(&input.buffer)
+			r, w := utf8.decode_last_rune(input.buffer[:input.cursor])
 			(w != 0) or_break
+			input.cursor -= w
 
-			if e.modifiers & { .Control, .Alt, } == {} {
-				return .Change
+			if e.modifiers & { .Control, .Alt, } != {} {
+				for !is_word(r) {
+					r, w = utf8.decode_last_rune(input.buffer[:input.cursor])
+					(w != 0) or_break
+					input.cursor -= w
+				}
+				for {
+					r, w = utf8.decode_last_rune(input.buffer[:input.cursor])
+					(w != 0) or_break
+					if is_word(r) {
+						input.cursor -= w
+					} else {
+						break
+					}
+				}
 			}
 
-			for !is_word(r) {
-				r, w = strings.pop_rune(&input.buffer)
-				(w != 0) or_break
-			}
-			for is_word(r) {
-				r, w = strings.pop_rune(&input.buffer)
-				(w != 0) or_break
-			}
-			if !is_word(r) && w != 0 {
-				strings.write_rune(&input.buffer, r)
-			}
+			remove_range(&input.buffer, input.cursor, end)
+
 			return .Change
+		case .Tab:
+			if .Shift in e.modifiers {
+				return .Prev
+			} else {
+				return .Next
+			}
+		case .Down:
+			return .Next
+		case .Up:
+			return .Prev
+		case .Left:
+			r, w := utf8.decode_last_rune(input.buffer[:input.cursor])
+			(w != 0) or_break
+			input.cursor -= w
+
+			if e.modifiers & { .Control, .Alt, } != {} {
+				for !is_word(r) {
+					r, w = utf8.decode_last_rune(input.buffer[:input.cursor])
+					(w != 0) or_break
+					input.cursor -= w
+				}
+				for {
+					r, w = utf8.decode_last_rune(input.buffer[:input.cursor])
+					(w != 0) or_break
+					if is_word(r) {
+						input.cursor -= w
+					} else {
+						break
+					}
+				}
+			}
+		case .Right:
+			r, w := utf8.decode_rune(input.buffer[input.cursor:])
+			(w != 0) or_break
+			input.cursor += w
+
+			if e.modifiers & { .Control, .Alt, } != {} {
+				for !is_word(r) {
+					r, w = utf8.decode_rune(input.buffer[input.cursor:])
+					(w != 0) or_break
+					input.cursor += w
+				}
+				for {
+					r, w = utf8.decode_rune(input.buffer[input.cursor:])
+					(w != 0) or_break
+					if is_word(r) {
+						input.cursor += w
+					} else {
+						break
+					}
+				}
+			}
 		}
 		return .None
 	case Event_Input_Codepoint:
-		strings.write_rune(&input.buffer, e.codepoint)
+		buf, n := utf8.encode_rune(e.codepoint)
+		inject_at(&input.buffer, input.cursor, ..buf[:n])
+		input.cursor += n
 		return .Change
 	case Event_Input_Mouse_Button:
 		// TODO?
@@ -2178,13 +2307,17 @@ input_line_handle_event :: proc(input: ^Input_Line, event: Event) -> Input_Line_
 }
 
 input_line_destroy :: proc(input: Input_Line) {
-	input := input
-	strings.builder_destroy(&input.buffer)
+	delete(input.buffer)
 }
 
 input_line_reset :: proc(input: ^Input_Line) {
-	strings.builder_reset(&input.buffer)
+	clear(&input.buffer)
 	input.cursor = 0
+}
+
+@(require_results)
+input_line_get_text :: proc(input: Input_Line) -> string {
+	return string(input.buffer[:])
 }
 
 input_line_render :: proc(
@@ -2195,7 +2328,7 @@ input_line_render :: proc(
 	delta_time: f32,
 	default := "",
 ) -> (width: f32) {
-	text := strings.to_string(input.buffer)
+	text := input_line_get_text(input^)
 	if text == "" {
 		text = default
 	}

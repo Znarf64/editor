@@ -365,13 +365,18 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: [
 
 			flush(renderer)
 
+			radius := v.radius
+			if radius > 32 {
+				radius = 32
+			}
+
 			gl.UseProgram(renderer.blur_program)
 
 			weights: [32]f32
-			compute_gaussian_weights(weights[:], int(v.radius), v.radius / 2)
+			compute_gaussian_weights(weights[:], int(radius), radius / 2)
 
-			gl.Uniform1i(OPENGL_UNIFORM_BLUR_SAMPLES, i32(v.radius))
-			gl.Uniform1fv(OPENGL_UNIFORM_BLUR_WEIGHTS, i32(v.radius), &weights[0])
+			gl.Uniform1i(OPENGL_UNIFORM_BLUR_SAMPLES, i32(radius))
+			gl.Uniform1fv(OPENGL_UNIFORM_BLUR_WEIGHTS, i32(radius), &weights[0])
 
 			gl.BindImageTexture(0, renderer.main_texture,  0, false, 0, gl.READ_WRITE, gl.RGBA8)
 			gl.BindImageTexture(1, renderer.blur_texture,  0, false, 0, gl.READ_WRITE, gl.RGBA8)
@@ -393,8 +398,8 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: [
 			LOCAL_SIZE :: 16
 
 			gl.DispatchCompute(
-				u32(                    i32(v.rect.max.x) - i32(v.rect.min.x) + LOCAL_SIZE - 1) / LOCAL_SIZE,
-				u32(2 * i32(v.radius) + i32(v.rect.max.y) - i32(v.rect.min.y) + LOCAL_SIZE - 1) / LOCAL_SIZE,
+				u32(                  i32(v.rect.max.x) - i32(v.rect.min.x) + LOCAL_SIZE - 1) / LOCAL_SIZE,
+				u32(2 * i32(radius) + i32(v.rect.max.y) - i32(v.rect.min.y) + LOCAL_SIZE - 1) / LOCAL_SIZE,
 				1,
 			)
 			gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT)

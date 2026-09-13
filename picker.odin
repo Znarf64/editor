@@ -18,21 +18,21 @@ Picker_File :: struct {
 }
 
 Picker :: struct {
-	mode:        Picker_Mode,
-	input:       Input_Line,
-	items:       [dynamic]Picker_Item,
-	active:      int,
-	matching:    int,
-	arena:       vmem.Arena,
+	mode:         Picker_Mode,
+	input:        Input_Line,
+	items:        [dynamic]Picker_Item,
+	active:       int,
+	matching:     int,
+	arena:        vmem.Arena,
 
-	active_anim: Animation(f32),
+	active_anim:  Animation(f32),
 
-	files:       []Picker_File,
-	symbols:     []Picker_Symbol,
-	diagnostics: []Diagnostic,
+	files:        []Picker_File,
+	symbols:      []Picker_Symbol,
+	diagnostics:  []Diagnostic,
 
-	rect:        Animation(Rect),
-	// preview_rect: Animation(Rect),
+	rect:         Animation(Rect),
+	preview_rect: Animation(Rect),
 }
 
 Picker_Mode :: enum {
@@ -109,12 +109,11 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 		for info in os.walker_walk(&w) {
 			_ = os.walker_error(&w) or_break
 
-			if strings.has_suffix(info.fullpath, ".git") {
-				os.walker_skip_dir(&w)
-				continue
-			}
-
 			if info.type == .Directory {
+				if strings.has_suffix(info.fullpath, ".git") {
+					os.walker_skip_dir(&w)
+				}
+
 				continue
 			}
 
@@ -176,7 +175,43 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 
 		editor.picker.diagnostics = diagnostics
 	case .Commands:
-		unimplemented()
+		resize(&editor.picker.items, len(Command) + len(Motion) + len(Argument_Motion) + len(Selection_Motion) + len(Primary_Motion))
+		i := 0
+		for command in Command {
+			editor.picker.items[i] = {
+				name = fmt.aprint(":", command_to_name_table[command], sep = "", allocator = allocator),
+				id   = i,
+			}
+			i += 1
+		}
+		for motion in Motion {
+			editor.picker.items[i] = {
+				name = motion_to_name_table[motion],
+				id   = i,
+			}
+			i += 1
+		}
+		for motion in Argument_Motion {
+			editor.picker.items[i] = {
+				name = argument_motion_to_name_table[motion],
+				id   = i,
+			}
+			i += 1
+		}
+		for motion in Selection_Motion {
+			editor.picker.items[i] = {
+				name = selection_motion_to_name_table[motion],
+				id   = i,
+			}
+			i += 1
+		}
+		for motion in Primary_Motion {
+			editor.picker.items[i] = {
+				name = primary_motion_to_name_table[motion],
+				id   = i,
+			}
+			i += 1
+		}
 	case .Buffers:
 		resize(&editor.picker.items, len(editor.buffers))
 		for b, i in editor.buffers {
@@ -216,7 +251,7 @@ picker_focus_prev :: proc(editor: ^Editor, n := 1) {
 }
 
 picker_update :: proc(editor: ^Editor) {
-	pattern := strings.to_string(editor.picker.input.buffer)
+	pattern := input_line_get_text(editor.picker.input)
 
 	editor.picker.active = 0
 
@@ -262,10 +297,7 @@ picker_submit :: proc(editor: ^Editor) {
 	case .Symbols:
 		symbol := picker.symbols[active]
 
-		if symbol.location.uri != editor.buffer.uri {
-			path := uri_to_path(symbol.location.uri, context.temp_allocator) or_break
-			file_open(editor, normalize_path(path, context.temp_allocator))
-		}
+		path := uri_to_path(symbol.location.uri, context.temp_allocator) or_break
 
 		if symbol.location.range.end.character > 0 {
 			symbol.location.range.end.character -= 1
@@ -274,21 +306,12 @@ picker_submit :: proc(editor: ^Editor) {
 		start := lsp_position_to_offset(&editor.buffer.btree, symbol.location.range.start)
 		end   := lsp_position_to_offset(&editor.buffer.btree, symbol.location.range.end)
 
-		editor.buffer.primary = 0
-		resize(&editor.buffer.selections, 1)
-		editor.buffer.selections[0].anchor        = start
-		editor.buffer.selections[0].cursor        = end
-		editor.buffer.selections[0].target_cursor = end
+		editor_go_to(editor, normalize_path(path, context.temp_allocator), start, end)
 
 		editor.mode = .Normal
 	case .Diagnostics:
 		diagnostic := picker.diagnostics[active]
-
-		editor.buffer.primary = 0
-		resize(&editor.buffer.selections, 1)
-		editor.buffer.selections[0].anchor        = diagnostic.start
-		editor.buffer.selections[0].cursor        = diagnostic.end
-		editor.buffer.selections[0].target_cursor = diagnostic.end
+		editor_go_to(editor, editor.buffer.path, diagnostic.start, diagnostic.end)
 
 		editor.mode = .Normal
 	case .Commands:
@@ -297,11 +320,7 @@ picker_submit :: proc(editor: ^Editor) {
 		editor_open_buffer(editor, editor.buffers[active])
 	case .Jumplist:
 		entry := editor.jumplist.entries[active]
-		file_open(editor, entry.path)
-		resize(&editor.buffer.selections, 1)
-		editor.buffer.selections[0].anchor        = entry.start
-		editor.buffer.selections[0].cursor        = entry.end
-		editor.buffer.selections[0].target_cursor = entry.end
+		editor_go_to(editor, entry.path, entry.start, entry.end)
 	}
 }
 
@@ -343,6 +362,21 @@ item_match_score :: proc(item, pattern: string) -> int {
 picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time, padding: f32, screen_size: [2]f32) {
 	picker := &editor.picker
 
+	// {
+	// 	rect    := rect_from_min_max(100, { screen_size.x / 2 - 25, screen_size.y - 100, })
+	// 	preview := rect_from_min_max({ screen_size.x / 2 + 25, 100, }, screen_size - 100)
+
+	// 	if editor.mode != .Picker {
+	// 		rect.min = rect_center(rect)
+	// 		rect.max = rect.min
+
+	// 		preview.min = rect_center(preview)
+	// 		preview.max = preview.min
+	// 	}
+
+	// 	animation_set_target(&picker.rect, rect)
+	// 	animation_set_target(&picker.preview_rect, preview)
+	// }
 	if editor.mode == .Picker {
 		rect := rect_from_min_max(100, screen_size - 100)
 		animation_set_target(&picker.rect, rect)
@@ -352,6 +386,7 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 	}
 
 	picker_rect := animation_update(&picker.rect, delta_time, editor.config.popup_animation_speed)
+	// preview_rect := animation_update(&picker.preview_rect, delta_time, editor.config.popup_animation_speed)
 
 	if rect_size(picker_rect) == 0 {
 		return
@@ -367,6 +402,17 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 		shadow_width  = 16,
 		blur_radius   = f32(editor.config.blur_strength),
 	)
+
+	// draw_rect(commands,
+	// 	offset        = preview_rect.min,
+	// 	size          = rect_size(preview_rect),
+	// 	color         = editor.config.theme[.Popup_Background].fg,
+	// 	border_color  = editor.config.theme[.Popup_Border].fg,
+	// 	border_radius = 8,
+	// 	border_width  = 2,
+	// 	shadow_width  = 16,
+	// 	blur_radius   = f32(editor.config.blur_strength),
+	// )
 
 	clip_rect := rect_inflate(picker_rect, -2)
 	if clip_rect.min.x >= clip_rect.max.x || clip_rect.min.y >= clip_rect.max.y {
@@ -396,7 +442,7 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 		x := picker_rect.min.x + padding
 		y := picker_rect.min.y + line_height * 2 + padding + 2
 
-		pattern := strings.to_string(picker.input.buffer)
+		pattern := input_line_get_text(picker.input)
 
 		animation_set_target(&picker.active_anim, f32(picker.active))
 		active := animation_update(&picker.active_anim, delta_time, editor.config.cursor_animation_speed)

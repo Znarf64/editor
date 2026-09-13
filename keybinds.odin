@@ -4,6 +4,7 @@ import runtime "base:runtime"
 
 import strings "core:strings"
 import slice   "core:slice"
+import reflect "core:reflect"
 import vmem    "core:mem/virtual"
 
 Key :: enum {
@@ -92,7 +93,7 @@ Leader_Binds :: struct {
 Action :: union {
 	[]Action,
 	Leader_Binds,
-	Command,
+	Prepared_Command,
 	Motion,
 	Primary_Motion,
 	Selection_Motion,
@@ -175,7 +176,7 @@ action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {
 			editor.repeat_count = 1
 		}
 		primary_motion_apply(editor, editor.buffer, &editor.buffer.selections[editor.buffer.primary], v)
-	case Command:
+	case Prepared_Command:
 		command_execute(editor, v)
 	case Argument_Motion:
 		editor.leader.motion = v
@@ -212,69 +213,15 @@ modifier_names: [Modifier]string = {
 	.Control = "C",
 }
 
-key_names: [Key]string = {
-	.Escape        = "escape",
-	.Enter         = "enter",
-	.Space         = "space",
-	.Backspace     = "backspace",
-	.Delete        = "delete",
-	.Tab           = "tab",
-	.Left          = "left",
-	.Right         = "right",
-	.Up            = "up",
-	.Down          = "down",
-	.Page_Up       = "page_up",
-	.Page_Down     = "page_down",
+key_names: [Key]string
 
-	.Apostrophe    = "apostrophe",
-	.Comma         = "comma",
-	.Minus         = "minus",
-	.Period        = "period",
-	.Slash         = "slash",
-	.Semicolon     = "semicolon",
-	.Equal         = "equal",
-	.Left_Bracket  = "left_bracket",
-	.Backslash     = "backslash",
-	.Right_Bracket = "right_bracket",
-	.Grave_Accent  = "grave_accent",
+@(init)
+key_names_init :: proc "contextless" () {
+	context = runtime.default_context()
 
-	.A = "a",
-	.B = "b",
-	.C = "c",
-	.D = "d",
-	.E = "e",
-	.F = "f",
-	.G = "g",
-	.H = "h",
-	.I = "i",
-	.J = "j",
-	.K = "k",
-	.L = "l",
-	.M = "m",
-	.N = "n",
-	.O = "o",
-	.P = "p",
-	.Q = "q",
-	.R = "r",
-	.S = "s",
-	.T = "t",
-	.U = "u",
-	.V = "v",
-	.W = "w",
-	.X = "x",
-	.Y = "y",
-	.Z = "z",
-
-	._0 = "0",
-	._1 = "1",
-	._2 = "2",
-	._3 = "3",
-	._4 = "4",
-	._5 = "5",
-	._6 = "6",
-	._7 = "7",
-	._8 = "8",
-	._9 = "9",
+	for field in reflect.enum_fields_zipped(Key) {
+		key_names[Key(field.value)] = strings.to_lower(strings.trim_prefix(field.name, "_"))
+	}
 }
 
 @(require_results)
@@ -356,8 +303,20 @@ action_to_string :: proc(action: Action, arena: ^vmem.Arena) -> string {
 		return strings.concatenate(strs, vmem.arena_allocator(arena))
 	case Leader_Binds:
 		return v.title
-	case Command:
-		return string(v)
+	case Prepared_Command:
+		name := command_to_name_table[v.command]
+		n    := len(name)
+		for arg in v.args {
+			n += len(arg)
+		}
+		bytes := make([]byte, n, vmem.arena_allocator(arena))
+
+		offset := copy(bytes[:], name)
+		for arg in v.args {
+			offset += copy(bytes[offset:], arg)
+		}
+
+		return string(bytes)
 	case Motion:
 		return motion_to_name_table[v]
 	case Primary_Motion:
@@ -365,7 +324,7 @@ action_to_string :: proc(action: Action, arena: ^vmem.Arena) -> string {
 	case Selection_Motion:
 		return selection_motion_to_name_table[v]
 	case Argument_Motion:
-		return argument_motion_descriptions[v]
+		return argument_motion_to_name_table[v]
 	}
 
 	return ""
