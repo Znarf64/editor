@@ -1713,7 +1713,7 @@ popup_render :: proc(
 					offset := Offset(start + offset)
 
 					if r == '\n' {
-						width      = max(width, x + cell_size.x * f32(column) + pad * 2)
+						width      = max(width, x + cell_size.x * f32(column) + pad)
 						code_width = max(code_width, x + cell_size.x * f32(column))
 						y         += line_height
 						column     = 0
@@ -1750,7 +1750,7 @@ popup_render :: proc(
 
 			y += pad
 
-			width      = max(width, x + cell_size.x * f32(column) + pad * 2)
+			width      = max(width, x + cell_size.x * f32(column) + pad)
 			code_width = max(code_width, x + cell_size.x * f32(column))
 			y         += line_height - la.round(f32(editor.font.ascender) * editor.font.scale)
 
@@ -1758,8 +1758,8 @@ popup_render :: proc(
 
 			commands[rect_index] = Draw_Command_Rect {
 				rect          = {
-					min = text_base + { 0,                    start_y - la.round(f32(editor.font.ascender) * editor.font.scale), },
-					max = text_base + { code_width + pad * 2, y                                                                  },
+					min = text_base + { 0,                start_y - la.round(f32(editor.font.ascender) * editor.font.scale), },
+					max = text_base + { code_width + pad, y                                                                  },
 				},
 				color         = editor.config.theme[.Ui_Code].fg,
 				border_radius = 4,
