@@ -96,7 +96,6 @@ lsp_init :: proc(lsp: ^LSP_Server, command: []string) -> (err: LSP_Error) {
 			response: Response(Initialize_Result)
 			err := json.unmarshal(content, &response, allocator = allocator)
 			if err != nil {
-				fmt.println(string(content))
 				return err
 			}
 
@@ -318,7 +317,7 @@ lsp_save :: proc(lsp: ^LSP_Server, buffer: ^Buffer) {
 lsp_go_to_definition :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 	lsp := editor_get_lsp_server(editor, buffer.language)
 	if lsp == nil || !lsp.initialized {
-		editor_set_popup_text(editor, "no lsp server available")
+		editor_set_status(editor, "No lsp server available")
 		return
 	}
 
@@ -393,7 +392,7 @@ Markup_Content :: struct {
 lsp_get_hover_information :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 	lsp := editor_get_lsp_server(editor, buffer.language)
 	if lsp == nil || !lsp.initialized {
-		editor_set_popup_text(editor, "no lsp server available")
+		editor_set_status(editor, "No lsp server available")
 		return
 	}
 	cursor     := buffer.selections[buffer.primary].cursor
@@ -414,14 +413,12 @@ lsp_get_hover_information :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 		})
 		json.unmarshal(content, &response, allocator = context.temp_allocator) or_return
 
-		text: string
 		switch v in response.result.contents {
 		case Markup_Content:
-			text = v.value
+			editor_set_popup_text(editor, .Markdown, "%v", v.value)
 		case string:
-			text = v
+			editor_set_popup_text(editor, .Code, "%v", v)
 		}
-		editor_set_popup_text(editor, "%v", text)
 		return nil
 	})
 }
@@ -429,7 +426,7 @@ lsp_get_hover_information :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 lsp_get_signature_help :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 	lsp := editor_get_lsp_server(editor, buffer.language)
 	if lsp == nil || !lsp.initialized {
-		editor_set_popup_text(editor, "no lsp server available")
+		editor_set_status(editor, "No lsp server available")
 		return
 	}
 
@@ -447,7 +444,7 @@ lsp_get_signature_help :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 		json.unmarshal(content, &response, allocator = context.temp_allocator) or_return
 
 		if len(response.result.signatures) == 0 {
-			editor_set_popup_text(editor, "")
+			editor_set_popup_text(editor, .Text, "", location = .Above)
 			return nil
 		}
 
@@ -466,7 +463,7 @@ lsp_get_signature_help :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 			}
 		}
 
-		editor_set_popup_text(editor, "```%s\n%v\n```", lsp.language, signature.label, location = .Above, highlight = highlight)
+		editor_set_popup_text(editor, .Code, "%s", signature.label, location = .Above, highlight = highlight)
 
 		return nil
 	})
@@ -475,7 +472,7 @@ lsp_get_signature_help :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 lsp_get_completion :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 	lsp := editor_get_lsp_server(editor, buffer.language)
 	if lsp == nil || !lsp.initialized {
-		editor_set_popup_text(editor, "no lsp server available")
+		editor_set_status(editor, "No lsp server available")
 		return
 	}
 
@@ -543,7 +540,7 @@ lsp_get_completion :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 		}
 
 		if strings.builder_len(b) != 0 {
-			editor_set_popup_text(editor, "%s", strings.to_string(b), location = .Below)
+			editor_set_popup_text(editor, .Text, "%s", strings.to_string(b), location = .Below)
 		}
 
 		return nil

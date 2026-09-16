@@ -608,10 +608,11 @@ btree_offset_before :: proc(btree: ^BTree, offset: Offset, n := 1) -> Offset {
 }
 
 @(require_results)
-btree_offset_after :: proc(btree: ^BTree, offset: Offset, n := 1) -> Offset {
+btree_offset_after :: proc(btree: ^BTree, offset: Offset, n := 1) -> (new_offset: Offset) {
 	iter := btree_iterator(btree, offset)
 	for _ in 0 ..= n {
-		_ = btree_iter(&iter) or_break
+		_          = btree_iter(&iter) or_break
+		new_offset = iter.offset
 	}
-	return iter.offset
+	return
 }

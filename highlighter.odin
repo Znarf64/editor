@@ -5,16 +5,26 @@ import runtime "base:runtime"
 import unicode "core:unicode"
 import utf8    "core:unicode/utf8"
 
+Highlighter_Kind :: enum {
+	Text,
+	C_Like,
+}
+
 Highlighter :: struct {
 	pos:      int,
 	text:     string,
 	keywords: map[string]Style_Key,
+
+	kind:     Highlighter_Kind,
 }
 
 @(require_results)
 highlighter_create :: proc(text: string, config: Language_Config, allocator: runtime.Allocator) -> (highlighter: Highlighter) {
+	highlighter.text = text
+
+	highlighter.kind = .C_Like
+
 	highlighter.keywords = make(map[string]Style_Key, allocator)
-	highlighter.text     = text
 
 	for k in config.keywords {
 		highlighter.keywords[k] = .Keyword
@@ -26,6 +36,10 @@ highlighter_create :: proc(text: string, config: Language_Config, allocator: run
 		highlighter.keywords[t] = .Type
 	}
 
+	if len(highlighter.keywords) == 0 {
+		highlighter.kind = .Text
+	}
+
 	return
 }
 
@@ -33,6 +47,11 @@ highlighter_create :: proc(text: string, config: Language_Config, allocator: run
 highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 	if h.pos >= len(h.text) {
 		return nil
+	}
+
+	if h.kind == .Text {
+		h.pos = len(h.text)
+		return .Ident
 	}
 
 	advance_token :: proc(h: ^Highlighter) -> Style_Key {
@@ -77,9 +96,7 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 			break
 		}
 
-		if style, ok := h.keywords[h.text[start:h.pos]]; ok {
-			return style
-		}
+		text := h.text[start:h.pos]
 
 		for h.pos < len(h.text) {
 			switch h.text[h.pos] {
@@ -94,6 +111,10 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 			if h.text[h.pos] == '(' {
 				return .Function
 			}
+		}
+
+		if style, ok := h.keywords[text]; ok {
+			return style
 		}
 
 		if has_upper && has_lower {
@@ -178,6 +199,13 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 			return .Number
 		case '.', '?':
 			h.pos += 1
+
+			if h.pos >= len(h.text) {
+				return .Operator
+			}
+			if h.text[h.pos] == '.' {
+				h.pos += 1
+			}
 			return .Operator
 		}
 

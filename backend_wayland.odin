@@ -3,7 +3,7 @@ package editor
 
 import runtime "base:runtime"
 
-import fmt     "core:fmt"
+import log     "core:log"
 import strings "core:strings"
 import linux   "core:sys/linux"
 
@@ -335,12 +335,12 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 	wl.display_roundtrip(backend.display)
 
 	if backend.compositor == nil {
-		fmt.eprintln("no compositor")
+		log.error("no compositor")
 		return false
 	}
 
 	if backend.wm_base == nil {
-		fmt.eprintln("no wm_base")
+		log.error("no wm_base")
 		return false
 	}
 
@@ -408,31 +408,31 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 	wl.display_roundtrip(backend.display)
 
 	if !backend.configured {
-		fmt.eprintln("surface not configured")
+		log.error("surface not configured")
 		return false
 	}
 
 	init_egl :: proc(backend: ^Backend_Wayland) -> bool {
 		backend.egl_display = egl.GetDisplay(cast(egl.NativeDisplayType)backend.display)
 		if backend.egl_display == nil {
-			fmt.println("[!] eglGetDisplay: failed to create EGL display")
+			log.error("[!] eglGetDisplay: failed to create EGL display")
 			return false
 		}
 
 		major, minor: i32
 		if !egl.Initialize(backend.egl_display, &major, &minor) {
-			fmt.println("[!] eglGetDisplay: failed to initialize EGL display")
+			log.error("[!] eglGetDisplay: failed to initialize EGL display")
 			return false
 		}
 
 		if !egl.BindAPI(egl.OPENGL_API) {
-			fmt.println("[!] eglBindAPI: failed to bind OpenGL API")
+			log.error("[!] eglBindAPI: failed to bind OpenGL API")
 			return false
 		}
 
 		num_configs: i32
 		if !egl.GetConfigs(backend.egl_display, nil, 0, &num_configs) {
-			fmt.println("[!] eglGetConfigs: failed to get number of EGL configs")
+			log.error("[!] eglGetConfigs: failed to get number of EGL configs")
 			return false
 		}
 
@@ -446,7 +446,7 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 		}
 
 		if !egl.ChooseConfig(backend.egl_display, &config_attribs[0], &backend.egl_config, 1, &num_configs) {
-			fmt.println("[!] eglChooseConfig: failed to get EGL config")
+			log.error("[!] eglChooseConfig: failed to get EGL config")
 			return false
 		}
 
@@ -462,12 +462,12 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 
 		backend.egl_context = egl.CreateContext(backend.egl_display, backend.egl_config, egl.NO_CONTEXT, &context_attribs[0])
 		if backend.egl_context == nil {
-			fmt.println("[!] eglCreateContext: failed to create EGL context")
+			log.error("[!] eglCreateContext: failed to create EGL context")
 			return false
 		}
 
 		if !egl.MakeCurrent(backend.egl_display, backend.egl_surface, backend.egl_surface, backend.egl_context) {
-			fmt.println("[!] eglMakeCurrent: failed to activate EGL context")
+			log.error("[!] eglMakeCurrent: failed to activate EGL context")
 			return false
 		}
 
