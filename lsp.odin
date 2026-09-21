@@ -203,8 +203,8 @@ lsp_methods: map[string]proc(editor: ^Editor, content: []byte) = {
 			d = {
 				code     = strings.clone(diagnostic.code,    allocator),
 				message  = strings.clone(diagnostic.message, allocator),
-				start    = lsp_position_to_offset(&editor.buffer.btree, diagnostic.range.start),
-				end      = lsp_position_to_offset(&editor.buffer.btree, diagnostic.range.end),
+				start    = lsp_position_to_index(&editor.buffer.btree, diagnostic.range.start),
+				end      = lsp_position_to_index(&editor.buffer.btree, diagnostic.range.end),
 				severity = diagnostic.severity.? or_else .Error,
 			}
 		}
@@ -297,9 +297,9 @@ Did_Change_Text_Document_Params :: struct {
 	contentChanges: []Text_Document_Content_Change_Event,
 }
 
-lsp_apply_change :: proc(lsp: ^LSP_Server, buffer: ^Buffer, start, end: Offset, text: string, version: int) {
+lsp_apply_change :: proc(lsp: ^LSP_Server, buffer: ^Buffer, start, end: Index, text: string, version: int) {
 	change := Text_Document_Content_Change_Event {
-		range = { start = offset_to_lsp_position(&buffer.btree, start), end = offset_to_lsp_position(&buffer.btree, end), },
+		range = { start = index_to_lsp_position(&buffer.btree, start), end = index_to_lsp_position(&buffer.btree, end), },
 		text  = text,
 	}
 	_ = send_notification(lsp, "textDocument/didChange", Did_Change_Text_Document_Params {
@@ -321,15 +321,10 @@ lsp_go_to_definition :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 		return
 	}
 
-	cursor     := buffer.selections[buffer.primary].cursor
-	position   := btree_offset_to_position(&buffer.btree, cursor)
-	line_start := btree_line_to_offset(&buffer.btree, position.line)
+	position := index_to_lsp_position(&buffer.btree, buffer.selections[buffer.primary].cursor)
 	_ = send_request(lsp, "textDocument/definition", Text_Document_Position_Params {
 		textDocument = { uri = buffer.uri, },
-		position     = {
-			line      = position.line,
-			character = int(cursor - line_start),
-		},
+		position     = position,
 	}, proc(editor: ^Editor, lsp_server: ^LSP_Server, content: []byte) -> LSP_Error {
 		response: Response(union {
 			Location,
@@ -371,8 +366,8 @@ lsp_go_to_definition :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 
 		file_open(editor, normalize_path(path, context.temp_allocator))
 
-		start := lsp_position_to_offset(&editor.buffer.btree, location.range.start)
-		end   := lsp_position_to_offset(&editor.buffer.btree, location.range.end)
+		start := lsp_position_to_index(&editor.buffer.btree, location.range.start)
+		end   := lsp_position_to_index(&editor.buffer.btree, location.range.end)
 
 		editor_go_to(editor, "", start, end)
 
@@ -395,15 +390,11 @@ lsp_get_hover_information :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 		editor_set_status(editor, "No lsp server available")
 		return
 	}
-	cursor     := buffer.selections[buffer.primary].cursor
-	position   := btree_offset_to_position(&buffer.btree, cursor)
-	line_start := btree_line_to_offset(&buffer.btree, position.line)
+
+	position := index_to_lsp_position(&buffer.btree, buffer.selections[buffer.primary].cursor)
 	_ = send_request(lsp, "textDocument/hover", Text_Document_Position_Params {
 		textDocument = { uri = buffer.uri, },
-		position     = {
-			line      = position.line,
-			character = int(cursor - line_start),
-		},
+		position     = position,
 	}, proc(editor: ^Editor, lsp: ^LSP_Server, content: []byte) -> LSP_Error {
 		response: Response(struct {
 			contents: union {
@@ -430,15 +421,10 @@ lsp_get_signature_help :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 		return
 	}
 
-	cursor     := buffer.selections[buffer.primary].cursor
-	position   := btree_offset_to_position(&buffer.btree, cursor)
-	line_start := btree_line_to_offset(&buffer.btree, position.line)
+	position := index_to_lsp_position(&buffer.btree, buffer.selections[buffer.primary].cursor)
 	_ = send_request(lsp, "textDocument/signatureHelp", Signature_Help_Params {
 		textDocument = { uri = buffer.uri, },
-		position     = {
-			line      = position.line,
-			character = int(cursor - line_start),
-		},
+		position     = position,
 	}, proc(editor: ^Editor, lsp: ^LSP_Server, content: []byte) -> LSP_Error {
 		response: Response(Signature_Help)
 		json.unmarshal(content, &response, allocator = context.temp_allocator) or_return
@@ -453,12 +439,12 @@ lsp_get_signature_help :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 		if len(signature.parameters) > response.result.activeParameter {
 			switch v in signature.parameters[response.result.activeParameter].label {
 			case string:
-				highlight.start = Offset(strings.index(signature.label, v))
-				highlight.end   = highlight.start + Offset(len(v))
+				highlight.start = Index(strings.index(signature.label, v))
+				highlight.end   = highlight.start + Index(len(v))
 			case [2]int:
 				highlight = {
-					start = Offset(v[0]),
-					end   = Offset(v[1]),
+					start = Index(v[0]),
+					end   = Index(v[1]),
 				}
 			}
 		}
@@ -476,15 +462,10 @@ lsp_get_completion :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 		return
 	}
 
-	cursor     := buffer.selections[buffer.primary].cursor
-	position   := btree_offset_to_position(&buffer.btree, cursor)
-	line_start := btree_line_to_offset(&buffer.btree, position.line)
+	position := index_to_lsp_position(&buffer.btree, buffer.selections[buffer.primary].cursor)
 	_ = send_request(lsp, "textDocument/completion", Text_Document_Position_Params {
 		textDocument = { uri = buffer.uri, },
-		position     = {
-			line      = position.line,
-			character = int(cursor - line_start),
-		},
+		position     = position,
 	}, proc(editor: ^Editor, lsp: ^LSP_Server, content: []byte) -> LSP_Error {
 		Edit_Range_With_Insert_Replace :: struct {
 			insert, replace: LSP_Range,
@@ -754,22 +735,17 @@ Initialize_Result :: struct {
 }
 
 @(require_results)
-lsp_position_to_offset :: proc(btree: ^BTree, position: LSP_Position) -> Offset {
-	offset := btree_line_to_offset(btree, position.line)
-	return btree_offset_after(btree, offset, position.character)
+lsp_position_to_index :: proc(btree: ^BTree, position: LSP_Position) -> Index {
+	return btree_line_to_index(btree, position.line) + Index(position.character)
 }
 
 @(require_results)
-offset_to_lsp_position :: proc(btree: ^BTree, offset: Offset) -> (position: LSP_Position) {
-	position.line = btree_offset_to_line(btree, offset)
-	iter         := btree_iterator(btree, line = position.line)
-
-	for iter.next_offset != offset {
-		_ = btree_iter(&iter) or_else panic("offset out of range")
-		position.character += 1
+index_to_lsp_position :: proc(btree: ^BTree, index: Index) -> (position: LSP_Position) {
+	p := btree_index_to_position(btree, index, tab_width = 1 /* LSP uses character indices, not columns */)
+	return {
+		line      = p.line,
+		character = p.column,
 	}
-
-	return
 }
 
 Signature_Help_Params :: struct {

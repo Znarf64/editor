@@ -303,8 +303,8 @@ picker_submit :: proc(editor: ^Editor) {
 			symbol.location.range.end.character -= 1
 		}
 
-		start := lsp_position_to_offset(&editor.buffer.btree, symbol.location.range.start)
-		end   := lsp_position_to_offset(&editor.buffer.btree, symbol.location.range.end)
+		start := lsp_position_to_index(&editor.buffer.btree, symbol.location.range.start)
+		end   := lsp_position_to_index(&editor.buffer.btree, symbol.location.range.end)
 
 		editor_go_to(editor, normalize_path(path, context.temp_allocator), start, end)
 

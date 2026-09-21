@@ -57,10 +57,10 @@ Position :: struct {
 }
 
 Selection :: struct {
-	cursor:        Offset,
-	anchor:        Offset,
+	cursor:        Index,
+	anchor:        Index,
 	anim:          Animation(Rect),
-	target_cursor: Offset, // The offset of the position that dicatates the visual target column, so effective the offset that resulted from the last horizontal movement
+	target_cursor: Index, // The offset of the position that dicatates the visual target column, so effective the offset that resulted from the last horizontal movement
 }
 
 Mode :: enum {
@@ -84,7 +84,7 @@ New_Selection :: struct {
 }
 
 Diagnostic :: struct {
-	start, end:    Offset,
+	start, end:    Index,
 	message, code: string,
 	severity:      Diagnostic_Severity,
 }
@@ -330,7 +330,7 @@ file_open :: proc(editor: ^Editor, path: Normalized_Path) {
 	buffer_init(editor, buffer, path)
 }
 
-editor_go_to :: proc(editor: ^Editor, path: Normalized_Path, start: Offset, end: Offset = -1) {
+editor_go_to :: proc(editor: ^Editor, path: Normalized_Path, start: Index, end: Index = -1) {
 	end := end
 	if end == -1 {
 		end = start
@@ -373,10 +373,10 @@ buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path: Normalized
 	}
 
 	buffer^ = {
-		path       = path,
-		uri        = uri_from_path(path, context.allocator),
-		btree      = btree_build(string(data), context.allocator, editor.config.tab_width),
-		language   = language,
+		path     = path,
+		uri      = uri_from_path(path, context.allocator),
+		btree    = btree_build(string(data), context.allocator),
+		language = language,
 	}
 	err := vmem.arena_init_growing(&buffer.diagnostics_arena)
 	assert(err == nil, "OOM")
@@ -516,7 +516,7 @@ Editor :: struct {
 Language :: distinct string
 
 Range :: struct {
-	start, end: Offset,
+	start, end: Index,
 }
 
 Jumplist_Entry :: struct {
@@ -546,7 +546,7 @@ jumplist_add :: proc(editor: ^Editor, selection: Selection) {
 	end   := max(selection.anchor, selection.cursor)
 
 	b := strings.builder_make(allocator)
-	btree_to_string(&editor.buffer.btree, &b, start, btree_offset_after(&editor.buffer.btree, end))
+	btree_to_string(&editor.buffer.btree, &b, start, end + 1)
 
 	append(&editor.jumplist.entries, Jumplist_Entry {
 		path    = editor.buffer.path,
@@ -601,6 +601,10 @@ window_tree_destroy :: proc(window_tree: Window) {
 }
 
 FONT_HEIGHT :: 12
+
+DEBUG :: proc(x: any, expr := #caller_expression(x)) {
+	fmt.println(expr, ": ", x, sep = "")
+}
 
 main :: proc() {
 	context.logger = log.create_console_logger(.Debug when ODIN_DEBUG else .Error)
@@ -862,16 +866,16 @@ main :: proc() {
 		primary := &editor.buffer.selections[editor.buffer.primary]
 
 		if prev_scroll != editor.buffer.scroll {
-			primary_position := btree_offset_to_position(&editor.buffer.btree, primary.cursor)
+			primary_position := btree_index_to_position(&editor.buffer.btree, primary.cursor, editor.config.tab_width)
 			if primary_position.line < editor.buffer.scroll + 5 || primary_position.line > editor.buffer.scroll + editor.buffer.visible_lines - 5 {
 				primary_position.line -= prev_scroll - editor.buffer.scroll
-				_                      = position_to_offset_normalized(editor.buffer, primary_position, true, primary)
+				_                      = position_to_index_normalized(editor.buffer, primary_position, true, primary, editor.config.tab_width)
 				primary.anchor         = primary.cursor
 			}
 		}
 
 		{
-			primary_line := btree_offset_to_line(&editor.buffer.btree, primary.cursor)
+			primary_line := btree_index_to_line(&editor.buffer.btree, primary.cursor)
 			if editor.buffer.scroll < primary_line - editor.buffer.visible_lines + 5 {
 				editor.buffer.scroll = primary_line - editor.buffer.visible_lines + 5
 			}
@@ -1041,7 +1045,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 	{
 		buffer           := editor.buffer
 		primary          := buffer.selections[buffer.primary]
-		primary_position := btree_offset_to_position(&buffer.btree, primary.cursor)
+		primary_position := btree_index_to_position(&buffer.btree, primary.cursor, editor.config.tab_width)
 
 		{
 			x := screen_size.x - padding
@@ -1384,7 +1388,7 @@ regex_search :: proc(editor: ^Editor, buffer: ^Buffer_View, pattern_string: stri
 
 	selection  := &buffer.selections[buffer.primary]
 	start      := max(selection.cursor, selection.anchor)
-	b          := strings.builder_make(0, int(buffer.btree.bytes - start), context.temp_allocator)
+	b          := strings.builder_make(context.temp_allocator)
 	btree_to_string(&buffer.btree, &b, start)
 
 	iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator)
@@ -1396,9 +1400,8 @@ regex_search :: proc(editor: ^Editor, buffer: ^Buffer_View, pattern_string: stri
 	}
 
 	if ok {
-		_, n                   := utf8.decode_last_rune(capture.groups[0])
-		selection.anchor        = Offset(capture.pos[0][0])     + start
-		selection.cursor        = Offset(capture.pos[0][1] - n) + start
+		selection.anchor        = btree_offset_to_index(&buffer.btree, _Offset(capture.pos[0][0]), start)
+		selection.cursor        = btree_offset_to_index(&buffer.btree, _Offset(capture.pos[0][1]), start) - 1
 		selection.target_cursor = selection.cursor
 		return
 	}
@@ -1413,9 +1416,8 @@ regex_search :: proc(editor: ^Editor, buffer: ^Buffer_View, pattern_string: stri
 
 	capture = regex.match(pattern, strings.to_string(b), context.temp_allocator) or_return
 
-	_, n                   := utf8.decode_last_rune(capture.groups[0])
-	selection.anchor        = Offset(capture.pos[0][0])
-	selection.cursor        = Offset(capture.pos[0][1] - n)
+	selection.anchor        = btree_offset_to_index(&buffer.btree, _Offset(capture.pos[0][0]))
+	selection.cursor        = btree_offset_to_index(&buffer.btree, _Offset(capture.pos[0][1])) - 1
 	selection.target_cursor = selection.cursor
 
 	editor_set_status(editor, "Wrapped around document")
@@ -1431,7 +1433,7 @@ regex_search_reverse :: proc(editor: ^Editor, buffer: ^Buffer_View, pattern_stri
 
 	selection  := &buffer.selections[buffer.primary]
 	start      := min(selection.cursor, selection.anchor)
-	b          := strings.builder_make(0, int(buffer.btree.bytes - start), context.temp_allocator)
+	b          := strings.builder_make(0, context.temp_allocator)
 	btree_to_string(&buffer.btree, &b, end = start, reverse = true)
 
 	iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator)
@@ -1443,9 +1445,8 @@ regex_search_reverse :: proc(editor: ^Editor, buffer: ^Buffer_View, pattern_stri
 	}
 
 	if ok {
-		_, n                   := utf8.decode_rune(capture.groups[0])
-		selection.cursor        = start - Offset(capture.pos[0][0] + n)
-		selection.anchor        = start - Offset(capture.pos[0][1])
+		selection.cursor        = btree_offset_to_index(&buffer.btree, -_Offset(capture.pos[0][0]), start) + 1
+		selection.anchor        = btree_offset_to_index(&buffer.btree, -_Offset(capture.pos[0][1]), start)
 		selection.target_cursor = selection.cursor
 		return
 	}
@@ -1456,9 +1457,8 @@ regex_search_reverse :: proc(editor: ^Editor, buffer: ^Buffer_View, pattern_stri
 
 	capture = regex.match(pattern, strings.to_string(b), context.temp_allocator) or_return
 
-	_, n                   := utf8.decode_last_rune(capture.groups[0])
-	selection.anchor        = buffer.btree.bytes - Offset(capture.pos[0][1])
-	selection.cursor        = buffer.btree.bytes - Offset(capture.pos[0][0] + n)
+	selection.cursor        = btree_offset_to_index(&buffer.btree, buffer.btree.bytes - _Offset(capture.pos[0][0]))
+	selection.anchor        = btree_offset_to_index(&buffer.btree, buffer.btree.bytes - _Offset(capture.pos[0][1])) - 1
 	selection.target_cursor = selection.cursor
 
 	editor_set_status(editor, "Wrapped around document")
@@ -1507,8 +1507,7 @@ prompt_apply :: proc(editor: ^Editor) {
 		b := strings.builder_make(context.temp_allocator)
 		for selection, i in editor.buffer.selections {
 			start := min(selection.cursor, selection.anchor)
-			end   := max(selection.cursor, selection.anchor)
-			end    = btree_offset_after(&editor.buffer.btree, end)
+			end   := max(selection.cursor, selection.anchor) + 1
 
 			strings.builder_grow(&b, int(end - start))
 			btree_to_string(&editor.buffer.btree, &b, start, end)
@@ -1516,8 +1515,8 @@ prompt_apply :: proc(editor: ^Editor) {
 			regex_iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator)
 			for capture, capture_i in regex.match(&regex_iter) {
 				append(&editor.new_selections, New_Selection {
-					anchor  = start + Offset(capture.pos[0][0]),
-					cursor  = start + btree_offset_before(&editor.buffer.btree, Offset(capture.pos[0][1])),
+					anchor  = btree_offset_to_index(&editor.buffer.btree, _Offset(capture.pos[0][0]), start),
+					cursor  = btree_offset_to_index(&editor.buffer.btree, _Offset(capture.pos[0][1]), start) - 1,
 					primary = i == editor.buffer.primary && capture_i == 0,
 				})
 			}
@@ -1548,8 +1547,7 @@ prompt_apply :: proc(editor: ^Editor) {
 			selection := editor.buffer.selections[i]
 
 			start := min(selection.cursor, selection.anchor)
-			end   := max(selection.cursor, selection.anchor)
-			end    = btree_offset_after(&editor.buffer.btree, end)
+			end   := max(selection.cursor, selection.anchor) + 1
 
 			strings.builder_grow(&b, int(end - start))
 			btree_to_string(&editor.buffer.btree, &b, start, end)
@@ -1612,8 +1610,8 @@ position_after :: proc(position: Position, r: rune, tab_width: int) -> Position 
 }
 
 @(require_results)
-selection_contains :: proc(selection: Selection, offset: Offset) -> bool {
-	return min(selection.anchor, selection.cursor) <= offset && offset <= max(selection.anchor, selection.cursor)
+selection_contains :: proc(selection: Selection, index: Index) -> bool {
+	return min(selection.anchor, selection.cursor) <= index && index <= max(selection.anchor, selection.cursor)
 }
 
 draw_rect :: proc(
@@ -1673,8 +1671,8 @@ code_block_render :: proc(
 
 	column: int
 	render_code: for {
-		start := highlighter.pos
-		style := highlighter_advance(&highlighter)
+		index       := highlighter.index
+		text, style := highlighter_advance(&highlighter)
 		if style == .Invalid {
 			break
 		}
@@ -1686,8 +1684,8 @@ code_block_render :: proc(
 			append(commands, nil)
 		}
 
-		for r, offset in content[start:highlighter.pos] {
-			offset := Offset(start + offset)
+		for r in text {
+			defer index += 1
 
 			if r == '\n' {
 				width  = max(width, cell_size.x * f32(column))
@@ -1701,7 +1699,7 @@ code_block_render :: proc(
 				continue
 			}
 
-			if highlight.start <= offset && offset < highlight.end {
+			if highlight.start <= index && index < highlight.end {
 				draw_rect(
 					commands,
 					offset = { cell_size.x * f32(column), y - la.round(f32(editor.font.ascender) * editor.font.scale), } + position,
@@ -2011,7 +2009,7 @@ buffer_render :: proc(
 	scroll := animation_update(&buffer.scroll_anim, delta_time, editor.config.scroll_animation_speed)
 
 	primary          := buffer.selections[buffer.primary]
-	primary_position := btree_offset_to_position(&buffer.btree, primary.cursor)
+	primary_position := btree_index_to_position(&buffer.btree, primary.cursor, editor.config.tab_width)
 
 	first_visble_line := int(la.floor(scroll))
 	last_visible_line := min(int(buffer.btree.lines), first_visble_line + buffer.visible_lines + 3)
@@ -2019,16 +2017,16 @@ buffer_render :: proc(
 	position: Position = {
 		line = first_visble_line,
 	}
-	start_offset := btree_position_to_offset(&buffer.btree, position)
-	end_offset   := btree_position_to_offset(&buffer.btree, { line = last_visible_line, })
+	start_index := btree_position_to_index(&buffer.btree, position,                      editor.config.tab_width)
+	end_index   := btree_position_to_index(&buffer.btree, { line = last_visible_line, }, editor.config.tab_width)
 
-	b := strings.builder_make(0, int(end_offset - start_offset), context.temp_allocator)
-	btree_to_string(&buffer.btree, &b, start_offset, end_offset)
+	b := strings.builder_make(context.temp_allocator)
+	btree_to_string(&buffer.btree, &b, start_index, end_index)
 	text := strings.to_string(b)
 
-	primary_match: Offset = -1
+	primary_match: Index = -1
 	find_primary_match: {
-		iter  := btree_iterator(&buffer.btree, primary.cursor)
+		iter  := btree_iterator(&buffer.btree, index = primary.cursor)
 		start := btree_iter(&iter) or_break find_primary_match
 
 		back := false
@@ -2056,7 +2054,7 @@ buffer_render :: proc(
 
 		balance := 0 if back else 1
 		for r in btree_iter(&iter, back = back) {
-			if iter.offset < start_offset || iter.offset > end_offset {
+			if iter.index < start_index || iter.index > end_index {
 				break
 			}
 			if r == delim {
@@ -2065,7 +2063,7 @@ buffer_render :: proc(
 				balance += 1
 			}
 			if balance == 0 {
-				primary_match = iter.offset
+				primary_match = iter.index
 				break
 			}
 		}
@@ -2073,7 +2071,7 @@ buffer_render :: proc(
 
 	highlighter := highlighter_create(text, editor.config.languages[buffer.language], context.temp_allocator)
 
-	cursors := make(map[Offset]int, context.temp_allocator)
+	cursors := make(map[Index]int, context.temp_allocator)
 	if active {
 		for selection, i in buffer.selections {
 			cursors[selection.cursor] = i
@@ -2091,18 +2089,17 @@ buffer_render :: proc(
 	}
 
 	render_text: for {
-		start := highlighter.pos
-		style := highlighter_advance(&highlighter)
+		index       := highlighter.index + start_index
+		text, style := highlighter_advance(&highlighter)
 		if style == .Invalid {
 			break
 		}
 
 		start_column := position.column
 
-		for char, sub_offset in text[start:highlighter.pos] {
+		for char, sub_offset in text {
+			defer index   += 1
 			defer position = position_after(position, char, editor.config.tab_width)
-
-			offset := start_offset + Offset(start + sub_offset)
 
 			draw_gutter: if position.column == 0 {
 				y := cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale)
@@ -2137,7 +2134,7 @@ buffer_render :: proc(
 			}
 
 			style := style
-			if id, ok := cursors[offset]; ok {
+			if id, ok := cursors[index]; ok {
 				if id == buffer.primary {
 					style = .Cursor
 				} else {
@@ -2147,7 +2144,7 @@ buffer_render :: proc(
 
 			next_column := position_after(position, char, editor.config.tab_width).column
 			for selection in buffer.selections {
-				if !selection_contains(selection, offset) {
+				if !selection_contains(selection, index) {
 					continue
 				}
 
@@ -2162,7 +2159,7 @@ buffer_render :: proc(
 			}
 
 			for diagnostic in buffer.diagnostics {
-				if !selection_contains({ cursor = diagnostic.start, anchor = diagnostic.end, }, offset) {
+				if !selection_contains({ cursor = diagnostic.start, anchor = diagnostic.end, }, index) {
 					continue
 				}
 
@@ -2190,7 +2187,7 @@ buffer_render :: proc(
 				)
 			}
 
-			if offset == primary_match {
+			if index == primary_match {
 				draw_rect(commands,
 					offset = {
 						f32(position.column) * cell_size.x + gutter_width,
@@ -2243,21 +2240,17 @@ buffer_render :: proc(
 
 	primary_render_position: [2]f32
 	for &selection, i in buffer.selections {
-		line := btree_offset_to_line(&buffer.btree, offset = selection.cursor)
-		iter := btree_iterator(&buffer.btree, line = line)
+		p := btree_index_to_position(&buffer.btree, selection.cursor, editor.config.tab_width)
+		r := btree_get_rune(buffer.btree, selection.cursor)
 
-		for iter.offset != selection.cursor {
-			_ = btree_iter(&iter) or_else panic("offset out of range")
+		width := 1
+		if r == '\t' {
+			width = next_column_after_tab(p.column, editor.config.tab_width) - p.column
 		}
 
-		position    := iter.position
-		_, _         = btree_iter(&iter)
-		next_column := iter.column
-		width       := max(next_column - position.column, 1)
-
 		offset := [2]f32 {
-			f32(position.column) * cell_size.x + gutter_width,
-			cell_size.y * f32(position.line),
+			f32(p.column) * cell_size.x + gutter_width,
+			cell_size.y * f32(p.line),
 		}
 
 		size   := cell_size

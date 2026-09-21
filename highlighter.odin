@@ -11,8 +11,8 @@ Highlighter_Kind :: enum {
 }
 
 Highlighter :: struct {
-	pos:      int,
-	text:     string,
+	index:    Index,
+	_text:    string,
 	keywords: map[string]Style_Key,
 
 	kind:     Highlighter_Kind,
@@ -20,7 +20,7 @@ Highlighter :: struct {
 
 @(require_results)
 highlighter_create :: proc(text: string, config: Language_Config, allocator: runtime.Allocator) -> (highlighter: Highlighter) {
-	highlighter.text = text
+	highlighter._text = text
 
 	highlighter.kind = .C_Like
 
@@ -44,51 +44,70 @@ highlighter_create :: proc(text: string, config: Language_Config, allocator: run
 }
 
 @(require_results)
-highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
-	if h.pos >= len(h.text) {
+highlighter_advance :: proc(h: ^Highlighter) -> (text: string, style: Style_Key) {
+	text  = h._text
+	style = _highlighter_advance(h)
+	text  = text[:uintptr(raw_data(h._text)) - uintptr(raw_data(text))]
+	return
+}
+
+@(require_results)
+_highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
+	if h._text == "" {
 		return nil
 	}
 
 	if h.kind == .Text {
-		h.pos = len(h.text)
+		h._text = h._text[len(h._text):]
 		return .Ident
 	}
 
+	@(require_results)
+	peek_rune :: proc(h: ^Highlighter) -> (r: rune, ok: bool) {
+		r, _ = utf8.decode_rune(h._text)
+		return r, r != utf8.RUNE_ERROR
+	}
+
+	advance_rune :: proc(h: ^Highlighter) -> (r: rune, ok: bool) {
+		n: int
+		r, n     = utf8.decode_rune(h._text)
+		h._text  = h._text[n:]
+		h.index += 1
+		return r, r != utf8.RUNE_ERROR
+	}
+
 	advance_token :: proc(h: ^Highlighter) -> Style_Key {
-		start := h.pos
+		text := h._text
 
 		has_upper, has_lower: bool
-		for r in h.text[h.pos:] {
+		for r in peek_rune(h) {
 			switch r {
 			case '0' ..= '9', '_':
-				h.pos += 1
+				advance_rune(h)
 				continue
 			case 'a' ..= 'z':
 				has_lower = true
-				h.pos    += 1
+				advance_rune(h)
 				continue
 			case 'A' ..= 'Z':
 				has_upper = true
-				h.pos    += 1
+				advance_rune(h)
 				continue
 			}
 
 			if unicode.is_digit(r) {
-				_, n  := utf8.encode_rune(r)
-				h.pos += n
+				advance_rune(h)
 				continue
 			}
 
 			if unicode.is_upper(r) {
-				_, n     := utf8.encode_rune(r)
-				h.pos    += n
+				advance_rune(h)
 				has_upper = true
 				continue
 			}
 
 			if unicode.is_lower(r) {
-				_, n     := utf8.encode_rune(r)
-				h.pos    += n
+				advance_rune(h)
 				has_lower = true
 				continue
 			}
@@ -96,21 +115,19 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 			break
 		}
 
-		text := h.text[start:h.pos]
+		text = text[:uintptr(raw_data(h._text)) - uintptr(raw_data(text))]
 
-		for h.pos < len(h.text) {
-			switch h.text[h.pos] {
+		for r in peek_rune(h) {
+			switch r {
 			case ' ', '\t':
-				h.pos += 1
+				advance_rune(h)
 				continue
 			}
 			break
 		}
 
-		if h.pos < len(h.text) {
-			if h.text[h.pos] == '(' {
-				return .Function
-			}
+		if r, _ := peek_rune(h); r == '(' {
+			return .Function
 		}
 
 		if style, ok := h.keywords[text]; ok {
@@ -128,13 +145,17 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 		return .Ident
 	}
 
-	r, n := utf8.decode_rune(h.text[h.pos:])
+	r, ok := peek_rune(h)
+	if !ok {
+		return .Ident
+	}
+
 	switch r {
 	case '0' ..= '9':
 		advance_token(h)
 		return .Number
 	case '#':
-		h.pos += 1
+		advance_rune(h)
 		advance_token(h)
 		return .Directive
 	case 'a' ..= 'z', '_':
@@ -142,17 +163,13 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 	case 'A' ..= 'Z':
 		return advance_token(h)
 	case '/':
-		h.pos += 1
-		if h.pos >= len(h.text) {
-			return .Operator
-		}
-
-		if h.text[h.pos] == '/' {
-			for h.pos < len(h.text) {
-				if h.text[h.pos] == '\n' {
+		advance_rune(h)
+		if r, _ := peek_rune(h); r == '/' {
+			for r in peek_rune(h) {
+				if r == '\n' {
 					break
 				} else {
-					h.pos += 1
+					advance_rune(h)
 				}
 			}
 			return .Comment
@@ -160,93 +177,88 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 
 		return .Operator
 	case ':':
-		h.pos += 1
-		if h.pos >= len(h.text) {
-			return .Ident
-		}
+		advance_rune(h)
 
-		switch h.text[h.pos] {
+		switch r, _ := peek_rune(h); r {
 		case ':', '=':
-			h.pos += 1
+			advance_rune(h)
 			return .Operator
 		}
 
 		return .Ident
 	case '+', '*', '=', '~', '&', '|', '^', '@', '>', '<', '!', '%':
-		h.pos += 1
+		advance_rune(h)
 		return .Operator
 	case '-':
-		h.pos += 1
-		if h.pos >= len(h.text) {
-			return .Operator
-		}
+		advance_rune(h)
 
-		if h.text[h.pos] == '>' {
-			h.pos += 1
+		if r, _ := peek_rune(h); r == '>' {
+			advance_rune(h)
 			return .Ident
 		}
 
 		return .Operator
 	case '.':
-		h.pos += 1
-		if h.pos >= len(h.text) {
-			return .Ident
-		}
-
-		switch h.text[h.pos] {
+		advance_rune(h)
+		switch r, _ := peek_rune(h); r {
 		case '0' ..= '9':
 			advance_token(h)
 			return .Number
 		case '.', '?':
-			h.pos += 1
+			advance_rune(h)
 
-			if h.pos >= len(h.text) {
-				return .Operator
+			if r, _ := peek_rune(h); r == '.' {
+				advance_rune(h)
 			}
-			if h.text[h.pos] == '.' {
-				h.pos += 1
+			if r, _ := peek_rune(h); r == '.' {
+				advance_rune(h)
 			}
+
 			return .Operator
 		}
 
 		return .Ident
 
 	case '"':
-		h.pos += 1
-		parse_string: for h.pos < len(h.text) {
-			defer h.pos += 1
-			switch h.text[h.pos] {
+		advance_rune(h)
+		parse_string: for r in peek_rune(h) {
+			switch r {
 			case '\\':
-				h.pos += 1
+				advance_rune(h)
+				advance_rune(h)
 			case '"':
+				advance_rune(h)
 				break parse_string
 			case '\n':
-				h.pos -= 1
 				break parse_string
+			case:
+				advance_rune(h)
 			}
 		}
 		return .String
 	case '`':
-		h.pos += 1
-		for h.pos < len(h.text) {
-			defer h.pos += 1
-			if h.text[h.pos] == '`' {
+		advance_rune(h)
+		for r in peek_rune(h) {
+			defer advance_rune(h)
+			if r == '`' {
 				break
 			}
 		}
 		return .String
 	case '\'':
-		h.pos += 1
-		parse_string_single_quote: for h.pos < len(h.text) {
-			defer h.pos += 1
-			switch h.text[h.pos] {
+		advance_rune(h)
+		parse_string_single_quote: for r in peek_rune(h) {
+			switch r {
 			case '\\':
-				h.pos += 1
+				advance_rune(h)
+				advance_rune(h)
 			case '\'':
+				advance_rune(h)
 				break parse_string_single_quote
 			case '\n':
-				h.pos -= 1
 				break parse_string_single_quote
+			case:
+				advance_rune(h)
 			}
 		}
 		return .String
@@ -258,7 +270,7 @@ highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 			advance_token(h)
 			return .Number
 		}
-		h.pos += n
+		advance_rune(h)
 		return .Ident
 	}
 }

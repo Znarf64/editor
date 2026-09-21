@@ -108,7 +108,7 @@ deduplicate_selections :: proc(editor: ^Buffer_View) {
 	}
 
 	Entry :: struct {
-		min, max:   Offset,
+		min, max:   Index,
 		orig_index: int,
 	}
 
