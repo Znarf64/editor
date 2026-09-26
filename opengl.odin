@@ -17,7 +17,7 @@ Opengl_Renderer :: struct {
 	instance_buffer:  [dynamic]Opengl_Instance,
 	main_program:     u32,
 	blur_program:     u32,
-	font:             Opengl_Font,
+	font_atlas:       Font_Atlas,
 	blur_texture:     u32,
 	main_texture:     u32,
 	main_framebuffer: u32,
@@ -25,11 +25,15 @@ Opengl_Renderer :: struct {
 	resolution:       [2]int,
 }
 
-Opengl_Font :: struct {
-	using font: Font,
-	atlas:      u32,
-	baked:      map[rune]Baked_Glyph,
-	skyline:    [dynamic]int,
+Font_Atlas_Key :: struct {
+	font: ^Font,
+	rune: rune,
+}
+
+Font_Atlas :: struct {
+	texture: u32,
+	skyline: [dynamic]int,
+	baked:   map[Font_Atlas_Key]Baked_Glyph,
 }
 
 Baked_Glyph :: struct {
@@ -202,10 +206,10 @@ opengl_renderer_init :: proc(
 	renderer.main_program = gl.load_shaders_source(#load("shaders/main.vert"), #load("shaders/main.frag")) or_else panic("Failed to compile main shader")
 	renderer.blur_program = gl.load_compute_source(#load("shaders/blur.comp")) or_else panic("Failed to compile blur shader")
 
-	gl.CreateTextures(gl.TEXTURE_2D, 1, &renderer.font.atlas)
-	gl.TextureStorage2D(renderer.font.atlas, 1, gl.RGB8, 1024, 1024)
-	renderer.font.skyline = make([dynamic]int, 1024, allocator)
-	renderer.font.baked   = make(map[rune]Baked_Glyph, allocator)
+	gl.CreateTextures(gl.TEXTURE_2D, 1, &renderer.font_atlas.texture)
+	gl.TextureStorage2D(renderer.font_atlas.texture, 1, gl.RGB8, 1024, 1024)
+	renderer.font_atlas.skyline = make([dynamic]int, 1024, allocator)
+	renderer.font_atlas.baked   = make(map[Font_Atlas_Key]Baked_Glyph, allocator)
 
 	gl.CreateTextures(gl.TEXTURE_2D, 1, &renderer.noise_texture)
 	gl.TextureStorage2D(renderer.noise_texture, 1, gl.R8, 1024, 1024)
@@ -267,21 +271,19 @@ opengl_renderer_destroy :: proc(renderer: Opengl_Renderer) {
 	renderer := renderer
 
 	delete(renderer.instance_buffer)
-	delete(renderer.font.skyline)
-	delete(renderer.font.baked)
+	delete(renderer.font_atlas.skyline)
+	delete(renderer.font_atlas.baked)
 
 	gl.DeleteVertexArrays(1, &renderer.vao)
 	gl.DeleteBuffers(1, &renderer.vbo)
 	gl.DeleteBuffers(1, &renderer.instance_vbo)
 	gl.DeleteProgram(renderer.main_program)
 	gl.DeleteProgram(renderer.blur_program)
-	gl.DeleteTextures(1, &renderer.font.atlas)
+	gl.DeleteTextures(1, &renderer.font_atlas.texture)
 	gl.DeleteTextures(1, &renderer.blur_texture)
 }
 
-opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: []Draw_Command, background_color: [4]f32) {
-	renderer.font.font = font
-
+opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, commands: []Draw_Command, background_color: [4]f32) {
 	gl.BindFramebuffer(gl.FRAMEBUFFER, renderer.main_framebuffer)
 
 	gl.ClearColor(**background_color)
@@ -291,7 +293,7 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: [
 
 	gl.Uniform2f(OPENGL_UNIFORM_SCREEN_SIZE, f32(renderer.resolution.x), f32(renderer.resolution.y))
 
-	gl.BindTextureUnit(OPENGL_TEXTURE_BINDING_FONT, renderer.font.atlas)
+	gl.BindTextureUnit(OPENGL_TEXTURE_BINDING_FONT, renderer.font_atlas.texture)
 
 	gl.Viewport(0, 0, i32(renderer.resolution.x), i32(renderer.resolution.y))
 
@@ -338,7 +340,7 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: [
 				shadow_width  = v.shadow_width,
 			})
 		case Draw_Command_Char:
-			g := get_baked_glyph(&renderer.font, v.char)
+			g := get_baked_glyph(&renderer.font_atlas, v.font, v.char)
 			append(&renderer.instance_buffer, Opengl_Instance {
 				offset  = v.position + ([2]f32)(g.offset),
 				size    = ([2]f32)(g.max - g.min),
@@ -438,8 +440,8 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, font: Font, commands: [
 }
 
 @(require_results)
-get_baked_glyph :: proc(font: ^Opengl_Font, r: rune) -> Baked_Glyph {
-	if b, ok := font.baked[r]; ok {
+get_baked_glyph :: proc(atlas: ^Font_Atlas, font: ^Font, r: rune) -> Baked_Glyph {
+	if b, ok := atlas.baked[{ font, r, }]; ok {
 		return b
 	}
 
@@ -451,7 +453,7 @@ get_baked_glyph :: proc(font: ^Opengl_Font, r: rune) -> Baked_Glyph {
 	ttf.render_shape_bitmap(font, shape, font.scale, slice.to_bytes(pixels), subpixel = false)
 
 	@(require_results)
-	pack_rect :: proc(font: ^Opengl_Font, size: [2]int) -> (pos: [2]int = max(int)) {
+	pack_rect :: proc(font: ^Font_Atlas, size: [2]int) -> (pos: [2]int = max(int)) {
 		find_spot: for x in 0 ..< len(font.skyline) - size.x {
 			if font.skyline[x] >= pos.y || font.skyline[x] + size.y >= len(font.skyline) {
 				continue
@@ -475,9 +477,9 @@ get_baked_glyph :: proc(font: ^Opengl_Font, r: rune) -> Baked_Glyph {
 		return pos
 	}
 
-	pos := pack_rect(font, size + 1)
+	pos := pack_rect(atlas, size + 1)
 	gl.TextureSubImage2D(
-		font.atlas,
+		atlas.texture,
 		0,
 		i32(pos.x),
 		i32(pos.y),
@@ -497,7 +499,7 @@ get_baked_glyph :: proc(font: ^Opengl_Font, r: rune) -> Baked_Glyph {
 		x_advance = f32(x_advance) * font.scale,
 	}
 
-	font.baked[r] = b
+	atlas.baked[{ font, r, }] = b
 	return b
 }
 

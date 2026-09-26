@@ -3,8 +3,11 @@ package editor
 import runtime "base:runtime"
 
 import la      "core:math/linalg"
+import os      "core:os"
+import strings "core:strings"
 
 import ttf     "vendor/ttf_odin"
+import fc      "vendor/fontconfig"
 
 Glyph_Info :: struct {
 	size, offset: [2]int,
@@ -96,6 +99,7 @@ draw_text :: proc(font: ^Font, commands: ^[dynamic]Draw_Command, text: $S/string
 			position = pos,
 			char     = r,
 			color    = color,
+			font     = font,
 		})
 
 		pos.x += info.x_advance
@@ -105,13 +109,102 @@ draw_text :: proc(font: ^Font, commands: ^[dynamic]Draw_Command, text: $S/string
 }
 
 @(require_results)
-font_init :: proc(font: ^Font, data: []byte, font_height: int, allocator: runtime.Allocator) -> bool {
+get_font_path_from_config :: proc(config: Font_Config) -> (path: string, ok: bool) {
+	if config == {} {
+		return
+	}
+
+	if config.path != "" {
+		return config.path, true
+	}
+
+	conf := fc.InitLoadConfigAndFonts()
+	defer fc.Fini()
+	defer fc.ConfigDestroy(conf)
+
+	pattern := fc.PatternCreate()
+	defer fc.PatternDestroy(pattern)
+
+	if config.family != "" {
+		_ = fc.PatternAddString(pattern, fc.FAMILY, strings.clone_to_cstring(config.family, context.temp_allocator))
+	}
+
+	if config.style != "" {
+		_ = fc.PatternAddString(pattern, fc.STYLE, strings.clone_to_cstring(config.style, context.temp_allocator))
+	}
+
+	if weight, ok := config.weight.?; ok {
+		_ = fc.PatternAddInteger(pattern, fc.WEIGHT, i32(weight))
+	}
+
+	if pattern == nil {
+		return
+	}
+
+	if !fc.ConfigSubstitute(conf, pattern, .Pattern) {
+		return
+	}
+	fc.DefaultSubstitute(pattern)
+
+	fs := fc.FontSetCreate()
+	defer fc.FontSetDestroy(fs)
+
+	os := fc.ObjectSetBuild(fc.FAMILY, fc.STYLE, fc.FILE, nil)
+	defer fc.ObjectSetDestroy(os)
+
+	result: fc.Result
+	font_patterns := fc.FontSort(conf, pattern, true, nil, &result)
+	defer fc.FontSetSortDestroy(font_patterns)
+
+	if font_patterns == nil || font_patterns.nfont == 0 {
+		return
+	}
+
+	font_pattern := fc.FontRenderPrepare(conf, pattern, font_patterns.fonts[0])
+	if font_pattern == nil {
+		return
+	}
+
+	if !fc.FontSetAdd(fs, font_pattern) {
+		return
+	}
+
+	if fs == nil {
+		return
+	}
+
+	if fs.nfont > 0 {
+		font := fc.PatternFilter(fs.fonts[0], os)
+		defer fc.PatternDestroy(font)
+
+		v: fc.Value
+		_ = fc.PatternGet(font, fc.FILE, 0, &v)
+
+		return strings.clone_from_cstring(cstring(v.u.f), context.temp_allocator), true
+	}
+
+	return
+}
+
+@(rodata)
+FALLBACK_FONT_DATA := #load("font.ttf")
+
+@(require_results)
+font_init :: proc(font: ^Font, config: Font_Config, allocator: runtime.Allocator) -> bool {
+	data := FALLBACK_FONT_DATA
+	if path, ok := get_font_path_from_config(config); ok {
+		data = os.read_entire_file(path, allocator) or_else FALLBACK_FONT_DATA
+	}
+
 	font.ttf_font = ttf.load(data) or_return
-	font.scale    = ttf.font_height_to_scale(font^, f32(font_height))
+	font.scale    = ttf.font_height_to_scale(font^, config.size)
 	font.glyphs   = make(map[rune]Glyph_Info, allocator)
 	return true
 }
 
 font_destroy :: proc(font: Font) {
 	delete(font.glyphs)
+	if raw_data(font.data) != raw_data(FALLBACK_FONT_DATA) {
+		delete(font.data)
+	}
 }

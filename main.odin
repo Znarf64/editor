@@ -20,38 +20,6 @@ import cm      "vendor:commonmark"
 
 import regex   "vendor/regex"
 
-Draw_Command_Rect :: struct {
-	rect:          Rect,
-	color:         [4]f32,
-	border_radius: f32,
-	border_width:  f32,
-	border_color:  [4]f32,
-	shadow_width:  f32,
-}
-
-Draw_Command_Char :: struct {
-	position: [2]f32,
-	char:     rune,
-	color:    [4]f32,
-}
-
-Draw_Command_Clip :: distinct Rect
-
-Draw_Command_Blur :: struct {
-	rect:          Rect,
-	radius:        f32,
-	border_radius: f32,
-}
-
-DRAW_COMMAND_CLIP_DISABLE :: Draw_Command_Clip { min = min(f32), max = max(f32), }
-
-Draw_Command :: union {
-	Draw_Command_Rect,
-	Draw_Command_Char,
-	Draw_Command_Clip,
-	Draw_Command_Blur,
-}
-
 Position :: struct {
 	line, column: int,
 }
@@ -507,7 +475,8 @@ Editor :: struct {
 
 	config:              Config,
 
-	font:                Font,
+	code_font:           Font,
+	ui_font:             Font,
 
 	language_extensions: map[string]Language,
 	language_servers:    map[Language]^LSP_Server,
@@ -600,12 +569,6 @@ window_tree_destroy :: proc(window_tree: Window) {
 	}
 }
 
-FONT_HEIGHT :: 12
-
-DEBUG :: proc(x: any, expr := #caller_expression(x)) {
-	fmt.println(expr, ": ", x, sep = "")
-}
-
 main :: proc() {
 	context.logger = log.create_console_logger(.Debug when ODIN_DEBUG else .Error)
 	defer log.destroy_console_logger(context.logger)
@@ -672,18 +635,17 @@ main :: proc() {
 		window_tree_destroy(editor.window_tree)
 	}
 
-	font_ok := font_init(&editor.font, #load("font.ttf"), FONT_HEIGHT, context.allocator)
-	assert(font_ok)
-	defer font_destroy(editor.font)
-
-	start_time := time.now()
-	prev_time: f64
-
 	config_ok := load_config(&editor.config)
 	if !config_ok {
 		log.error("Failed to load config")
 	}
 	defer config_destroy(&editor.config)
+
+	font_init(&editor.code_font, editor.config.code_font, context.allocator) or_else panic("Failed to initialize code font")
+	defer font_destroy(editor.code_font)
+
+	font_init(&editor.ui_font, editor.config.ui_font, context.allocator) or_else panic("Failed to initialize ui font")
+	defer font_destroy(editor.ui_font)
 
 	editor.language_extensions = make(map[string]Language)
 	defer delete(editor.language_extensions)
@@ -702,11 +664,14 @@ main :: proc() {
 		editor_open_buffer(&editor, buffer)
 	}
 
-	last_print_time    := time.now()
-	frames_since_print := 0
-
 	draw_commands := make([dynamic]Draw_Command, context.allocator)
 	defer delete(draw_commands)
+
+	start_time := time.now()
+	prev_time: f64
+
+	last_print_time    := time.now()
+	frames_since_print := 0
 
 	screen_size: [2]f32
 
@@ -921,7 +886,7 @@ main :: proc() {
 
 		render(&editor, &draw_commands, f32(delta_time), screen_size)
 
-		editor.backend->draw(editor.font, draw_commands[:], editor.config.theme[.Background].bg)
+		editor.backend->draw(draw_commands[:], editor.config.theme[.Background].bg)
 		free_all(context.temp_allocator)
 	}
 }
@@ -1023,23 +988,14 @@ window_render :: proc(editor: ^Editor, commands, popup_commands: ^[dynamic]Draw_
 	}
 }
 
-render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f32, screen_size: [2]f32) {
-	padding           := editor.config.padding
-	status_bar_height := FONT_HEIGHT + padding * 2 + 2
-
-	popup_commands := make([dynamic]Draw_Command, context.temp_allocator)
-	window_render(editor, commands, &popup_commands, &editor.window_tree, delta_time, { min = padding, max = screen_size - { 0, status_bar_height, } - padding, })
-	append(commands, ..popup_commands[:])
-
+status_bar_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time, padding: f32, rect: Rect) {
+	size := rect_size(rect)
 	draw_rect(commands,
-		offset = { 0, screen_size.y - FONT_HEIGHT - padding * 2, },
-		size   = { screen_size.x, FONT_HEIGHT + padding * 2, },
-		color  = editor.config.theme[.Background].bg,
-	)
-	draw_rect(commands,
-		offset = { 0, screen_size.y - FONT_HEIGHT - padding * 2 - 2, },
-		size   = { screen_size.x, 2, },
-		color  = color_from_hex_rgba(0x32363DFF),
+		offset       = rect.min,
+		size         = size,
+		color        = editor.config.theme[.Background].bg,
+		border_width = 2,
+		border_color = editor.config.theme[.Popup_Border].fg,
 	)
 
 	{
@@ -1048,11 +1004,11 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		primary_position := btree_index_to_position(&buffer.btree, primary.cursor, editor.config.tab_width)
 
 		{
-			x := screen_size.x - padding
+			x := rect.max.x - padding
 			if strings.builder_len(editor.leader.sequence) != 0 {
 				str := strings.to_string(editor.leader.sequence)
-				x   -= measure_text(&editor.font, str)
-				draw_text(&editor.font, commands, str, editor.config.theme[.Ui_Text].fg, { x, screen_size.y - padding, })
+				x   -= measure_text(&editor.ui_font, str)
+				draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 			}
 
 			if editor.repeat_count > 0 {
@@ -1060,18 +1016,18 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 				buf: [32]byte
 
 				str := strconv.write_int(buf[:], i64(editor.repeat_count), base = 10)
-				x   -= measure_text(&editor.font, str)
-				draw_text(&editor.font, commands, str, editor.config.theme[.Ui_Text].fg, { x, screen_size.y - padding, })
+				x   -= measure_text(&editor.ui_font, str)
+				draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 			}
 
-			if x != screen_size.x - padding {
+			if x != rect.max.x - padding {
 				x -= padding
 			}
 
 			{
-				center := screen_size.x / 2
-				w      := measure_text(&editor.font, buffer.path)
-				draw_text(&editor.font, commands, buffer.path, editor.config.theme[.Ui_Text].fg, { center - w / 2, screen_size.y - padding, })
+				center := rect_center(rect).x
+				w      := measure_text(&editor.ui_font, buffer.path)
+				draw_text(&editor.ui_font, commands, buffer.path, editor.config.theme[.Ui_Text].fg, { center - w / 2, rect.max.y - padding, })
 			}
 
 			{
@@ -1081,36 +1037,36 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 
 				if editor.buffer.language != "" {
 					str = string(editor.buffer.language)
-					x  -= measure_text(&editor.font, str)
-					draw_text(&editor.font, commands, str, editor.config.theme[.Ui_Text].fg, { x, screen_size.y - padding, })
+					x  -= measure_text(&editor.ui_font, str)
+					draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 					x  -= padding
 				}
 
 				str = strconv.write_int(buf[:], i64(primary_position.column + 1), base = 10)
-				x  -= measure_text(&editor.font, str)
-				draw_text(&editor.font, commands, str, editor.config.theme[.Ui_Text].fg, { x, screen_size.y - padding, })
+				x  -= measure_text(&editor.ui_font, str)
+				draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 
 				str = ":"
 
-				x -= measure_text(&editor.font, str)
-				draw_text(&editor.font, commands, str, editor.config.theme[.Ui_Text].fg, { x, screen_size.y - padding, })
+				x -= measure_text(&editor.ui_font, str)
+				draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 
 				str = strconv.write_int(buf[:], i64(primary_position.line + 1), base = 10)
-				x  -= measure_text(&editor.font, str)
-				draw_text(&editor.font, commands, str, editor.config.theme[.Ui_Text].fg, { x, screen_size.y - padding, })
+				x  -= measure_text(&editor.ui_font, str)
+				draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 
 				x -= padding
 
 				str = "sel"
 
-				x  -= measure_text(&editor.font, str)
-				draw_text(&editor.font, commands, str, editor.config.theme[.Ui_Text].fg, { x, screen_size.y - padding, })
+				x  -= measure_text(&editor.ui_font, str)
+				draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 
 				x -= padding
 
 				str = strconv.write_int(buf[:], i64(len(buffer.selections)), base = 10)
-				x  -= measure_text(&editor.font, str)
-				draw_text(&editor.font, commands, str, editor.config.theme[.Ui_Text].fg, { x, screen_size.y - padding, })
+				x  -= measure_text(&editor.ui_font, str)
+				draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 			}
 		}
 	}
@@ -1132,21 +1088,21 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		}
 
 		if mode_text != "" {
-			w     := measure_text(&editor.font, mode_text)
+			w     := measure_text(&editor.code_font, mode_text)
 			style := editor.config.theme[mode_style]
 			if style.bg != 0 {
 				draw_rect(commands,
-					offset = { x - padding, screen_size.y - FONT_HEIGHT - padding * 2, },
-					size   = { w, FONT_HEIGHT, } + padding * 2,
+					offset = { x - padding, rect.min.y + 2, },
+					size   = { w, editor.config.code_font.size, } + padding * 2,
 					color  = style.bg,
 				)
 			}
 			draw_text(
-				&editor.font,
+				&editor.code_font,
 				commands,
 				mode_text,
 				editor.config.theme[mode_style].fg,
-				{ x, screen_size.y - padding, },
+				{ x, rect.max.y - padding, },
 			)
 
 			x += w + padding
@@ -1155,11 +1111,6 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 				x += padding
 			}
 		}
-	}
-
-	cell_size: [2]f32 = {
-		la.round(get_glyph_info(&editor.font, 0).x_advance),
-		la.round(((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale)),
 	}
 
 	if editor.mode == .Prompt {
@@ -1180,11 +1131,11 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		}
 
 		x := x + draw_text(
-			&editor.font,
+			&editor.ui_font,
 			commands,
 			mode_string,
 			editor.config.theme[.Ui_Text].fg,
-			{ x, screen_size.y - padding, },
+			{ x, rect.max.y - padding, },
 		)
 
 		default: string
@@ -1194,7 +1145,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 				default = history[len(history) - 1]
 			}
 		}
-		w := input_line_render(editor, commands, &editor.prompt.input, { x, screen_size.y - padding, }, delta_time, default)
+		w := input_line_render(editor, commands, &editor.prompt.input, { x, rect.max.y - padding, }, delta_time, default)
 
 		text := input_line_get_text(editor.prompt.input)
 		if text == "" {
@@ -1212,27 +1163,54 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 
 			if case_insensitive {
 				draw_text(
-					&editor.font,
+					&editor.ui_font,
 					commands,
 					" (Aa)",
 					editor.config.theme[.Ui_Text].fg,
-					{ x + w, screen_size.y - padding, },
+					{ x + w, rect.max.y - padding, },
 				)
 			}
 		}
 	} else {
 		draw_text(
-			&editor.font,
+			&editor.ui_font,
 			commands,
 			strings.to_string(editor.status),
 			editor.config.theme[.Ui_Text].fg,
-			{ x, screen_size.y - padding, },
+			{ x, rect.max.y - padding, },
 		)
+	}
+}
+
+render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f32, screen_size: [2]f32) {
+	padding           := editor.config.padding
+	status_bar_height := editor.config.ui_font.size + padding * 2 + 2
+
+	window_rect: Rect
+	status_bar_rect: Rect
+
+	if true {
+		window_rect     = { min = padding,                                   max = screen_size - { 0, status_bar_height, } - padding, }
+		status_bar_rect = { min = { 0, screen_size.y - status_bar_height, }, max = screen_size, }
+	} else {
+		window_rect     = { min = { 0, status_bar_height, } + padding, max = screen_size - padding, }
+		status_bar_rect = { min = 0,                                   max = { screen_size.x, status_bar_height, }, }
+	}
+
+	popup_commands := make([dynamic]Draw_Command, context.temp_allocator)
+	window_render(editor, commands, &popup_commands, &editor.window_tree, delta_time, window_rect)
+	append(commands, ..popup_commands[:])
+
+	status_bar_render(editor, commands, delta_time, padding, status_bar_rect)
+
+	cell_size: [2]f32 = {
+		la.round(get_glyph_info(&editor.code_font, 0).x_advance),
+		la.round((f32(editor.code_font.ascender) - f32(editor.code_font.descender)) * editor.code_font.scale),
 	}
 
 	leader_target_rect := Rect {
-		min = (screen_size - 20 - { 0, FONT_HEIGHT + padding * 2, }) - editor.leader.size,
-		max = (screen_size - 20 - { 0, FONT_HEIGHT + padding * 2, }),
+		min = (screen_size - 20 - { 0, editor.config.ui_font.size + padding * 2, }) - editor.leader.size,
+		max = (screen_size - 20 - { 0, editor.config.ui_font.size + padding * 2, }),
 	}
 	if editor.leader.active {
 		animation_set_target(&editor.leader.rect, leader_target_rect)
@@ -1263,8 +1241,8 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 
 		text_color := editor.config.theme[.Ui_Text].fg * { 1, 1, 1, leader_alpha, }
 
-		draw_text(&editor.font, commands, editor.leader.title, text_color, { x, y + FONT_HEIGHT, })
-		y += FONT_HEIGHT + padding
+		draw_text(&editor.ui_font, commands, editor.leader.title, text_color, { x, y + editor.config.ui_font.size, })
+		y += editor.config.ui_font.size + padding
 
 		draw_rect(commands,
 			offset = { x, y, },
@@ -1286,8 +1264,8 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 					bind   = keybind_to_string(bind,  &editor.leader.arena),
 					action = action_to_string(action, &editor.leader.arena),
 				}
-				binds_width   = max(binds_width,   measure_text(&editor.font, editor.leader.entries[i].bind  ))
-				actions_width = max(actions_width, measure_text(&editor.font, editor.leader.entries[i].action))
+				binds_width   = max(binds_width,   measure_text(&editor.ui_font, editor.leader.entries[i].bind  ))
+				actions_width = max(actions_width, measure_text(&editor.ui_font, editor.leader.entries[i].action))
 
 				i += 1
 			}
@@ -1296,7 +1274,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 
 			editor.leader.size = padding + [2]f32 {
 				binds_width + padding + cell_size.x + padding + actions_width,
-				FONT_HEIGHT + padding + 2 + padding + f32(len(editor.leader.entries)) * (FONT_HEIGHT + padding) - padding,
+				editor.config.ui_font.size + padding + 2 + padding + f32(len(editor.leader.entries)) * (editor.config.ui_font.size + padding) - padding,
 			} + padding
 
 			slice.sort_by(editor.leader.entries, proc(a, b: Leader_Entry) -> bool {
@@ -1305,13 +1283,13 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		}
 
 		for entry in editor.leader.entries {
-			draw_text(&editor.font, commands, entry.bind, text_color, { x, y + FONT_HEIGHT, })
+			draw_text(&editor.ui_font, commands, entry.bind, text_color, { x, y + editor.config.ui_font.size, })
 			x := x + editor.leader.binds_width + padding
-			x += draw_text(&editor.font, commands, "󰁔", text_color, { x, y + FONT_HEIGHT, }) + padding
+			x += draw_text(&editor.code_font, commands, "󰁔", text_color, { x, y + editor.config.ui_font.size, }) + padding
 
-			draw_text(&editor.font, commands, entry.action, text_color, { x, y + FONT_HEIGHT, })
+			draw_text(&editor.ui_font, commands, entry.action, text_color, { x, y + editor.config.ui_font.size, })
 
-			y += FONT_HEIGHT + padding
+			y += editor.config.ui_font.size + padding
 		}
 	} else {
 		editor.leader.alpha.target  = 0
@@ -1324,11 +1302,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 
 @(require_results)
 next_column_after_tab :: proc(column, tab_width: int) -> int {
-	column := column + 1
-	for column % tab_width != 0 {
-		column += 1
-	}
-	return column
+    return column + tab_width - column % tab_width
 }
 
 editor_set_status :: proc(editor: ^Editor, format: string, args: ..any) {
@@ -1400,8 +1374,9 @@ regex_search :: proc(editor: ^Editor, buffer: ^Buffer_View, pattern_string: stri
 	}
 
 	if ok {
-		selection.anchor        = btree_offset_to_index(&buffer.btree, _Offset(capture.pos[0][0]), start)
-		selection.cursor        = btree_offset_to_index(&buffer.btree, _Offset(capture.pos[0][1]), start) - 1
+		start_offset           := btree_index_to_offset(&buffer.btree, start)
+		selection.anchor        = btree_offset_to_index(&buffer.btree, _Offset(capture.pos[0][0]) + start_offset)
+		selection.cursor        = btree_offset_to_index(&buffer.btree, _Offset(capture.pos[0][1]) + start_offset) - 1
 		selection.target_cursor = selection.cursor
 		return
 	}
@@ -1445,8 +1420,9 @@ regex_search_reverse :: proc(editor: ^Editor, buffer: ^Buffer_View, pattern_stri
 	}
 
 	if ok {
-		selection.cursor        = btree_offset_to_index(&buffer.btree, -_Offset(capture.pos[0][0]), start) + 1
-		selection.anchor        = btree_offset_to_index(&buffer.btree, -_Offset(capture.pos[0][1]), start)
+		start_offset           := btree_index_to_offset(&buffer.btree, start)
+		selection.cursor        = btree_offset_to_index(&buffer.btree, -_Offset(capture.pos[0][0]) + start_offset) + 1
+		selection.anchor        = btree_offset_to_index(&buffer.btree, -_Offset(capture.pos[0][1]) + start_offset)
 		selection.target_cursor = selection.cursor
 		return
 	}
@@ -1514,9 +1490,10 @@ prompt_apply :: proc(editor: ^Editor) {
 
 			regex_iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator)
 			for capture, capture_i in regex.match(&regex_iter) {
+				start_offset := btree_index_to_offset(&editor.buffer.btree, start)
 				append(&editor.new_selections, New_Selection {
-					anchor  = btree_offset_to_index(&editor.buffer.btree, _Offset(capture.pos[0][0]), start),
-					cursor  = btree_offset_to_index(&editor.buffer.btree, _Offset(capture.pos[0][1]), start) - 1,
+					anchor  = btree_offset_to_index(&editor.buffer.btree, _Offset(capture.pos[0][0]) + start_offset),
+					cursor  = btree_offset_to_index(&editor.buffer.btree, _Offset(capture.pos[0][1]) + start_offset) - 1,
 					primary = i == editor.buffer.primary && capture_i == 0,
 				})
 			}
@@ -1614,38 +1591,6 @@ selection_contains :: proc(selection: Selection, index: Index) -> bool {
 	return min(selection.anchor, selection.cursor) <= index && index <= max(selection.anchor, selection.cursor)
 }
 
-draw_rect :: proc(
-	commands:     ^[dynamic]Draw_Command,
-	offset:        [2]f32,
-	size:          [2]f32,
-	color:         [4]f32,
-	border_radius: f32    = 0,
-	border_width:  f32    = 0,
-	border_color:  [4]f32 = 0,
-	shadow_width:  f32    = 0,
-	blur_radius:   f32    = 0,
-) {
-	if size == 0 {
-		return
-	}
-	rect := rect_from_min_max(offset, offset + size)
-	if blur_radius != 0 {
-		append(commands, Draw_Command_Blur {
-			rect          = rect,
-			radius        = blur_radius,
-			border_radius = border_radius,
-		})
-	}
-	append(commands, Draw_Command_Rect {
-		rect          = rect,
-		color         = color,
-		border_radius = border_radius,
-		border_width  = border_width,
-		border_color  = border_color,
-		shadow_width  = shadow_width,
-	})
-}
-
 code_block_render :: proc(
 	editor:    ^Editor,
 	commands:  ^[dynamic]Draw_Command,
@@ -1661,13 +1606,13 @@ code_block_render :: proc(
 	highlighter := highlighter_create(content, editor.config.languages[language], context.temp_allocator)
 
 	cell_size: [2]f32 = {
-		la.round(get_glyph_info(&editor.font, 0).x_advance),
-		la.round((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale),
+		la.round(get_glyph_info(&editor.code_font, 0).x_advance),
+		la.round((f32(editor.code_font.ascender) - f32(editor.code_font.descender)) * editor.code_font.scale),
 	}
 	line_height := cell_size.y
 
 	width: f32
-	y := la.round(f32(editor.font.ascender) * editor.font.scale)
+	y := la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
 
 	column: int
 	render_code: for {
@@ -1702,7 +1647,7 @@ code_block_render :: proc(
 			if highlight.start <= index && index < highlight.end {
 				draw_rect(
 					commands,
-					offset = { cell_size.x * f32(column), y - la.round(f32(editor.font.ascender) * editor.font.scale), } + position,
+					offset = { cell_size.x * f32(column), y - la.round(f32(editor.code_font.ascender) * editor.code_font.scale), } + position,
 					size   = cell_size,
 					color  = editor.config.theme[.Selection].bg,
 				)
@@ -1718,11 +1663,12 @@ code_block_render :: proc(
 				position = { cell_size.x * f32(column), y, } + position,
 				char     = r,
 				color    = editor.config.theme[style].fg,
+				font     = &editor.code_font,
 			})
 		}
 
 		if editor.config.theme[style].bg != 0 {
-			offset := [2]f32 { f32(start_column) * cell_size.x, y - la.round(f32(editor.font.ascender) * editor.font.scale), } + position
+			offset := [2]f32 { f32(start_column) * cell_size.x, y - la.round(f32(editor.code_font.ascender) * editor.code_font.scale), } + position
 			size   := [2]f32 { f32(column - start_column) * cell_size.x, cell_size.y, }
 
 			commands[rect_index] = Draw_Command_Rect {
@@ -1739,7 +1685,7 @@ code_block_render :: proc(
 	}
 
 	width = max(width, cell_size.x * f32(column))
-	y    -= la.round(f32(editor.font.ascender) * editor.font.scale)
+	y    -= la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
 
 	return { width, y, }
 }
@@ -1753,14 +1699,14 @@ markdown_render :: proc(
 	container_width: f32,
 ) -> (size: [2]f32) {
 	cell_size: [2]f32 = {
-		la.round(get_glyph_info(&editor.font, 0).x_advance),
-		la.round((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale),
+		la.round(get_glyph_info(&editor.code_font, 0).x_advance),
+		la.round((f32(editor.code_font.ascender) - f32(editor.code_font.descender)) * editor.code_font.scale),
 	}
 	line_height := cell_size.y
 
 	width, x, y, indentation: f32
 
-	position := position + { 0, la.round(f32(editor.font.ascender) * editor.font.scale), }
+	position := position + { 0, la.round(f32(editor.code_font.ascender) * editor.code_font.scale), }
 
 	root := cm.parse_document(raw_data(content), len(content), cm.DEFAULT_OPTIONS)
 	defer cm.node_free(root)
@@ -1780,7 +1726,7 @@ markdown_render :: proc(
 		case .None:
 		case .Document:
 		case .Block_Quote:
-			x += draw_text(&editor.font, commands, "Block_Quote", editor.config.theme[.Operator].fg, { x, y, } + position)
+			x += draw_text(&editor.ui_font, commands, "Block_Quote", editor.config.theme[.Operator].fg, { x, y, } + position)
 
 			width = max(width, x)
 			y    += line_height
@@ -1794,7 +1740,7 @@ markdown_render :: proc(
 		case .Item:
 			if ev_type == .Enter {
 				RADIUS :: 2
-				draw_rect(commands, { cell_size.x - RADIUS, y - FONT_HEIGHT / 2 - RADIUS, } + position, RADIUS * 2, editor.config.theme[.Ui_Text].fg, border_radius = RADIUS)
+				draw_rect(commands, { cell_size.x - RADIUS, y - editor.config.ui_font.size / 2 - RADIUS, } + position, RADIUS * 2, editor.config.theme[.Ui_Text].fg, border_radius = RADIUS)
 				x           += cell_size.x * 2
 				indentation += cell_size.x * 2
 			} else if ev_type == .Exit {
@@ -1805,7 +1751,7 @@ markdown_render :: proc(
 			rect_index := len(commands)
 			append(commands, nil)
 
-			y -= la.round(f32(editor.font.ascender) * editor.font.scale)
+			y -= la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
 
 			language := Language(cur.as.code.info)
 			if language == "" {
@@ -1827,16 +1773,16 @@ markdown_render :: proc(
 			}
 
 			width = max(width, code_block_size.x + pad * 2)
-			y    += code_block_size.y + la.round(f32(editor.font.ascender) * editor.font.scale) + pad * 2
+			y    += code_block_size.y + la.round(f32(editor.code_font.ascender) * editor.code_font.scale) + pad * 2
 			x     = indentation
 		case .HTML_Block:
-			x += draw_text(&editor.font, commands, "HTML_Block",     editor.config.theme[.Operator].fg, { x, y, } + position)
+			x += draw_text(&editor.ui_font, commands, "HTML_Block",     editor.config.theme[.Operator].fg, { x, y, } + position)
 
 			width = max(width, x)
 			y    += line_height
 			x     = indentation
 		case .Custom_Block:
-			x += draw_text(&editor.font, commands, "Custom_Block",   editor.config.theme[.Operator].fg, { x, y, } + position)
+			x += draw_text(&editor.ui_font, commands, "Custom_Block",   editor.config.theme[.Operator].fg, { x, y, } + position)
 
 			width = max(width, x)
 			y    += line_height
@@ -1852,13 +1798,13 @@ markdown_render :: proc(
 			y    += line_height
 
 			if ev_type == .Exit {
-				draw_rect(commands, { 0, y - FONT_HEIGHT, } + position, { x, 1, }, editor.config.theme[.Ui_Text].fg)
+				draw_rect(commands, { 0, y - editor.config.ui_font.size, } + position, { x, 1, }, editor.config.theme[.Ui_Text].fg)
 				y += line_height
 			}
 
 			x = indentation
 		case .Thematic_Break:
-			draw_rect(commands, { 0, y - FONT_HEIGHT / 2 - 1, } + position, { container_width - editor.config.padding * 2, 1, }, editor.config.theme[.Ui_Text].fg)
+			draw_rect(commands, { 0, y - editor.config.ui_font.size / 2 - 1, } + position, { container_width - editor.config.padding * 2, 1, }, editor.config.theme[.Ui_Text].fg)
 
 			width = max(width, x)
 			y    += line_height
@@ -1868,12 +1814,12 @@ markdown_render :: proc(
 			y    += line_height
 			x     = indentation
 		case .Text:
-			x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + position)
+			x += draw_text(&editor.ui_font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + position)
 		case .Code:
 			rect_index := len(commands)
 			append(commands, nil)
 
-			y -= la.round(f32(editor.font.ascender) * editor.font.scale)
+			y -= la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
 
 			pad: [2]f32 = { 3, 0, }
 			code_block_size := code_block_render(editor, commands, position + { x, y, } + pad, strings.trim_right(text, "\n"), Language(cur.as.code.info), highlight)
@@ -1885,24 +1831,24 @@ markdown_render :: proc(
 				},
 				color         = editor.config.theme[.Ui_Code].fg,
 				border_radius = 4,
-				border_color  = editor.config.theme[.Selection].bg,
-				border_width  = 2,
+				border_color  = 0, // editor.config.theme[.Selection].bg
+				border_width  = 1,
 			}
 
-			y += la.round(f32(editor.font.ascender) * editor.font.scale)
+			y += la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
 			x += code_block_size.x + pad.x * 2
 		case .HTML_Inline:
-			x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + position)
+			x += draw_text(&editor.ui_font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + position)
 		case .Custom_Inline:
-			x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + position)
+			x += draw_text(&editor.ui_font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + position)
 		case .Emph:
-			x += draw_text(&editor.font, commands, text, editor.config.theme[.Keyword].fg,  { x, y, } + position)
+			x += draw_text(&editor.ui_font, commands, text, editor.config.theme[.Keyword].fg,  { x, y, } + position)
 		case .Strong:
-			x += draw_text(&editor.font, commands, text, editor.config.theme[.Operator].fg, { x, y, } + position)
+			x += draw_text(&editor.ui_font, commands, text, editor.config.theme[.Operator].fg, { x, y, } + position)
 		case .Link:
-			x += draw_text(&editor.font, commands, text, editor.config.theme[.String].fg,   { x, y, } + position)
+			x += draw_text(&editor.ui_font, commands, text, editor.config.theme[.String].fg,   { x, y, } + position)
 		case .Image:
-			x += draw_text(&editor.font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + position)
+			x += draw_text(&editor.ui_font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + position)
 		}
 	}
 
@@ -1918,8 +1864,8 @@ popup_render :: proc(
 	location:   Popup_Location,
 ) {
 	cell_size: [2]f32 = {
-		la.round(get_glyph_info(&editor.font, 0).x_advance),
-		la.round((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale),
+		la.round(get_glyph_info(&editor.code_font, 0).x_advance),
+		la.round((f32(editor.code_font.ascender) - f32(editor.code_font.descender)) * editor.code_font.scale),
 	}
 
 	popup_rect     := animation_update(&popup.rect, delta_time, editor.config.popup_animation_speed)
@@ -1996,8 +1942,8 @@ buffer_render :: proc(
 	height := rect.max.y - rect.min.y
 
 	cell_size: [2]f32 = {
-		la.round(get_glyph_info(&editor.font, 0).x_advance),
-		la.round((f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale),
+		la.round(get_glyph_info(&editor.code_font, 0).x_advance),
+		la.round((f32(editor.code_font.ascender) - f32(editor.code_font.descender)) * editor.code_font.scale),
 	}
 
 	line_digits  := int(la.ceil(la.log10(1 + f32(buffer.btree.lines))))
@@ -2102,7 +2048,7 @@ buffer_render :: proc(
 			defer position = position_after(position, char, editor.config.tab_width)
 
 			draw_gutter: if position.column == 0 {
-				y := cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale)
+				y := cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
 
 				if y < 0 {
 					break draw_gutter
@@ -2120,8 +2066,8 @@ buffer_render :: proc(
 				@(static)
 				line_number_buf: [32]byte
 				str := strconv.write_int(line_number_buf[:], i64(line + 1), base = 10)
-				w   := measure_text(&editor.font, str)
-				draw_text(&editor.font, commands, str, text_color, { lines_width - w, y, } + rect.min)
+				w   := measure_text(&editor.code_font, str)
+				draw_text(&editor.code_font, commands, str, text_color, { lines_width - w, y, } + rect.min)
 
 				draw_rect(commands,
 					offset = {
@@ -2191,7 +2137,7 @@ buffer_render :: proc(
 				draw_rect(commands,
 					offset = {
 						f32(position.column) * cell_size.x + gutter_width,
-						cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.font.ascender - editor.font.descender) * editor.font.scale) - 1,
+						cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.code_font.ascender - editor.code_font.descender) * editor.code_font.scale) - 1,
 					} + rect.min,
 					size   = { cell_size.x * f32(max(1, next_column - position.column)), 1, },
 					color  = editor.config.theme[.Cursor].bg,
@@ -2201,8 +2147,8 @@ buffer_render :: proc(
 			if char == '\n' {
 				if diagnostic, ok := line_diagnostic.?; ok {
 					x := f32(position.column + 2) * cell_size.x + gutter_width
-					y := cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale)
-					x += draw_text(&editor.font, &text_commands, diagnostic.message, editor.config.theme[.Error].fg, { x, y, } + rect.min)
+					y := cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
+					x += draw_text(&editor.code_font, &text_commands, diagnostic.message, editor.config.theme[.Error].fg, { x, y, } + rect.min)
 				}
 				line_diagnostic = nil
 				continue
@@ -2213,12 +2159,13 @@ buffer_render :: proc(
 			}
 
 			x := f32(position.column) * cell_size.x + gutter_width
-			y := cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.font.ascender) * editor.font.scale)
+			y := cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
 
 			append(&text_commands, Draw_Command_Char {
 				position = { x, y, } + rect.min,
 				color    = editor.config.theme[style].fg,
 				char     = char,
+				font     = &editor.code_font,
 			})
 
 			// TODO: line wrapping
@@ -2309,11 +2256,11 @@ buffer_render :: proc(
 			)
 		}
 	} else {
-		w := measure_text(&editor.font, buffer.path)
+		w := measure_text(&editor.code_font, buffer.path)
 		draw_rect(
 			commands,
-			rect.max - { w, FONT_HEIGHT, } - editor.config.padding * 2,
-			{ w, FONT_HEIGHT, } + editor.config.padding * 2,
+			rect.max - { w, editor.config.code_font.size, } - editor.config.padding * 2,
+			{ w, editor.config.code_font.size, } + editor.config.padding * 2,
 			editor.config.theme[.Popup_Background].fg,
 			border_radius = 4,
 			border_width  = 2,
@@ -2321,7 +2268,7 @@ buffer_render :: proc(
 			blur_radius   = f32(editor.config.blur_strength),
 		)
 		draw_text(
-			&editor.font,
+			&editor.code_font,
 			commands,
 			buffer.path,
 			editor.config.theme[.Ui_Text].fg,
@@ -2493,7 +2440,7 @@ input_line_render :: proc(
 		text = default
 	}
 	width = draw_text(
-		&editor.font,
+		&editor.ui_font,
 		commands,
 		text[:input.cursor],
 		editor.config.theme[.Ui_Text].fg,
@@ -2501,14 +2448,14 @@ input_line_render :: proc(
 	)
 	animation_set_target(&input.cursor_anim, width)
 	anim   := animation_update(&input.cursor_anim, delta_time, editor.config.cursor_animation_speed)
-	height := (f32(editor.font.ascender) - f32(editor.font.descender)) * editor.font.scale
+	height := (f32(editor.ui_font.ascender) - f32(editor.ui_font.descender)) * editor.ui_font.scale
 	draw_rect(commands,
-		offset = position + { anim, -(height + f32(editor.font.descender) * editor.font.scale), },
+		offset = position + { anim, -(height + f32(editor.ui_font.descender) * editor.ui_font.scale), },
 		size   = { 1, height, },
 		color  = editor.config.theme[.Ui_Text].fg,
 	)
 	width += draw_text(
-		&editor.font,
+		&editor.ui_font,
 		commands,
 		text[input.cursor:],
 		editor.config.theme[.Ui_Text].fg,

@@ -2,11 +2,13 @@ package editor
 
 import runtime "base:runtime"
 
+import fmt     "core:fmt"
 import os      "core:os"
+import reflect "core:reflect"
 import strconv "core:strconv"
 import strings "core:strings"
+import utf8    "core:unicode/utf8"
 import vmem    "core:mem/virtual"
-import reflect "core:reflect"
 
 Command :: enum {
 	Open = 1,
@@ -20,6 +22,7 @@ Command :: enum {
 	Config_Option_Get,
 	New,
 	Go_To_Line,
+	Character_Info,
 }
 
 Prepared_Command :: struct {
@@ -113,6 +116,19 @@ command_execute :: proc(editor: ^Editor, command: Prepared_Command) {
 		line_number, _     := strconv.parse_int(command.args[0])
 		editor.repeat_count = line_number
 		action_apply(editor, .Go_To_Line, {})
+	case .Character_Info:
+		r := btree_get_rune(editor.buffer.btree, editor.buffer.selections[editor.buffer.primary].cursor)
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_encoded_rune(&b, r)
+		fmt.sbprintf(&b, " (%U)", r)
+
+		buf, n := utf8.encode_rune(r)
+		fmt.sbprintf(&b, " UTF-8:")
+		for c in buf[:n] {
+			fmt.sbprintf(&b, " %x", c)
+		}
+
+		editor_set_status(editor, "%s", strings.to_string(b))
 	case:
 		editor_set_status(editor, "Invalid command: '%s'", command)
 	}
@@ -150,15 +166,16 @@ Command_Info :: struct {
 
 @(rodata)
 command_info_table: [Command]Command_Info = {
-	.Open              = { aliases = { "o",   }, args = 1,         },
-	.Write             = { aliases = { "w",   }, args = { 0, 1, }, },
-	.Quit              = { aliases = { "q",   },                   },
-	.Split_Vertical    = { aliases = { "vs",  }, args = { 0, 1, }, },
-	.Split_Horizontal  = { aliases = { "hs",  }, args = { 0, 1, }, },
-	.Config_Reload     = {                                         },
-	.Config_Open       = {                                         },
-	.Config_Option_Set = { aliases = { "set", }, args = 2,         },
-	.Config_Option_Get = { aliases = { "get", }, args = 1,         },
-	.New               = { aliases = { "n",   },                   },
-	.Go_To_Line        = { aliases = { "g",   }, args = 1,         },
+	.Open              = { aliases = { "o",    }, args = 1,         },
+	.Write             = { aliases = { "w",    }, args = { 0, 1, }, },
+	.Quit              = { aliases = { "q",    },                   },
+	.Split_Vertical    = { aliases = { "vs",   }, args = { 0, 1, }, },
+	.Split_Horizontal  = { aliases = { "hs",   }, args = { 0, 1, }, },
+	.Config_Reload     = {                                          },
+	.Config_Open       = {                                          },
+	.Config_Option_Set = { aliases = { "set",  }, args = 2,         },
+	.Config_Option_Get = { aliases = { "get",  }, args = 1,         },
+	.New               = { aliases = { "n",    },                   },
+	.Go_To_Line        = { aliases = { "g",    }, args = 1,         },
+	.Character_Info    = { aliases = { "char", },                   },
 }

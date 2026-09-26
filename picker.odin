@@ -427,17 +427,17 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 			editor,
 			commands,
 			&picker.input,
-			picker_rect.min + padding + { 0, FONT_HEIGHT, },
+			picker_rect.min + padding + { 0, editor.config.ui_font.size, },
 			delta_time,
 		)
 
 		draw_rect(commands,
-			offset = picker_rect.min + padding + { 0, FONT_HEIGHT + padding, },
+			offset = picker_rect.min + padding + { 0, editor.config.ui_font.size + padding, },
 			size   = { picker_rect.max.x - picker_rect.min.x - padding * 2, 2, },
 			color  = editor.config.theme[.Popup_Border].fg,
 		)
 
-		line_height := padding + FONT_HEIGHT
+		line_height := padding + editor.config.ui_font.size
 
 		x := picker_rect.min.x + padding
 		y := picker_rect.min.y + line_height * 2 + padding + 2
@@ -447,7 +447,7 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 		animation_set_target(&picker.active_anim, f32(picker.active))
 		active := animation_update(&picker.active_anim, delta_time, editor.config.cursor_animation_speed)
 
-		x += draw_text(&editor.font, commands, ">", editor.config.theme[.Ui_Focus].fg, { x, y + line_height * active, }) + padding
+		x += draw_text(&editor.ui_font, commands, ">", editor.config.theme[.Ui_Focus].fg, { x, y + line_height * active, }) + padding
 
 		has_upper: bool
 		for r in pattern {
@@ -473,9 +473,9 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 				offset := strings.index(lower, pattern)
 				if offset != -1 {
 					n     := len(pattern)
-					pos.x += draw_text(&editor.font, commands, item[:offset],     text_color,                            pos)
-					pos.x += draw_text(&editor.font, commands, item[offset:][:n], editor.config.theme[.Ui_Highlight].fg, pos)
-					pos.x += draw_text(&editor.font, commands, item[offset:][n:], text_color,                            pos)
+					pos.x += draw_text(&editor.ui_font, commands, item[:offset],     text_color,                            pos)
+					pos.x += draw_text(&editor.ui_font, commands, item[offset:][:n], editor.config.theme[.Ui_Highlight].fg, pos)
+					pos.x += draw_text(&editor.ui_font, commands, item[offset:][n:], text_color,                            pos)
 					continue
 				}
 			}
@@ -493,13 +493,13 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 
 				_, n := utf8.decode_rune(item[i:])
 
-				pos.x += draw_text(&editor.font, commands, item[:i],     text_color,                            pos)
-				pos.x += draw_text(&editor.font, commands, item[i:][:n], editor.config.theme[.Ui_Highlight].fg, pos)
+				pos.x += draw_text(&editor.ui_font, commands, item[:i],     text_color,                            pos)
+				pos.x += draw_text(&editor.ui_font, commands, item[i:][:n], editor.config.theme[.Ui_Highlight].fg, pos)
 
 				item = item[i + n:]
 			}
 
-			draw_text(&editor.font, commands, item, text_color, pos)
+			draw_text(&editor.ui_font, commands, item, text_color, pos)
 		}
 	}
 }

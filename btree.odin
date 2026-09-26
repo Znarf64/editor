@@ -588,11 +588,7 @@ btree_to_string :: proc(
 }
 
 @(require_results)
-btree_offset_to_index :: proc(btree: ^BTree, offset: _Offset, base: Index = 0) -> (index: Index) {
-	if base != 0 {
-		return btree_offset_to_index(btree, offset + btree_index_to_offset(btree, base))
-	}
-
+btree_offset_to_index :: proc(btree: ^BTree, offset: _Offset) -> (index: Index) {
 	offset     := offset
 	node_index := btree.root
 

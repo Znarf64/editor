@@ -45,7 +45,7 @@ Backend_Wayland :: struct {
 
 @(require_results)
 backend_init_wayland :: proc() -> (backend: ^Backend) {
-	b  := new(Backend_Wayland)
+	b := new(Backend_Wayland)
 	if _backend_init_wayland(b) {
 		return b
 	} else {
@@ -488,8 +488,8 @@ _backend_init_wayland :: proc(backend: ^Backend_Wayland) -> (ok: bool) {
 		clear(&backend._events)
 		return events
 	}
-	backend.draw = proc(backend: ^Backend_Wayland, font: Font, commands: []Draw_Command, background_color: [4]f32) {
-		opengl_renderer_draw(&backend.opengl_renderer, font, commands, background_color)
+	backend.draw = proc(backend: ^Backend_Wayland, commands: []Draw_Command, background_color: [4]f32) {
+		opengl_renderer_draw(&backend.opengl_renderer, commands, background_color)
 		egl.SwapBuffers(backend.egl_display, backend.egl_surface)
 	}
 	backend.set_title = proc(backend: ^Backend_Wayland, title: string) {

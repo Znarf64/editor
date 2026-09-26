@@ -55,7 +55,7 @@ Event_Input_Scroll :: struct {
 
 Backend :: struct {
 	poll_events:   proc(backend: ^Backend) -> []Event,
-	draw:          proc(backend: ^Backend, font: Font, commands: []Draw_Command, background_color: [4]f32),
+	draw:          proc(backend: ^Backend, commands: []Draw_Command, background_color: [4]f32),
 	set_title:     proc(backend: ^Backend, title: string),
 	get_clipboard: proc(backend: ^Backend, allocator: runtime.Allocator) -> string,
 	set_clipboard: proc(backend: ^Backend, data: string),

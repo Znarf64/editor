@@ -53,6 +53,14 @@ Style :: struct {
 
 Theme :: [Style_Key]Style
 
+Font_Config :: struct {
+	path:   string,
+	family: string,
+	style:  string,
+	weight: Maybe(int),
+	size:   f32,
+}
+
 Config :: struct {
 	arena:                  vmem.Arena,
 
@@ -65,6 +73,9 @@ Config :: struct {
 	tab_width:              int,
 	scroll_scale:           f32,
 	padding:                f32,
+
+	ui_font:                Font_Config,
+	code_font:              Font_Config,
 
 	theme:                  Theme,
 	keybinds:               [Mode]Keybinds,
@@ -100,7 +111,59 @@ config_value_set :: proc(
 
 	allocator := vmem.arena_allocator(&config.arena)
 
+	@(require_results)
+	unmarshal_value :: proc(v: any, value: string) -> bool {
+		ti := runtime.type_info_base(type_info_of(v.id))
+		if u, ok := ti.variant.(reflect.Type_Info_Union); ok {
+			assert(len(u.variants) == 1)
+
+			variant: any = {
+				data = v.data,
+				id   = u.variants[0].id,
+			}
+			unmarshal_value(variant, value) or_return
+			reflect.set_union_variant_raw_tag(v, 1)
+			return true
+		}
+
+		switch &v in v {
+		case f32:
+			v = strconv.parse_f32(value) or_return
+			return true
+		case int:
+			v = strconv.parse_int(value) or_return
+			return true
+		case bool:
+			if strings.equal_fold(value, "true") {
+				v = true
+				return true
+			}
+			if strings.equal_fold(value, "false") {
+				v = false
+				return true
+			}
+			return false
+		case string:
+			v = value
+			return true
+		}
+
+		unreachable()
+	}
+
 	switch section {
+	case "font":
+		field: any
+		switch subsection {
+		case "ui":
+			field = reflect.struct_field_value_by_name(config.ui_font, key)
+		case "code":
+			field = reflect.struct_field_value_by_name(config.code_font, key)
+		}
+		if field == nil {
+			return false
+		}
+		unmarshal_value(field, value) or_return
 	case "theme":
 		base, _, selector := strings.partition(key, ".")
 		style: Style_Key
@@ -130,30 +193,11 @@ config_value_set :: proc(
 			config.theme[style].bg = color
 		}
 	case "editor":
-		unmarshal_value :: proc(v: any, value: string) -> bool {
-			switch &v in v {
-			case f32:
-				v = strconv.parse_f32(value) or_return
-			case int:
-				v = strconv.parse_int(value) or_return
-			case bool:
-				if strings.equal_fold(value, "true") {
-					v = true
-					return true
-				}
-				if strings.equal_fold(value, "false") {
-					v = false
-					return true
-				}
-				return false
-			}
-			return false
-		}
 		field := reflect.struct_field_value_by_name(config^, key)
 		if field == nil {
-			break
+			return false
 		}
-		unmarshal_value(field, value) or_break
+		unmarshal_value(field, value) or_return
 	case "language":
 		_, language, new, _ := map_entry(&config.languages, Language(subsection))
 		if new {
@@ -235,7 +279,7 @@ config_value_get :: proc(config: ^Config, section, key: string, allocator: runti
 }
 
 load_config_file :: proc(config: ^Config, src: string, allocator: runtime.Allocator) -> (ok: bool) {
-	it := ini.iterator_from_string(src, {})
+	it := ini.iterator_from_string(src, { comment = "#", })
 
 	config.colors    = make(map[string][4]f32,            allocator)
 	config.leaders   = make(map[string]Leader_Binds,      allocator)

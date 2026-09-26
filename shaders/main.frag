@@ -64,6 +64,8 @@ void main() {
 		f_color.a *= texture(u_texture_font, texel).r;
 	}
 
-	f_color      = mix(f_color, v_border_color, border_weight);
-	f_color.rgb *= f_color.a;
+	f_color = vec4(
+		mix(f_color.rgb * f_color.a, v_border_color.rgb * v_border_color.a, border_weight),
+		mix(f_color.a,               v_border_color.a,                      border_weight)
+	);
 }
