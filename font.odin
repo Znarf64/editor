@@ -18,7 +18,22 @@ Font :: struct {
 	using ttf_font: ttf.Font,
 	glyphs:         map[rune]Glyph_Info,
 	scale:          f32,
+	properties:     Font_Properties,
+	kind:           Font_Kind,
 }
+
+Font_Kind :: enum {
+	Ui,
+	Code,
+	Math,
+}
+
+Font_Property :: enum {
+	Bold,
+	Italic,
+}
+
+Font_Properties :: bit_set[Font_Property]
 
 @(require_results)
 get_glyph_info :: proc(font: ^Font, r: rune) -> Glyph_Info {
@@ -50,28 +65,8 @@ get_glyph_info :: proc(font: ^Font, r: rune) -> Glyph_Info {
 }
 
 @(require_results)
-measure_multiline_text :: proc(font: ^Font, text: string) -> (w, h: f32) {
-	line_height := la.round(((f32(font.ascender) - f32(font.descender)) * font.scale))
-	max_w: f32
-	for r in text {
-		if r == '\n' {
-			h    += line_height
-			max_w = max(max_w, w)
-			w     = 0
-		} else {
-			w += get_glyph_info(font, r).x_advance
-		}
-	}
-
-	if w != 0 {
-		h += line_height
-	}
-
-	return max_w, h
-}
-
-@(require_results)
-measure_text :: proc(font: ^Font, text: $S/string) -> (w: f32) {
+measure_text :: proc(editor: ^Editor, kind: Font_Kind, text: $S/string, properties: Font_Properties = {}) -> (w: f32) {
+	font := find_font(editor, kind, properties)
 	text := string(text)
 
 	for r in text {
@@ -81,7 +76,32 @@ measure_text :: proc(font: ^Font, text: $S/string) -> (w: f32) {
 	return w
 }
 
-draw_text :: proc(font: ^Font, commands: ^[dynamic]Draw_Command, text: $S/string, color: [4]f32, position: [2]f32) -> (width: f32) {
+@(require_results)
+find_font :: proc(editor: ^Editor, kind: Font_Kind, properties: Font_Properties) -> ^Font {
+	best: ^Font
+	score := max(int)
+
+	for &font in editor.fonts {
+		if font.kind != kind {
+			continue
+		}
+
+		if font.properties == properties {
+			return &font
+		}
+
+		font_score := card(font.properties ~ properties)
+		if font_score < score {
+			best  = &font
+			score = font_score
+		}
+	}
+
+	return best
+}
+
+draw_text :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, kind: Font_Kind, text: $S/string, color: [4]f32, position: [2]f32, properties: Font_Properties = {}) -> (width: f32) {
+	font := find_font(editor, kind, properties)
 	text := string(text)
 
 	line_height := la.round(((f32(font.ascender) - f32(font.descender)) * font.scale))
@@ -109,13 +129,13 @@ draw_text :: proc(font: ^Font, commands: ^[dynamic]Draw_Command, text: $S/string
 }
 
 @(require_results)
-get_font_path_from_config :: proc(config: Font_Config) -> (path: string, ok: bool) {
+get_font_path_from_config :: proc(config: Font_Config, properties: Font_Properties) -> (path: string, index: int, ok: bool) {
 	if config == {} {
 		return
 	}
 
 	if config.path != "" {
-		return config.path, true
+		return config.path, config.index, true
 	}
 
 	conf := fc.InitLoadConfigAndFonts()
@@ -129,12 +149,12 @@ get_font_path_from_config :: proc(config: Font_Config) -> (path: string, ok: boo
 		_ = fc.PatternAddString(pattern, fc.FAMILY, strings.clone_to_cstring(config.family, context.temp_allocator))
 	}
 
-	if config.style != "" {
-		_ = fc.PatternAddString(pattern, fc.STYLE, strings.clone_to_cstring(config.style, context.temp_allocator))
+	if .Bold in properties {
+		_ = fc.PatternAddInteger(pattern, fc.WEIGHT, fc.WEIGHT_BOLD)
 	}
 
-	if weight, ok := config.weight.?; ok {
-		_ = fc.PatternAddInteger(pattern, fc.WEIGHT, i32(weight))
+	if .Italic in properties {
+		_ = fc.PatternAddInteger(pattern, fc.SLANT, fc.SLANT_ITALIC)
 	}
 
 	if pattern == nil {
@@ -149,7 +169,7 @@ get_font_path_from_config :: proc(config: Font_Config) -> (path: string, ok: boo
 	fs := fc.FontSetCreate()
 	defer fc.FontSetDestroy(fs)
 
-	os := fc.ObjectSetBuild(fc.FAMILY, fc.STYLE, fc.FILE, nil)
+	os := fc.ObjectSetBuild(fc.FAMILY, fc.STYLE, fc.FILE, fc.INDEX, nil)
 	defer fc.ObjectSetDestroy(os)
 
 	result: fc.Result
@@ -178,9 +198,15 @@ get_font_path_from_config :: proc(config: Font_Config) -> (path: string, ok: boo
 		defer fc.PatternDestroy(font)
 
 		v: fc.Value
-		_ = fc.PatternGet(font, fc.FILE, 0, &v)
+		file_result := fc.PatternGet(font, fc.FILE, 0, &v)
+		if file_result != .Match {
+			return
+		}
 
-		return strings.clone_from_cstring(cstring(v.u.f), context.temp_allocator), true
+		index: i32
+		index_result := fc.PatternGetInteger(font, fc.INDEX, 0, &index)
+
+		return strings.clone_from_cstring(cstring(v.u.f), context.temp_allocator), int(index_result == .Match ? index : -1), true
 	}
 
 	return
@@ -190,15 +216,31 @@ get_font_path_from_config :: proc(config: Font_Config) -> (path: string, ok: boo
 FALLBACK_FONT_DATA := #load("font.ttf")
 
 @(require_results)
-font_init :: proc(font: ^Font, config: Font_Config, allocator: runtime.Allocator) -> bool {
-	data := FALLBACK_FONT_DATA
-	if path, ok := get_font_path_from_config(config); ok {
-		data = os.read_entire_file(path, allocator) or_else FALLBACK_FONT_DATA
+font_init :: proc(fonts: ^[dynamic]Font, config: Font_Config, allocator: runtime.Allocator, kind: Font_Kind) -> bool {
+	@(require_results)
+	init :: proc(config: Font_Config, kind: Font_Kind, properties: Font_Properties, allocator: runtime.Allocator) -> (font: Font, ok: bool) {
+		data := FALLBACK_FONT_DATA
+		path:  string
+		index: int
+		if path, index, ok = get_font_path_from_config(config, properties); ok {
+			data = os.read_entire_file(path, allocator) or_else FALLBACK_FONT_DATA
+		}
+
+		font.ttf_font   = ttf.load(data, index) or_return
+		font.scale      = ttf.font_height_to_scale(font, config.size)
+		font.glyphs     = make(map[rune]Glyph_Info, allocator)
+		font.properties = properties
+		font.kind       = kind
+
+		ok = true
+		return
 	}
 
-	font.ttf_font = ttf.load(data) or_return
-	font.scale    = ttf.font_height_to_scale(font^, config.size)
-	font.glyphs   = make(map[rune]Glyph_Info, allocator)
+	append(fonts, init(config, kind, {                 }, allocator) or_return)
+	append(fonts, init(config, kind, {          .Bold, }, allocator) or_return)
+	append(fonts, init(config, kind, { .Italic,        }, allocator) or_return)
+	append(fonts, init(config, kind, { .Italic, .Bold, }, allocator) or_return)
+
 	return true
 }
 

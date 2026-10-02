@@ -1,3 +1,4 @@
+#+vet explicit-allocators
 package editor
 
 import runtime "base:runtime"
@@ -13,7 +14,6 @@ import strconv "core:strconv"
 import strings "core:strings"
 import time    "core:time"
 import unicode "core:unicode"
-import utf8    "core:unicode/utf8"
 import vmem    "core:mem/virtual"
 
 import cm      "vendor:commonmark"
@@ -28,7 +28,7 @@ Selection :: struct {
 	cursor:        Index,
 	anchor:        Index,
 	anim:          Animation(Rect),
-	target_cursor: Index, // The offset of the position that dicatates the visual target column, so effective the offset that resulted from the last horizontal movement
+	target_cursor: Index, // The offset of the position that dicatates the visual target column, so effectively the offset that resulted from the last horizontal movement
 }
 
 Mode :: enum {
@@ -37,13 +37,6 @@ Mode :: enum {
 	Visual,
 	Prompt,
 	Picker,
-}
-
-Prompt_Mode :: enum {
-	Command,
-	Search,
-	Keep,
-	Select,
 }
 
 New_Selection :: struct {
@@ -84,8 +77,8 @@ buffer_view_destroy :: proc(view: Buffer_View) {
 
 @(require_results)
 buffer_view_clone :: proc(view: Buffer_View) -> Buffer_View {
-	view := view
-	view.selections = slice.clone_to_dynamic(view.selections[:])
+	view           := view
+	view.selections = slice.clone_to_dynamic(view.selections[:], context.allocator)
 	return view
 }
 
@@ -118,172 +111,6 @@ editor_open_buffer :: proc(editor: ^Editor, buffer: ^Buffer) {
 	}
 }
 
-window_split :: proc(editor: ^Editor, vertical: bool) {
-	w := &editor.window_tree
-	p: ^Multi_Window
-	for {
-		switch &v in w {
-		case Multi_Window:
-			if v.vertical == vertical {
-				p = &v
-			} else {
-				p = nil
-			}
-			w = &v.children[v.focused]
-		case Buffer_View:
-			view := buffer_view_clone(v)
-			if p != nil {
-				p.focused += 1
-				inject_at(&p.children, p.focused, view)
-				editor.buffer = (^Buffer_View)(&p.children[p.focused])
-			} else {
-				m := Multi_Window {
-					children = make([dynamic]Window, 0, 2, context.allocator),
-					vertical = vertical,
-					focused  = 1,
-				}
-				append(&m.children, v)
-				append(&m.children, view)
-				w^ = m
-
-				editor.buffer = (^Buffer_View)(&m.children[m.focused])
-			}
-			return
-		case:
-			panic("Corrupted window tree")
-		}
-	}
-}
-
-window_focus :: proc(editor: ^Editor, vertical: bool, next: bool) -> (changed: bool) {
-	w := &editor.window_tree
-	p: ^Multi_Window
-	for {
-		switch &v in w {
-		case Multi_Window:
-			defer w = &v.children[v.focused]
-
-			if v.vertical != vertical {
-				break
-			}
-			if next {
-				if v.focused == len(v.children) - 1 {
-					break
-				}
-			} else {
-				if v.focused == 0 {
-					break
-				}
-			}
-			p = &v
-		case Buffer_View:
-			if p == nil {
-				return
-			}
-
-			if next {
-				p.focused += 1
-			} else {
-				p.focused -= 1
-			}
-
-			window_focus_update(editor)
-			return true
-		case:
-			panic("Corrupted window tree")
-		}
-	}
-
-	return false
-}
-
-window_move :: proc(editor: ^Editor, vertical: bool, next: bool) {
-	b := editor.buffer
-	if window_focus(editor, vertical, next) {
-		editor.buffer^, b^ = b^, editor.buffer^
-	}
-}
-
-window_transpose :: proc(editor: ^Editor) {
-	w := &editor.window_tree
-	p: ^Multi_Window
-	for {
-		switch &v in w {
-		case Multi_Window:
-			p = &v
-			w = &v.children[v.focused]
-		case Buffer_View:
-			if p != nil {
-				p.vertical ~= true
-				window_focus_update(editor)
-			}
-			return
-		case:
-			panic("Corrupted window tree")
-		}
-	}
-}
-
-window_focus_update :: proc(editor: ^Editor) {
-	w := &editor.window_tree
-	p: ^Multi_Window
-	for {
-		switch &v in w {
-		case Multi_Window:
-			if p != nil && p.vertical == v.vertical {
-				v := v
-				ordered_remove(&p.children, p.focused)
-				inject_at(&p.children, p.focused, ..v.children[:])
-				delete(v.children)
-				p.focused += v.focused
-				w          = &p.children[p.focused]
-				continue
-			}
-			p = &v
-			w = &v.children[v.focused]
-		case Buffer_View:
-			editor.buffer = &v
-			return
-		case:
-			panic("Corrupted window tree")
-		}
-	}
-}
-
-window_close :: proc(editor: ^Editor) {
-	w := &editor.window_tree
-	p: ^Window
-	for {
-		switch &v in w {
-		case Multi_Window:
-			p = w
-			w = &v.children[v.focused]
-		case Buffer_View:
-			if p == nil {
-				os.exit(0)
-			}
-			buffer_view_destroy(v)
-
-			m := &p.(Multi_Window)
-			ordered_remove(&m.children, m.focused)
-			if m.focused == len(m.children) {
-				m.focused -= 1
-			}
-
-			if len(m.children) == 1 {
-				arr := m.children
-				p^   = m.children[0]
-				delete(arr)
-			}
-
-			window_focus_update(editor)
-			return
-		case:
-			panic("Corrupted window tree")
-		}
-	}
-}
-
 file_open :: proc(editor: ^Editor, path: Normalized_Path) {
 	editor.mode = .Normal
 	for b in editor.buffers {
@@ -293,7 +120,7 @@ file_open :: proc(editor: ^Editor, path: Normalized_Path) {
 		}
 	}
 
-	buffer := new(Buffer)
+	buffer := new(Buffer, context.allocator)
 	editor_open_buffer(editor, buffer)
 	buffer_init(editor, buffer, path)
 }
@@ -346,13 +173,19 @@ buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path: Normalized
 		btree    = btree_build(string(data), context.allocator),
 		language = language,
 	}
-	err := vmem.arena_init_growing(&buffer.diagnostics_arena)
-	assert(err == nil, "OOM")
+	vmem.arena_init_growing(&buffer.diagnostics_arena) or_else panic("Failed to initialize arena")
 
 	if lsp := editor_get_lsp_server(editor, language); lsp != nil {
 		lsp_open_file(lsp, buffer.uri, data)
 	}
 	append(&editor.buffers, buffer)
+}
+
+buffer_destroy :: proc(buffer: ^Buffer) {
+	vmem.arena_destroy(&buffer.diagnostics_arena)
+	btree_destroy(buffer.btree)
+	delete(string(buffer.path), context.allocator)
+	delete(string(buffer.uri), context.allocator)
 }
 
 @(require_results)
@@ -390,13 +223,6 @@ editor_get_lsp_server :: proc(editor: ^Editor, language: Language) -> ^LSP_Serve
 	return lsp
 }
 
-buffer_destroy :: proc(buffer: ^Buffer) {
-	vmem.arena_destroy(&buffer.diagnostics_arena)
-	btree_destroy(buffer.btree)
-	delete(string(buffer.path))
-	delete(string(buffer.uri))
-}
-
 Leader_Entry :: struct {
 	bind, action: string,
 }
@@ -413,6 +239,15 @@ Leader :: struct {
 	rect:        Animation(Rect),
 	alpha:       Animation(f32),
 	arena:       vmem.Arena,
+}
+
+leader_init :: proc(leader: ^Leader) {
+	vmem.arena_init_growing(&leader.arena) or_else panic("Failed to initialize arena")
+}
+
+leader_destroy :: proc(leader: ^Leader) {
+	vmem.arena_destroy(&leader.arena)
+	strings.builder_destroy(&leader.sequence)
 }
 
 Multi_Window :: struct {
@@ -475,11 +310,12 @@ Editor :: struct {
 
 	config:              Config,
 
-	code_font:           Font,
-	ui_font:             Font,
+	fonts:               [dynamic]Font,
 
 	language_extensions: map[string]Language,
 	language_servers:    map[Language]^LSP_Server,
+
+	should_close:        bool,
 }
 
 Language :: distinct string
@@ -488,94 +324,13 @@ Range :: struct {
 	start, end: Index,
 }
 
-Jumplist_Entry :: struct {
-	using range: Range,
-	path:        Normalized_Path,
-	content:     string,
-}
-
-Jumplist :: struct {
-	entries: [dynamic]Jumplist_Entry,
-	cursor:  int,
-	arena:   vmem.Arena `fmt:"-"`,
-}
-
-jumplist_init :: proc(editor: ^Editor) {
-	vmem.arena_init_growing(&editor.jumplist.arena) or_else panic("Failed to initialize arena")
-}
-
-jumplist_add :: proc(editor: ^Editor, selection: Selection) {
-	// we should be using a linear allocator that we can reset to some point since entries will become irrelevant in a linear fashion
-	allocator := vmem.arena_allocator(&editor.jumplist.arena)
-
-	resize(&editor.jumplist.entries, editor.jumplist.cursor)
-	editor.jumplist.cursor += 1
-
-	start := min(selection.anchor, selection.cursor)
-	end   := max(selection.anchor, selection.cursor)
-
-	b := strings.builder_make(allocator)
-	btree_to_string(&editor.buffer.btree, &b, start, end + 1)
-
-	append(&editor.jumplist.entries, Jumplist_Entry {
-		path    = editor.buffer.path,
-		start   = start,
-		end     = end,
-		content = strings.to_string(b),
-	})
-}
-
-jumplist_forward :: proc(editor: ^Editor) {
-	if editor.jumplist.cursor >= len(editor.jumplist.entries) - 1 {
-		editor_set_status(editor, "End of jumplist")
-		return
-	}
-
-	editor.jumplist.cursor += 1
-	entry                  := editor.jumplist.entries[editor.jumplist.cursor]
-
-	editor_go_to(editor, entry.path, entry.start, entry.end)
-}
-
-jumplist_backward :: proc(editor: ^Editor) {
-	if editor.jumplist.cursor == 0 {
-		editor_set_status(editor, "End of jumplist")
-		return
-	}
-
-	editor.jumplist.cursor -= 1
-	entry                  := editor.jumplist.entries[editor.jumplist.cursor]
-
-	editor_go_to(editor, entry.path, entry.start, entry.end)
-}
-
-Prompt :: struct {
-	mode:           Prompt_Mode,
-	input:          Input_Line,
-	history:        [Prompt_Mode][dynamic]string,
-	history_cursor: int,
-	arena:          vmem.Arena,
-}
-
-window_tree_destroy :: proc(window_tree: Window) {
-	switch v in window_tree {
-	case Multi_Window:
-		for c in v.children {
-			window_tree_destroy(c)
-		}
-		delete(v.children)
-	case Buffer_View:
-		buffer_view_destroy(v)
-	}
-}
-
 main :: proc() {
-	context.logger = log.create_console_logger(.Debug when ODIN_DEBUG else .Error)
-	defer log.destroy_console_logger(context.logger)
+	context.logger = log.create_console_logger(.Debug when ODIN_DEBUG else .Error, allocator = context.allocator)
+	defer log.destroy_console_logger(context.logger, allocator = context.allocator)
 
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator
-		mem.tracking_allocator_init(&track, context.allocator)
+		mem.tracking_allocator_init(&track, context.allocator, context.allocator)
 		defer mem.tracking_allocator_destroy(&track)
 
 		context.allocator = mem.tracking_allocator(&track)
@@ -595,43 +350,39 @@ main :: proc() {
 		log.fatal("Failed to initialize backend")
 		os.exit(1)
 	}
-	editor.new_selections = make([dynamic]New_Selection)
+	defer editor.backend->destroy()
 
-	editor.prompt.history_cursor = -1
+	editor.new_selections = make([dynamic]New_Selection, context.allocator)
+	defer delete(editor.new_selections)
 
-	vmem.arena_init_growing(&editor.prompt.arena) or_else panic("Failed to initialize arena")
-	vmem.arena_init_growing(&editor.leader.arena) or_else panic("Failed to initialize arena")
+	prompt_init(&editor.prompt)
+	defer prompt_destroy(&editor.prompt)
 
-	jumplist_init(&editor)
+	leader_init(&editor.leader)
+	defer leader_destroy(&editor.leader)
+
+	jumplist_init(&editor.jumplist)
+	defer jumplist_destroy(&editor.jumplist)
+
+	picker_init(&editor.picker)
+	defer picker_destroy(&editor.picker)
 
 	defer {
-		editor.backend->destroy()
-		for h in editor.prompt.history {
-			delete(h)
-		}
 		for _, lsp in editor.language_servers {
 			lsp_destroy(lsp)
-			free(lsp)
+			free(lsp, context.allocator)
 		}
 		delete(editor.language_servers)
 		for b in editor.buffers {
 			buffer_destroy(b)
-			free(b)
+			free(b, context.allocator)
 		}
 		delete(editor.buffers)
-		vmem.arena_destroy(&editor.prompt.arena)
-		vmem.arena_destroy(&editor.leader.arena)
-		vmem.arena_destroy(&editor.jumplist.arena)
-		delete(editor.jumplist.entries)
-		delete(editor.new_selections)
-		strings.builder_destroy(&editor.leader.sequence)
-		input_line_destroy(editor.prompt.input)
 		strings.builder_destroy(&editor.status)
 		strings.builder_destroy(&editor.clipboard)
 		for &popup in editor.popups {
 			strings.builder_destroy(&popup.text)
 		}
-		picker_destroy(&editor.picker)
 		window_tree_destroy(editor.window_tree)
 	}
 
@@ -641,13 +392,17 @@ main :: proc() {
 	}
 	defer config_destroy(&editor.config)
 
-	font_init(&editor.code_font, editor.config.code_font, context.allocator) or_else panic("Failed to initialize code font")
-	defer font_destroy(editor.code_font)
+	font_init(&editor.fonts, editor.config.ui_font,   context.allocator, .Ui  ) or_else panic("Failed to initialize ui font")
+	font_init(&editor.fonts, editor.config.code_font, context.allocator, .Code) or_else panic("Failed to initialize code font")
+	font_init(&editor.fonts, editor.config.math_font, context.allocator, .Math) or_else panic("Failed to initialize math font")
+	defer {
+		for font in editor.fonts {
+			font_destroy(font)
+		}
+		delete(editor.fonts)
+	}
 
-	font_init(&editor.ui_font, editor.config.ui_font, context.allocator) or_else panic("Failed to initialize ui font")
-	defer font_destroy(editor.ui_font)
-
-	editor.language_extensions = make(map[string]Language)
+	editor.language_extensions = make(map[string]Language, context.allocator)
 	defer delete(editor.language_extensions)
 
 	for language, config in editor.config.languages {
@@ -659,7 +414,7 @@ main :: proc() {
 	if len(os.args) >= 2 {
 		file_open(&editor, normalize_path(os.args[1], context.temp_allocator))
 	} else {
-		buffer := new(Buffer)
+		buffer := new(Buffer, context.allocator)
 		buffer_init_with_data(&editor, buffer, "<scratch>", "\n")
 		editor_open_buffer(&editor, buffer)
 	}
@@ -675,7 +430,7 @@ main :: proc() {
 
 	screen_size: [2]f32
 
-	main_loop: for {
+	main_loop: for !editor.should_close {
 		frames_since_print += 1
 		if time.since(last_print_time) > time.Second {
 			editor.backend->set_title(fmt.tprintf("%v FPS", frames_since_print))
@@ -880,7 +635,7 @@ main :: proc() {
 				log.error("LSP Error:", language, lsp_err)
 				delete_key(&editor.language_servers, language)
 				lsp_destroy(lsp)
-				free(lsp)
+				free(lsp, context.allocator)
 			}
 		}
 
@@ -956,38 +711,6 @@ animation_set_target :: proc(anim: ^Animation($T), target: T) {
 	anim.t      = 0
 }
 
-window_render :: proc(editor: ^Editor, commands, popup_commands: ^[dynamic]Draw_Command, window: ^Window, delta_time: f32, rect: Rect) {
-	switch &w in window {
-	case Multi_Window:
-		gap         := 2 * editor.config.padding + 1
-		n           := len(w.children)
-		axis        := int(!w.vertical)
-		size        := rect_size(rect)
-		per_window  := (size[axis] - f32(n - 1) * gap) / f32(n)
-		origin      := rect.min
-		extent      := size
-		extent[axis] = per_window
-		for &w, i in w.children {
-			if i != 0 {
-				size         := extent
-				size[axis]    = 1
-				origin       := origin
-				origin[axis] -= editor.config.padding
-
-				draw_rect(commands,
-					offset = la.round(origin),
-					size   = size,
-					color  = editor.config.theme[.Gutter].fg,
-				)
-			}
-			window_render(editor, commands, popup_commands, &w, delta_time, { min = origin, max = origin + extent, })
-			origin[axis] += per_window + gap
-		}
-	case Buffer_View:
-		buffer_render(editor, &w, commands, popup_commands, delta_time, rect_round(rect))
-	}
-}
-
 status_bar_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time, padding: f32, rect: Rect) {
 	size := rect_size(rect)
 	draw_rect(commands,
@@ -1007,8 +730,8 @@ status_bar_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, del
 			x := rect.max.x - padding
 			if strings.builder_len(editor.leader.sequence) != 0 {
 				str := strings.to_string(editor.leader.sequence)
-				x   -= measure_text(&editor.ui_font, str)
-				draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
+				x   -= measure_text(editor, .Ui, str)
+				draw_text(editor, commands, .Ui, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 			}
 
 			if editor.repeat_count > 0 {
@@ -1016,8 +739,8 @@ status_bar_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, del
 				buf: [32]byte
 
 				str := strconv.write_int(buf[:], i64(editor.repeat_count), base = 10)
-				x   -= measure_text(&editor.ui_font, str)
-				draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
+				x   -= measure_text(editor, .Ui, str)
+				draw_text(editor, commands, .Ui, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 			}
 
 			if x != rect.max.x - padding {
@@ -1026,8 +749,8 @@ status_bar_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, del
 
 			{
 				center := rect_center(rect).x
-				w      := measure_text(&editor.ui_font, buffer.path)
-				draw_text(&editor.ui_font, commands, buffer.path, editor.config.theme[.Ui_Text].fg, { center - w / 2, rect.max.y - padding, })
+				w      := measure_text(editor, .Ui, buffer.path)
+				draw_text(editor, commands, .Ui, buffer.path, editor.config.theme[.Ui_Text].fg, { center - w / 2, rect.max.y - padding, })
 			}
 
 			{
@@ -1037,36 +760,36 @@ status_bar_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, del
 
 				if editor.buffer.language != "" {
 					str = string(editor.buffer.language)
-					x  -= measure_text(&editor.ui_font, str)
-					draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
+					x  -= measure_text(editor, .Ui, str)
+					draw_text(editor, commands, .Ui, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 					x  -= padding
 				}
 
 				str = strconv.write_int(buf[:], i64(primary_position.column + 1), base = 10)
-				x  -= measure_text(&editor.ui_font, str)
-				draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
+				x  -= measure_text(editor, .Ui, str)
+				draw_text(editor, commands, .Ui, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 
 				str = ":"
 
-				x -= measure_text(&editor.ui_font, str)
-				draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
+				x -= measure_text(editor, .Ui, str)
+				draw_text(editor, commands, .Ui, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 
 				str = strconv.write_int(buf[:], i64(primary_position.line + 1), base = 10)
-				x  -= measure_text(&editor.ui_font, str)
-				draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
+				x  -= measure_text(editor, .Ui, str)
+				draw_text(editor, commands, .Ui, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 
 				x -= padding
 
 				str = "sel"
 
-				x  -= measure_text(&editor.ui_font, str)
-				draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
+				x  -= measure_text(editor, .Ui, str)
+				draw_text(editor, commands, .Ui, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 
 				x -= padding
 
 				str = strconv.write_int(buf[:], i64(len(buffer.selections)), base = 10)
-				x  -= measure_text(&editor.ui_font, str)
-				draw_text(&editor.ui_font, commands, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
+				x  -= measure_text(editor, .Ui, str)
+				draw_text(editor, commands, .Ui, str, editor.config.theme[.Ui_Text].fg, { x, rect.max.y - padding, })
 			}
 		}
 	}
@@ -1088,7 +811,7 @@ status_bar_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, del
 		}
 
 		if mode_text != "" {
-			w     := measure_text(&editor.code_font, mode_text)
+			w     := measure_text(editor, .Code, mode_text)
 			style := editor.config.theme[mode_style]
 			if style.bg != 0 {
 				draw_rect(commands,
@@ -1098,8 +821,9 @@ status_bar_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, del
 				)
 			}
 			draw_text(
-				&editor.code_font,
+				editor,
 				commands,
+				.Code,
 				mode_text,
 				editor.config.theme[mode_style].fg,
 				{ x, rect.max.y - padding, },
@@ -1131,8 +855,9 @@ status_bar_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, del
 		}
 
 		x := x + draw_text(
-			&editor.ui_font,
+			editor,
 			commands,
+			.Ui,
 			mode_string,
 			editor.config.theme[.Ui_Text].fg,
 			{ x, rect.max.y - padding, },
@@ -1163,8 +888,9 @@ status_bar_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, del
 
 			if case_insensitive {
 				draw_text(
-					&editor.ui_font,
+					editor,
 					commands,
+					.Ui,
 					" (Aa)",
 					editor.config.theme[.Ui_Text].fg,
 					{ x + w, rect.max.y - padding, },
@@ -1173,8 +899,9 @@ status_bar_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, del
 		}
 	} else {
 		draw_text(
-			&editor.ui_font,
+			editor,
 			commands,
+			.Ui,
 			strings.to_string(editor.status),
 			editor.config.theme[.Ui_Text].fg,
 			{ x, rect.max.y - padding, },
@@ -1203,9 +930,10 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 
 	status_bar_render(editor, commands, delta_time, padding, status_bar_rect)
 
+	code_font := find_font(editor, .Code, {})
 	cell_size: [2]f32 = {
-		la.round(get_glyph_info(&editor.code_font, 0).x_advance),
-		la.round((f32(editor.code_font.ascender) - f32(editor.code_font.descender)) * editor.code_font.scale),
+		la.round(get_glyph_info(code_font, 0).x_advance),
+		la.round((f32(code_font.ascender) - f32(code_font.descender)) * code_font.scale),
 	}
 
 	leader_target_rect := Rect {
@@ -1241,7 +969,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 
 		text_color := editor.config.theme[.Ui_Text].fg * { 1, 1, 1, leader_alpha, }
 
-		draw_text(&editor.ui_font, commands, editor.leader.title, text_color, { x, y + editor.config.ui_font.size, })
+		draw_text(editor, commands, .Ui, editor.leader.title, text_color, { x, y + editor.config.ui_font.size, })
 		y += editor.config.ui_font.size + padding
 
 		draw_rect(commands,
@@ -1264,8 +992,8 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 					bind   = keybind_to_string(bind,  &editor.leader.arena),
 					action = action_to_string(action, &editor.leader.arena),
 				}
-				binds_width   = max(binds_width,   measure_text(&editor.ui_font, editor.leader.entries[i].bind  ))
-				actions_width = max(actions_width, measure_text(&editor.ui_font, editor.leader.entries[i].action))
+				binds_width   = max(binds_width,   measure_text(editor, .Ui, editor.leader.entries[i].bind  ))
+				actions_width = max(actions_width, measure_text(editor, .Ui, editor.leader.entries[i].action))
 
 				i += 1
 			}
@@ -1283,11 +1011,11 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		}
 
 		for entry in editor.leader.entries {
-			draw_text(&editor.ui_font, commands, entry.bind, text_color, { x, y + editor.config.ui_font.size, })
+			draw_text(editor, commands, .Ui, entry.bind, text_color, { x, y + editor.config.ui_font.size, })
 			x := x + editor.leader.binds_width + padding
-			x += draw_text(&editor.code_font, commands, "󰁔", text_color, { x, y + editor.config.ui_font.size, }) + padding
+			x += draw_text(editor, commands, .Code, "󰁔", text_color, { x, y + editor.config.ui_font.size, }) + padding
 
-			draw_text(&editor.ui_font, commands, entry.action, text_color, { x, y + editor.config.ui_font.size, })
+			draw_text(editor, commands, .Ui, entry.action, text_color, { x, y + editor.config.ui_font.size, })
 
 			y += editor.config.ui_font.size + padding
 		}
@@ -1302,7 +1030,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 
 @(require_results)
 next_column_after_tab :: proc(column, tab_width: int) -> int {
-    return column + tab_width - column % tab_width
+	return column + tab_width - column % tab_width
 }
 
 editor_set_status :: proc(editor: ^Editor, format: string, args: ..any) {
@@ -1365,7 +1093,7 @@ regex_search :: proc(editor: ^Editor, buffer: ^Buffer_View, pattern_string: stri
 	b          := strings.builder_make(context.temp_allocator)
 	btree_to_string(&buffer.btree, &b, start)
 
-	iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator)
+	iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator, temporary_allocator = context.temp_allocator)
 	capture: regex.Capture
 	capture, _, ok = regex.match(&iter)
 
@@ -1389,7 +1117,7 @@ regex_search :: proc(editor: ^Editor, buffer: ^Buffer_View, pattern_string: stri
 	strings.builder_grow(&b, int(start))
 	btree_to_string(&buffer.btree, &b, end = start)
 
-	capture = regex.match(pattern, strings.to_string(b), context.temp_allocator) or_return
+	capture = regex.match(pattern, strings.to_string(b), context.temp_allocator, temporary_allocator = context.temp_allocator) or_return
 
 	selection.anchor        = btree_offset_to_index(&buffer.btree, _Offset(capture.pos[0][0]))
 	selection.cursor        = btree_offset_to_index(&buffer.btree, _Offset(capture.pos[0][1])) - 1
@@ -1411,7 +1139,7 @@ regex_search_reverse :: proc(editor: ^Editor, buffer: ^Buffer_View, pattern_stri
 	b          := strings.builder_make(0, context.temp_allocator)
 	btree_to_string(&buffer.btree, &b, end = start, reverse = true)
 
-	iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator)
+	iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator, temporary_allocator = context.temp_allocator)
 	capture: regex.Capture
 	capture, _, ok = regex.match(&iter)
 
@@ -1431,7 +1159,7 @@ regex_search_reverse :: proc(editor: ^Editor, buffer: ^Buffer_View, pattern_stri
 	strings.builder_grow(&b, int(start))
 	btree_to_string(&buffer.btree, &b, start = start, reverse = true)
 
-	capture = regex.match(pattern, strings.to_string(b), context.temp_allocator) or_return
+	capture = regex.match(pattern, strings.to_string(b), context.temp_allocator, temporary_allocator = context.temp_allocator) or_return
 
 	selection.cursor        = btree_offset_to_index(&buffer.btree, buffer.btree.bytes - _Offset(capture.pos[0][0]))
 	selection.anchor        = btree_offset_to_index(&buffer.btree, buffer.btree.bytes - _Offset(capture.pos[0][1])) - 1
@@ -1454,7 +1182,7 @@ regex_create :: proc(editor: ^Editor, pattern_string: string, extra_flags: regex
 	}
 
 	err: regex.Error
-	pattern, err = regex.create(pattern_string, flags, permanent_allocator = context.temp_allocator)
+	pattern, err = regex.create(pattern_string, flags, permanent_allocator = context.temp_allocator, temporary_allocator = context.temp_allocator)
 	if err != nil {
 		editor_set_status(editor, "Failed to parse regex: %v", err)
 		return
@@ -1462,111 +1190,6 @@ regex_create :: proc(editor: ^Editor, pattern_string: string, extra_flags: regex
 
 	ok = true
 	return
-}
-
-prompt_apply :: proc(editor: ^Editor) {
-	history := &editor.prompt.history[editor.prompt.mode]
-	if len(editor.prompt.input.buffer) == 0 {
-		if len(history) != 0 {
-			append(&editor.prompt.input.buffer, history[len(history) - 1])
-		}
-	} else {
-		append(history, strings.clone(input_line_get_text(editor.prompt.input), vmem.arena_allocator(&editor.prompt.arena)))
-	}
-
-	input := input_line_get_text(editor.prompt.input)
-
-	switch editor.prompt.mode {
-	case .Select:
-		pattern := regex_create(editor, input) or_break
-
-		b := strings.builder_make(context.temp_allocator)
-		for selection, i in editor.buffer.selections {
-			start := min(selection.cursor, selection.anchor)
-			end   := max(selection.cursor, selection.anchor) + 1
-
-			strings.builder_grow(&b, int(end - start))
-			btree_to_string(&editor.buffer.btree, &b, start, end)
-
-			regex_iter := regex.create_iterator(strings.to_string(b), pattern, permanent_allocator = context.temp_allocator)
-			for capture, capture_i in regex.match(&regex_iter) {
-				start_offset := btree_index_to_offset(&editor.buffer.btree, start)
-				append(&editor.new_selections, New_Selection {
-					anchor  = btree_offset_to_index(&editor.buffer.btree, _Offset(capture.pos[0][0]) + start_offset),
-					cursor  = btree_offset_to_index(&editor.buffer.btree, _Offset(capture.pos[0][1]) + start_offset) - 1,
-					primary = i == editor.buffer.primary && capture_i == 0,
-				})
-			}
-			strings.builder_reset(&b)
-		}
-
-		if len(editor.new_selections) != 0 {
-			clear(&editor.buffer.selections)
-			reserve(&editor.buffer.selections, len(editor.new_selections))
-
-			for selection in editor.new_selections {
-				if selection.primary {
-					editor.buffer.primary = len(editor.buffer.selections)
-				}
-				selection              := selection
-				selection.target_cursor = selection.cursor
-				append(&editor.buffer.selections, selection)
-			}
-			clear(&editor.new_selections)
-			deduplicate_selections(editor.buffer)
-		}
-	case .Keep:
-		pattern := regex_create(editor, input) or_break
-
-		b := strings.builder_make(context.temp_allocator)
-
-		for i := len(editor.buffer.selections) - 1; i >= 0; i -= 1 {
-			selection := editor.buffer.selections[i]
-
-			start := min(selection.cursor, selection.anchor)
-			end   := max(selection.cursor, selection.anchor) + 1
-
-			strings.builder_grow(&b, int(end - start))
-			btree_to_string(&editor.buffer.btree, &b, start, end)
-
-			_, ok := regex.match(pattern, strings.to_string(b), context.temp_allocator)
-			if ok {
-				append(&editor.new_selections, New_Selection {
-					anchor  = selection.anchor,
-					cursor  = selection.cursor,
-					primary = i == editor.buffer.primary,
-				})
-			}
-			strings.builder_reset(&b)
-		}
-
-		if len(editor.new_selections) != 0 {
-			editor.buffer.primary = 0
-			clear(&editor.buffer.selections)
-			reserve(&editor.buffer.selections, len(editor.new_selections))
-
-			for selection in editor.new_selections {
-				if selection.primary {
-					editor.buffer.primary = len(editor.buffer.selections)
-				}
-				selection              := selection
-				selection.target_cursor = selection.cursor
-				append(&editor.buffer.selections, selection)
-			}
-			clear(&editor.new_selections)
-			deduplicate_selections(editor.buffer)
-		}
-	case .Search:
-		regex_search(editor, editor.buffer, input)
-	case .Command:
-		command, ok := parse_command(input_line_get_text(editor.prompt.input), context.temp_allocator)
-		if !ok {
-			editor_set_status(editor, "Failed to parse command")
-			break
-		}
-		command_execute(editor, command)
-	}
-	input_line_reset(&editor.prompt.input)
 }
 
 @(require_results)
@@ -1592,27 +1215,30 @@ selection_contains :: proc(selection: Selection, index: Index) -> bool {
 }
 
 code_block_render :: proc(
-	editor:    ^Editor,
-	commands:  ^[dynamic]Draw_Command,
-	position:  [2]f32,
-	content:   string,
-	language:  Language,
-	highlight: Range,
+	editor:          ^Editor,
+	font_properties: Font_Properties,
+	commands:        ^[dynamic]Draw_Command,
+	position:        [2]f32,
+	content:         string,
+	language:        Language,
+	highlight:       Range,
 ) -> (size: [2]f32) {
 	if content == "" {
 		return
 	}
 
+	font := find_font(editor, .Code, font_properties)
+
 	highlighter := highlighter_create(content, editor.config.languages[language], context.temp_allocator)
 
 	cell_size: [2]f32 = {
-		la.round(get_glyph_info(&editor.code_font, 0).x_advance),
-		la.round((f32(editor.code_font.ascender) - f32(editor.code_font.descender)) * editor.code_font.scale),
+		la.round(get_glyph_info(font, 0).x_advance),
+		la.round((f32(font.ascender) - f32(font.descender)) * font.scale),
 	}
 	line_height := cell_size.y
 
 	width: f32
-	y := la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
+	y := la.round(f32(font.ascender) * font.scale)
 
 	column: int
 	render_code: for {
@@ -1647,7 +1273,7 @@ code_block_render :: proc(
 			if highlight.start <= index && index < highlight.end {
 				draw_rect(
 					commands,
-					offset = { cell_size.x * f32(column), y - la.round(f32(editor.code_font.ascender) * editor.code_font.scale), } + position,
+					offset = { cell_size.x * f32(column), y - la.round(f32(font.ascender) * font.scale), } + position,
 					size   = cell_size,
 					color  = editor.config.theme[.Selection].bg,
 				)
@@ -1663,12 +1289,12 @@ code_block_render :: proc(
 				position = { cell_size.x * f32(column), y, } + position,
 				char     = r,
 				color    = editor.config.theme[style].fg,
-				font     = &editor.code_font,
+				font     = font,
 			})
 		}
 
 		if editor.config.theme[style].bg != 0 {
-			offset := [2]f32 { f32(start_column) * cell_size.x, y - la.round(f32(editor.code_font.ascender) * editor.code_font.scale), } + position
+			offset := [2]f32 { f32(start_column) * cell_size.x, y - la.round(f32(font.ascender) * font.scale), } + position
 			size   := [2]f32 { f32(column - start_column) * cell_size.x, cell_size.y, }
 
 			commands[rect_index] = Draw_Command_Rect {
@@ -1685,7 +1311,7 @@ code_block_render :: proc(
 	}
 
 	width = max(width, cell_size.x * f32(column))
-	y    -= la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
+	y    -= la.round(f32(font.ascender) * font.scale)
 
 	return { width, y, }
 }
@@ -1698,20 +1324,24 @@ markdown_render :: proc(
 	highlight:       Range,
 	container_width: f32,
 ) -> (size: [2]f32) {
+	code_font := find_font(editor, .Code, {})
+
 	cell_size: [2]f32 = {
-		la.round(get_glyph_info(&editor.code_font, 0).x_advance),
-		la.round((f32(editor.code_font.ascender) - f32(editor.code_font.descender)) * editor.code_font.scale),
+		la.round(get_glyph_info(code_font, 0).x_advance),
+		la.round((f32(code_font.ascender) - f32(code_font.descender)) * code_font.scale),
 	}
 	line_height := cell_size.y
 
 	width, x, y, indentation: f32
 
-	position := position + { 0, la.round(f32(editor.code_font.ascender) * editor.code_font.scale), }
+	position := position + { 0, la.round(f32(code_font.ascender) * code_font.scale), }
 
 	root := cm.parse_document(raw_data(content), len(content), cm.DEFAULT_OPTIONS)
 	defer cm.node_free(root)
 	iter := cm.iter_new(root)
 	defer cm.iter_free(iter)
+
+	emph, strong: int
 
 	for {
 		ev_type := cm.iter_next(iter)
@@ -1722,11 +1352,19 @@ markdown_render :: proc(
 
 		text := string(cur.data[:cur.len])
 
+		font_properties: Font_Properties
+		if emph > 0 {
+			font_properties |= { .Italic, }
+		}
+		if strong > 0 {
+			font_properties |= { .Bold, }
+		}
+
 		switch cur.type {
 		case .None:
 		case .Document:
 		case .Block_Quote:
-			x += draw_text(&editor.ui_font, commands, "Block_Quote", editor.config.theme[.Operator].fg, { x, y, } + position)
+			x += draw_text(editor, commands, .Ui, "Block_Quote", editor.config.theme[.Operator].fg, { x, y, } + position, font_properties)
 
 			width = max(width, x)
 			y    += line_height
@@ -1751,7 +1389,9 @@ markdown_render :: proc(
 			rect_index := len(commands)
 			append(commands, nil)
 
-			y -= la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
+			code_font := find_font(editor, .Code, font_properties)
+
+			y -= la.round(f32(code_font.ascender) * code_font.scale)
 
 			language := Language(cur.as.code.info)
 			if language == "" {
@@ -1759,7 +1399,7 @@ markdown_render :: proc(
 			}
 
 			pad: f32 = 4
-			code_block_size := code_block_render(editor, commands, position + { x, y, } + pad, strings.trim_right(text, "\n"), language, highlight)
+			code_block_size := code_block_render(editor, font_properties, commands, position + { x, y, } + pad, strings.trim_right(text, "\n"), language, highlight)
 
 			commands[rect_index] = Draw_Command_Rect {
 				rect          = {
@@ -1773,16 +1413,16 @@ markdown_render :: proc(
 			}
 
 			width = max(width, code_block_size.x + pad * 2)
-			y    += code_block_size.y + la.round(f32(editor.code_font.ascender) * editor.code_font.scale) + pad * 2
+			y    += code_block_size.y + la.round(f32(code_font.ascender) * code_font.scale) + pad * 2
 			x     = indentation
 		case .HTML_Block:
-			x += draw_text(&editor.ui_font, commands, "HTML_Block",     editor.config.theme[.Operator].fg, { x, y, } + position)
+			x += draw_text(editor, commands, .Ui, "HTML_Block",     editor.config.theme[.Operator].fg, { x, y, } + position, font_properties)
 
 			width = max(width, x)
 			y    += line_height
 			x     = indentation
 		case .Custom_Block:
-			x += draw_text(&editor.ui_font, commands, "Custom_Block",   editor.config.theme[.Operator].fg, { x, y, } + position)
+			x += draw_text(editor, commands, .Ui, "Custom_Block",   editor.config.theme[.Operator].fg, { x, y, } + position, font_properties)
 
 			width = max(width, x)
 			y    += line_height
@@ -1814,15 +1454,17 @@ markdown_render :: proc(
 			y    += line_height
 			x     = indentation
 		case .Text:
-			x += draw_text(&editor.ui_font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + position)
+			x += draw_text(editor, commands, .Ui, text, editor.config.theme[.Ui_Text].fg, { x, y, } + position, font_properties)
 		case .Code:
 			rect_index := len(commands)
 			append(commands, nil)
 
-			y -= la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
+			code_font := find_font(editor, .Code, font_properties)
+
+			y -= la.round(f32(code_font.ascender) * code_font.scale)
 
 			pad: [2]f32 = { 3, 0, }
-			code_block_size := code_block_render(editor, commands, position + { x, y, } + pad, strings.trim_right(text, "\n"), Language(cur.as.code.info), highlight)
+			code_block_size := code_block_render(editor, font_properties, commands, position + { x, y, } + pad, strings.trim_right(text, "\n"), Language(cur.as.code.info), highlight)
 
 			commands[rect_index] = Draw_Command_Rect {
 				rect          = {
@@ -1835,20 +1477,20 @@ markdown_render :: proc(
 				border_width  = 1,
 			}
 
-			y += la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
+			y += la.round(f32(code_font.ascender) * code_font.scale)
 			x += code_block_size.x + pad.x * 2
 		case .HTML_Inline:
-			x += draw_text(&editor.ui_font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + position)
+			x += draw_text(editor, commands, .Ui, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + position, font_properties)
 		case .Custom_Inline:
-			x += draw_text(&editor.ui_font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + position)
+			x += draw_text(editor, commands, .Ui, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + position, font_properties)
 		case .Emph:
-			x += draw_text(&editor.ui_font, commands, text, editor.config.theme[.Keyword].fg,  { x, y, } + position)
+			emph   += int(ev_type == .Enter) * 2 - 1
 		case .Strong:
-			x += draw_text(&editor.ui_font, commands, text, editor.config.theme[.Operator].fg, { x, y, } + position)
+			strong += int(ev_type == .Enter) * 2 - 1
 		case .Link:
-			x += draw_text(&editor.ui_font, commands, text, editor.config.theme[.String].fg,   { x, y, } + position)
+			x += draw_text(editor, commands, .Ui, text, editor.config.theme[.String].fg,   { x, y, } + position, font_properties)
 		case .Image:
-			x += draw_text(&editor.ui_font, commands, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + position)
+			x += draw_text(editor, commands, .Ui, text, editor.config.theme[.Ui_Text].fg,  { x, y, } + position, font_properties)
 		}
 	}
 
@@ -1863,9 +1505,10 @@ popup_render :: proc(
 	position:   [2]f32,
 	location:   Popup_Location,
 ) {
+	code_font := find_font(editor, .Code, {})
 	cell_size: [2]f32 = {
-		la.round(get_glyph_info(&editor.code_font, 0).x_advance),
-		la.round((f32(editor.code_font.ascender) - f32(editor.code_font.descender)) * editor.code_font.scale),
+		la.round(get_glyph_info(code_font, 0).x_advance),
+		la.round((f32(code_font.ascender) - f32(code_font.descender)) * code_font.scale),
 	}
 
 	popup_rect     := animation_update(&popup.rect, delta_time, editor.config.popup_animation_speed)
@@ -1893,7 +1536,7 @@ popup_render :: proc(
 	case .Markdown:
 		size = markdown_render(editor, commands, text_base, text, popup.highlight, popup_rect.max.x - popup_rect.min.x)
 	case .Code:
-		size = code_block_render(editor, commands, text_base, text, editor.buffer.language, popup.highlight)
+		size = code_block_render(editor, {}, commands, text_base, text, editor.buffer.language, popup.highlight)
 	case .Text:
 	}
 
@@ -1941,9 +1584,10 @@ buffer_render :: proc(
 
 	height := rect.max.y - rect.min.y
 
+	code_font := find_font(editor, .Code, {})
 	cell_size: [2]f32 = {
-		la.round(get_glyph_info(&editor.code_font, 0).x_advance),
-		la.round((f32(editor.code_font.ascender) - f32(editor.code_font.descender)) * editor.code_font.scale),
+		la.round(get_glyph_info(code_font, 0).x_advance),
+		la.round((f32(code_font.ascender) - f32(code_font.descender)) * code_font.scale),
 	}
 
 	line_digits  := int(la.ceil(la.log10(1 + f32(buffer.btree.lines))))
@@ -2043,12 +1687,12 @@ buffer_render :: proc(
 
 		start_column := position.column
 
-		for char, sub_offset in text {
+		for char in text {
 			defer index   += 1
 			defer position = position_after(position, char, editor.config.tab_width)
 
 			draw_gutter: if position.column == 0 {
-				y := cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
+				y := cell_size.y * (f32(position.line) - scroll) + la.round(f32(code_font.ascender) * code_font.scale)
 
 				if y < 0 {
 					break draw_gutter
@@ -2066,8 +1710,8 @@ buffer_render :: proc(
 				@(static)
 				line_number_buf: [32]byte
 				str := strconv.write_int(line_number_buf[:], i64(line + 1), base = 10)
-				w   := measure_text(&editor.code_font, str)
-				draw_text(&editor.code_font, commands, str, text_color, { lines_width - w, y, } + rect.min)
+				w   := measure_text(editor, .Code, str)
+				draw_text(editor, commands, .Code, str, text_color, { lines_width - w, y, } + rect.min)
 
 				draw_rect(commands,
 					offset = {
@@ -2137,7 +1781,7 @@ buffer_render :: proc(
 				draw_rect(commands,
 					offset = {
 						f32(position.column) * cell_size.x + gutter_width,
-						cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.code_font.ascender - editor.code_font.descender) * editor.code_font.scale) - 1,
+						cell_size.y * (f32(position.line) - scroll) + la.round(f32(code_font.ascender - code_font.descender) * code_font.scale) - 1,
 					} + rect.min,
 					size   = { cell_size.x * f32(max(1, next_column - position.column)), 1, },
 					color  = editor.config.theme[.Cursor].bg,
@@ -2147,8 +1791,8 @@ buffer_render :: proc(
 			if char == '\n' {
 				if diagnostic, ok := line_diagnostic.?; ok {
 					x := f32(position.column + 2) * cell_size.x + gutter_width
-					y := cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
-					x += draw_text(&editor.code_font, &text_commands, diagnostic.message, editor.config.theme[.Error].fg, { x, y, } + rect.min)
+					y := cell_size.y * (f32(position.line) - scroll) + la.round(f32(code_font.ascender) * code_font.scale)
+					x += draw_text(editor, &text_commands, .Code, diagnostic.message, editor.config.theme[.Error].fg, { x, y, } + rect.min)
 				}
 				line_diagnostic = nil
 				continue
@@ -2159,13 +1803,13 @@ buffer_render :: proc(
 			}
 
 			x := f32(position.column) * cell_size.x + gutter_width
-			y := cell_size.y * (f32(position.line) - scroll) + la.round(f32(editor.code_font.ascender) * editor.code_font.scale)
+			y := cell_size.y * (f32(position.line) - scroll) + la.round(f32(code_font.ascender) * code_font.scale)
 
 			append(&text_commands, Draw_Command_Char {
 				position = { x, y, } + rect.min,
 				color    = editor.config.theme[style].fg,
 				char     = char,
-				font     = &editor.code_font,
+				font     = code_font,
 			})
 
 			// TODO: line wrapping
@@ -2256,7 +1900,7 @@ buffer_render :: proc(
 			)
 		}
 	} else {
-		w := measure_text(&editor.code_font, buffer.path)
+		w := measure_text(editor, .Ui, buffer.path)
 		draw_rect(
 			commands,
 			rect.max - { w, editor.config.code_font.size, } - editor.config.padding * 2,
@@ -2268,199 +1912,12 @@ buffer_render :: proc(
 			blur_radius   = f32(editor.config.blur_strength),
 		)
 		draw_text(
-			&editor.code_font,
+			editor,
 			commands,
+			.Ui,
 			buffer.path,
 			editor.config.theme[.Ui_Text].fg,
 			rect.max - { w, 0, } - editor.config.padding,
 		)
 	}
-}
-
-Input_Line :: struct {
-	buffer:      [dynamic]u8,
-	default:     string,
-	cursor:      int,
-	cursor_anim: Animation(f32),
-}
-
-Input_Line_Result :: enum {
-	None = 0,
-	Submit,
-	Exit,
-	Change,
-
-	Next,
-	Prev,
-}
-
-input_line_set_text :: proc(input: ^Input_Line, text: string) {
-	clear(&input.buffer)
-	append(&input.buffer, text)
-	input.cursor = len(input.buffer)
-}
-
-@(require_results)
-input_line_handle_event :: proc(input: ^Input_Line, event: Event) -> Input_Line_Result {
-	@(require_results)
-	is_word :: proc(r: rune) -> bool {
-		return r == '_' || unicode.is_letter(r) || unicode.is_number(r)
-	}
-
-	#partial switch e in event {
-	case Event_Input_Key:
-		if e.action == .Up {
-			return .None
-		}
-		#partial switch e.key {
-		case .Escape:
-			clear(&input.buffer)
-			input.cursor = 0
-			return .Exit
-		case .Enter:
-			return .Submit
-		case .Backspace:
-			end := input.cursor
-
-			r, w := utf8.decode_last_rune(input.buffer[:input.cursor])
-			(w != 0) or_break
-			input.cursor -= w
-
-			if e.modifiers & { .Control, .Alt, } != {} {
-				for !is_word(r) {
-					r, w = utf8.decode_last_rune(input.buffer[:input.cursor])
-					(w != 0) or_break
-					input.cursor -= w
-				}
-				for {
-					r, w = utf8.decode_last_rune(input.buffer[:input.cursor])
-					(w != 0) or_break
-					if is_word(r) {
-						input.cursor -= w
-					} else {
-						break
-					}
-				}
-			}
-
-			remove_range(&input.buffer, input.cursor, end)
-
-			return .Change
-		case .Tab:
-			if .Shift in e.modifiers {
-				return .Prev
-			} else {
-				return .Next
-			}
-		case .Down:
-			return .Next
-		case .Up:
-			return .Prev
-		case .Left:
-			r, w := utf8.decode_last_rune(input.buffer[:input.cursor])
-			(w != 0) or_break
-			input.cursor -= w
-
-			if e.modifiers & { .Control, .Alt, } != {} {
-				for !is_word(r) {
-					r, w = utf8.decode_last_rune(input.buffer[:input.cursor])
-					(w != 0) or_break
-					input.cursor -= w
-				}
-				for {
-					r, w = utf8.decode_last_rune(input.buffer[:input.cursor])
-					(w != 0) or_break
-					if is_word(r) {
-						input.cursor -= w
-					} else {
-						break
-					}
-				}
-			}
-		case .Right:
-			r, w := utf8.decode_rune(input.buffer[input.cursor:])
-			(w != 0) or_break
-			input.cursor += w
-
-			if e.modifiers & { .Control, .Alt, } != {} {
-				for !is_word(r) {
-					r, w = utf8.decode_rune(input.buffer[input.cursor:])
-					(w != 0) or_break
-					input.cursor += w
-				}
-				for {
-					r, w = utf8.decode_rune(input.buffer[input.cursor:])
-					(w != 0) or_break
-					if is_word(r) {
-						input.cursor += w
-					} else {
-						break
-					}
-				}
-			}
-		}
-		return .None
-	case Event_Input_Codepoint:
-		buf, n := utf8.encode_rune(e.codepoint)
-		inject_at(&input.buffer, input.cursor, ..buf[:n])
-		input.cursor += n
-		return .Change
-	case Event_Input_Mouse_Button:
-		// TODO?
-		return .None
-	case:
-		return .None
-	}
-}
-
-input_line_destroy :: proc(input: Input_Line) {
-	delete(input.buffer)
-}
-
-input_line_reset :: proc(input: ^Input_Line) {
-	clear(&input.buffer)
-	input.cursor = 0
-}
-
-@(require_results)
-input_line_get_text :: proc(input: Input_Line) -> string {
-	return string(input.buffer[:])
-}
-
-input_line_render :: proc(
-	editor:     ^Editor,
-	commands:   ^[dynamic]Draw_Command,
-	input:      ^Input_Line,
-	position:   [2]f32,
-	delta_time: f32,
-	default := "",
-) -> (width: f32) {
-	text := input_line_get_text(input^)
-	if text == "" {
-		text = default
-	}
-	width = draw_text(
-		&editor.ui_font,
-		commands,
-		text[:input.cursor],
-		editor.config.theme[.Ui_Text].fg,
-		position,
-	)
-	animation_set_target(&input.cursor_anim, width)
-	anim   := animation_update(&input.cursor_anim, delta_time, editor.config.cursor_animation_speed)
-	height := (f32(editor.ui_font.ascender) - f32(editor.ui_font.descender)) * editor.ui_font.scale
-	draw_rect(commands,
-		offset = position + { anim, -(height + f32(editor.ui_font.descender) * editor.ui_font.scale), },
-		size   = { 1, height, },
-		color  = editor.config.theme[.Ui_Text].fg,
-	)
-	width += draw_text(
-		&editor.ui_font,
-		commands,
-		text[input.cursor:],
-		editor.config.theme[.Ui_Text].fg,
-		position + { width, 0, },
-	)
-
-	return
 }

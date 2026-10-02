@@ -61,7 +61,7 @@ send_notification :: proc(lsp: ^LSP_Server, name: string, params: $Params) -> (e
 
 @(require_results)
 lsp_init :: proc(lsp: ^LSP_Server, command: []string) -> (err: LSP_Error) {
-	vmem.arena_init_growing(&lsp.arena) or_else panic("Failed to create arena")
+	vmem.arena_init_growing(&lsp.arena) or_else panic("Failed to initialize arena")
 
 	desc: os.Process_Desc = {
 		command = command,

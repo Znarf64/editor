@@ -199,8 +199,7 @@ initialize_motion_names :: proc "contextless" () {
 	context = runtime.default_context()
 
 	arena: vmem.Arena
-	err := vmem.arena_init_growing(&arena)
-	assert(err == nil)
+	vmem.arena_init_growing(&arena) or_else panic("Failed to initialize arena")
 
 	allocator := vmem.arena_allocator(&arena)
 
@@ -352,7 +351,7 @@ buffer_insert_rune :: proc(editor: ^Editor, buffer: ^Buffer_View, index: Index, 
 
 buffer_insert_string :: proc(editor: ^Editor, buffer: ^Buffer_View, index: Index, s: string) -> Index {
 	_buffer_insert :: proc(buffer: ^Buffer_View, arg: string, index: Index) -> Index {
-		runes, bytes := btree_insert(&buffer.btree, index, arg)
+		runes, _ := btree_insert(&buffer.btree, index, arg)
 		for &selection in buffer.selections {
 			if selection.cursor >= index {
 				selection.cursor += runes
@@ -1255,7 +1254,7 @@ selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection:
 		for _ in 0 ..< editor.repeat_count {
 			for _, p in btree_iter(&iter, &p, editor.config.tab_width) {
 				if p.column == position.column {
-					append(&editor.new_selections, New_Selection { cursor = iter.index, anchor = iter.index, primary = primary, })
+					append(&editor.new_selections, { cursor = iter.index, anchor = iter.index, primary = primary, })
 					break
 				}
 			}
@@ -1292,7 +1291,7 @@ selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection:
 						break
 					}
 					if r == '\n' {
-						append(&editor.new_selections, New_Selection {
+						append(&editor.new_selections, {
 							anchor = start,
 							cursor = iter.index,
 						})
@@ -1300,7 +1299,7 @@ selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection:
 					}
 				}
 
-				append(&editor.new_selections, New_Selection {
+				append(&editor.new_selections, {
 					anchor = start,
 					cursor = iter.index,
 				})

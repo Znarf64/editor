@@ -8,13 +8,19 @@ import unicode "core:unicode"
 import utf8    "core:unicode/utf8"
 import vmem    "core:mem/virtual"
 
+import sync    "core:sync"
+import thread  "core:thread"
+
+import regex   "vendor/regex"
+
 Picker_Symbol :: struct {
 	location: Location,
 }
 
 Picker_File :: struct {
-	path: Normalized_Path,
-	type: os.File_Type,
+	path:    Normalized_Path,
+	type:    os.File_Type,
+	content: string,
 }
 
 Picker :: struct {
@@ -24,12 +30,14 @@ Picker :: struct {
 	active:       int,
 	matching:     int,
 	arena:        vmem.Arena,
+	search_arena: vmem.Arena,
 
 	active_anim:  Animation(f32),
 
 	files:        []Picker_File,
 	symbols:      []Picker_Symbol,
 	diagnostics:  []Diagnostic,
+	searches:     [dynamic][2]int,
 
 	rect:         Animation(Rect),
 	preview_rect: Animation(Rect),
@@ -52,10 +60,16 @@ Picker_Item :: struct {
 	id:    int,
 }
 
+picker_init :: proc(picker: ^Picker) {
+	vmem.arena_init_growing(&picker.arena)        or_else panic("Failed to initialize arena")
+	vmem.arena_init_growing(&picker.search_arena) or_else panic("Failed to initialize arena")
+}
+
 picker_destroy :: proc(picker: ^Picker) {
 	input_line_destroy(picker.input)
 	delete(picker.items)
 	vmem.arena_destroy(&picker.arena)
+	vmem.arena_destroy(&picker.search_arena)
 }
 
 picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused_locations: []Fused_Location = {}) {
@@ -67,6 +81,59 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 
 	switch mode {
 	case .Global_Search:
+		path, err := os.get_working_directory(context.temp_allocator)
+		if err != nil {
+			editor_set_status(editor, "Failed to get current working directory: %v", err)
+			break
+		}
+
+		w := os.walker_create(path)
+		defer os.walker_destroy(&w)
+
+		files := make([dynamic]Picker_File, allocator)
+		clear(&editor.picker.items)
+		walk_loop: for info in os.walker_walk(&w) {
+			_ = os.walker_error(&w) or_break
+
+			if info.type == .Directory {
+				if strings.has_suffix(info.fullpath, ".git") {
+					os.walker_skip_dir(&w)
+				}
+				continue
+			}
+
+			name := strings.trim_prefix(info.fullpath, path)
+			name  = strings.trim_prefix(name, "/")
+			name  = strings.clone(name, allocator)
+
+			file := os.open(name) or_continue
+			@(thread_local)
+			buf: [1 << 12]u8
+			n := os.read(file, buf[:]) or_continue
+
+			b := buf[:n]
+			for len(b) >= 4 {
+				r, n := utf8.decode_rune(b)
+				if r == utf8.RUNE_ERROR {
+					continue walk_loop
+				}
+				b = b[n:]
+			}
+
+			content := os.read_entire_file(name, allocator) or_continue
+
+			append(&editor.picker.items, {
+				name = name,
+				id   = len(files),
+			})
+
+			append(&files, {
+				path    = normalize_path(info.fullpath, allocator),
+				type    = info.type,
+				content = string(content),
+			})
+		}
+		editor.picker.files = files[:]
 	case .Files:
 		path := path
 		err: os.Error
@@ -121,12 +188,12 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 			name  = strings.trim_prefix(name, "/")
 			name  = strings.clone(name, allocator)
 
-			append(&editor.picker.items, Picker_Item {
+			append(&editor.picker.items, {
 				name = name,
 				id   = len(files),
 			})
 
-			append(&files, Picker_File {
+			append(&files, {
 				path = normalize_path(info.fullpath, allocator),
 				type = info.type,
 			})
@@ -251,19 +318,48 @@ picker_focus_prev :: proc(editor: ^Editor, n := 1) {
 }
 
 picker_update :: proc(editor: ^Editor) {
-	pattern := input_line_get_text(editor.picker.input)
+	picker  := &editor.picker
+	pattern := input_line_get_text(picker.input)
 
-	editor.picker.active = 0
+	picker.active   = 0
+	picker.matching = 0
 
-	editor.picker.matching = 0
-	for &item in editor.picker.items {
+	if picker.mode == .Global_Search {
+		clear(&picker.items)
+		clear(&picker.searches)
+		vmem.arena_free_all(&picker.search_arena)
+		if pattern == "" {
+			return
+		}
+		allocator   := vmem.arena_allocator(&picker.search_arena)
+		pattern, ok := regex_create(editor, pattern)
+		if !ok {
+			return
+		}
+		
+		for file, i in picker.files {
+			regex_iter := regex.create_iterator(file.content, pattern, permanent_allocator = context.temp_allocator)
+			for capture in regex.match(&regex_iter) {
+				line := strings.count(file.content[:capture.pos[0][0]], "\n") + 1
+				append(&picker.items, {
+					name = fmt.aprintf("%s:%d", file.path, line, allocator = allocator),
+					id   = i,
+				})
+				append(&picker.searches, { capture.pos[0][0], capture.pos[0][1], })
+			}
+		}
+		picker.matching = len(picker.items)
+		return
+	}
+
+	for &item in picker.items {
 		item.score = item_match_score(item.name, pattern)
 		if item.score >= 0 {
-			editor.picker.matching += 1
+			picker.matching += 1
 		}
 	}
 
-	slice.sort_by(editor.picker.items[:], proc(a, b: Picker_Item) -> bool {
+	slice.sort_by(picker.items[:], proc(a, b: Picker_Item) -> bool {
 		a_score := a.score >= 0 ? a.score : max(int)
 		b_score := b.score >= 0 ? b.score : max(int)
 		if a_score != b_score {
@@ -286,6 +382,19 @@ picker_submit :: proc(editor: ^Editor) {
 
 	switch picker.mode {
 	case .Global_Search:
+		file_open(editor, picker.files[active].path)
+		start := btree_offset_to_index(&editor.buffer.btree, _Offset(picker.searches[picker.active][0]))
+		end   := btree_offset_to_index(&editor.buffer.btree, _Offset(picker.searches[picker.active][1])) - 1
+		editor_go_to(editor, "", start, end)
+
+		pattern := input_line_get_text(picker.input)
+
+		history := &editor.prompt.history[.Search]
+		if len(history) != 0 && history[len(history) - 1] == pattern {
+			break
+		}
+		append(history, strings.clone(pattern, vmem.arena_allocator(&editor.prompt.arena)))
+
 		editor.mode = .Normal
 	case .Files, .Files_Recursive:
 		file := picker.files[active]
@@ -444,10 +553,14 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 
 		pattern := input_line_get_text(picker.input)
 
+		if picker.mode == .Global_Search {
+			pattern = ""
+		}
+
 		animation_set_target(&picker.active_anim, f32(picker.active))
 		active := animation_update(&picker.active_anim, delta_time, editor.config.cursor_animation_speed)
 
-		x += draw_text(&editor.ui_font, commands, ">", editor.config.theme[.Ui_Focus].fg, { x, y + line_height * active, }) + padding
+		x += draw_text(editor, commands, .Code, "󰁔", editor.config.theme[.Ui_Focus].fg, { x, y + line_height * active, }) + padding
 
 		has_upper: bool
 		for r in pattern {
@@ -473,9 +586,9 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 				offset := strings.index(lower, pattern)
 				if offset != -1 {
 					n     := len(pattern)
-					pos.x += draw_text(&editor.ui_font, commands, item[:offset],     text_color,                            pos)
-					pos.x += draw_text(&editor.ui_font, commands, item[offset:][:n], editor.config.theme[.Ui_Highlight].fg, pos)
-					pos.x += draw_text(&editor.ui_font, commands, item[offset:][n:], text_color,                            pos)
+					pos.x += draw_text(editor, commands, .Ui, item[:offset],     text_color,                            pos)
+					pos.x += draw_text(editor, commands, .Ui, item[offset:][:n], editor.config.theme[.Ui_Highlight].fg, pos, { .Bold, })
+					pos.x += draw_text(editor, commands, .Ui, item[offset:][n:], text_color,                            pos)
 					continue
 				}
 			}
@@ -493,13 +606,13 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 
 				_, n := utf8.decode_rune(item[i:])
 
-				pos.x += draw_text(&editor.ui_font, commands, item[:i],     text_color,                            pos)
-				pos.x += draw_text(&editor.ui_font, commands, item[i:][:n], editor.config.theme[.Ui_Highlight].fg, pos)
+				pos.x += draw_text(editor, commands, .Ui, item[:i],     text_color,                            pos)
+				pos.x += draw_text(editor, commands, .Ui, item[i:][:n], editor.config.theme[.Ui_Highlight].fg, pos, { .Bold, })
 
 				item = item[i + n:]
 			}
 
-			draw_text(&editor.ui_font, commands, item, text_color, pos)
+			draw_text(editor, commands, .Ui, item, text_color, pos)
 		}
 	}
 }

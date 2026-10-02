@@ -136,7 +136,7 @@ command_execute :: proc(editor: ^Editor, command: Prepared_Command) {
 
 @(require_results)
 parse_command :: proc(text: string, allocator: runtime.Allocator) -> (command: Prepared_Command, ok: bool) {
-	if line_number, ok := strconv.parse_int(text); ok {
+	if line_number, ok := strconv.parse_int(text); ok && line_number >= 0 {
 		args   := make([]string, 1, allocator)
 		args[0] = text
 		return { command = .Go_To_Line, args = args, }, true

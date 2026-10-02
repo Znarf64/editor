@@ -55,9 +55,9 @@ Theme :: [Style_Key]Style
 
 Font_Config :: struct {
 	path:   string,
+	index:  int,
+
 	family: string,
-	style:  string,
-	weight: Maybe(int),
 	size:   f32,
 }
 
@@ -76,6 +76,7 @@ Config :: struct {
 
 	ui_font:                Font_Config,
 	code_font:              Font_Config,
+	math_font:              Font_Config,
 
 	theme:                  Theme,
 	keybinds:               [Mode]Keybinds,
@@ -159,6 +160,8 @@ config_value_set :: proc(
 			field = reflect.struct_field_value_by_name(config.ui_font, key)
 		case "code":
 			field = reflect.struct_field_value_by_name(config.code_font, key)
+		case "math":
+			field = reflect.struct_field_value_by_name(config.math_font, key)
 		}
 		if field == nil {
 			return false
@@ -336,9 +339,7 @@ parse_action :: proc(s: string, leaders: map[string]Leader_Binds, allocator: run
 
 @(require_results)
 load_config :: proc(config: ^Config) -> (ok: bool) {
-	err := vmem.arena_init_growing(&config.arena)
-	assert(err == nil)
-
+	vmem.arena_init_growing(&config.arena) or_else panic("Failed to initialize arena")
 	allocator := vmem.arena_allocator(&config.arena)
 
 	for &binds in config.keybinds {

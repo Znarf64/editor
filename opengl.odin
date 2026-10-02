@@ -329,7 +329,7 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, commands: []Draw_Comman
 
 		switch v in command {
 		case Draw_Command_Rect:
-			append(&renderer.instance_buffer, Opengl_Instance {
+			append(&renderer.instance_buffer, {
 				offset        = v.rect.min,
 				size          = v.rect.max - v.rect.min,
 				texture       = 0,
@@ -341,7 +341,7 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, commands: []Draw_Comman
 			})
 		case Draw_Command_Char:
 			g := get_baked_glyph(&renderer.font_atlas, v.font, v.char)
-			append(&renderer.instance_buffer, Opengl_Instance {
+			append(&renderer.instance_buffer, {
 				offset  = v.position + ([2]f32)(g.offset),
 				size    = ([2]f32)(g.max - g.min),
 				texture = { **([2]f32)(g.min), 1, },

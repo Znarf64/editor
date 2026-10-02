@@ -643,7 +643,7 @@ btree_index_to_offset :: proc(btree: ^BTree, index: Index) -> (offset: _Offset) 
 	leaf := btree.leaves[node_index.index]
 	data := strings.truncate_to_byte(string(leaf.data[:]), 0)
 
-	for r, sub_offset in data {
+	for _, sub_offset in data {
 		if index == 0 {
 			return offset + _Offset(sub_offset)
 		}
