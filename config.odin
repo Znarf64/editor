@@ -91,6 +91,7 @@ Language_Config :: struct {
 	keywords:        [dynamic]string,
 	constants:       [dynamic]string,
 	types:           [dynamic]string,
+	python_comments: bool,
 	language_server: string,
 }
 
@@ -237,6 +238,8 @@ config_value_set :: proc(
 			append(&language.extensions, value)
 		case "language_server":
 			language.language_server = value
+		case "python_comments":
+			language.python_comments = value == "true"
 		case:
 			return false
 		}

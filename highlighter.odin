@@ -11,11 +11,12 @@ Highlighter_Kind :: enum {
 }
 
 Highlighter :: struct {
-	index:    Index,
-	_text:    string,
-	keywords: map[string]Style_Key,
+	index:           Index,
+	_text:           string,
+	keywords:        map[string]Style_Key,
+	python_comments: bool,
 
-	kind:     Highlighter_Kind,
+	kind:            Highlighter_Kind,
 }
 
 @(require_results)
@@ -39,6 +40,8 @@ highlighter_create :: proc(text: string, config: Language_Config, allocator: run
 	if len(highlighter.keywords) == 0 {
 		highlighter.kind = .Text
 	}
+
+	highlighter.python_comments = config.python_comments
 
 	return
 }
@@ -155,6 +158,16 @@ _highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 		advance_token(h)
 		return .Number
 	case '#':
+		if h.python_comments {
+			for r in peek_rune(h) {
+				if r == '\n' {
+					break
+				} else {
+					advance_rune(h)
+				}
+			}
+			return .Comment
+		}
 		advance_rune(h)
 		advance_token(h)
 		return .Directive
@@ -164,7 +177,7 @@ _highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 		return advance_token(h)
 	case '/':
 		advance_rune(h)
-		if r, _ := peek_rune(h); r == '/' {
+		if r, _ := peek_rune(h); r == '/' && !h.python_comments {
 			for r in peek_rune(h) {
 				if r == '\n' {
 					break
