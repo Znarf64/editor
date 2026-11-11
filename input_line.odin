@@ -179,9 +179,9 @@ input_line_render :: proc(
 	font   := find_font(editor, .Ui, {})
 	height := (f32(font.ascender) - f32(font.descender)) * font.scale
 	draw_rect(commands,
-		offset = position + { anim, -(height + f32(font.descender) * font.scale), },
-		size   = { 1, height, },
-		color  = editor.config.theme[.Ui_Text].fg,
+		position = position + { anim, -(height + f32(font.descender) * font.scale), },
+		size     = { 1, height, },
+		color    = editor.config.theme[.Ui_Text].fg,
 	)
 	width += draw_text(
 		editor,

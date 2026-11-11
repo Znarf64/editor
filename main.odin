@@ -210,9 +210,11 @@ editor_get_lsp_server :: proc(editor: ^Editor, language: Language) -> ^LSP_Serve
 		return nil
 	}
 
-	lsp := new(LSP_Server, context.allocator)
-	err := lsp_init(lsp, { config.language_server, })
-	lsp.language = language
+	lsp          := new(LSP_Server, context.allocator)
+	command      := strings.split(config.language_server, " ", context.temp_allocator)
+	command[0], _ = which(command[0], context.temp_allocator)
+	err          := lsp_init(lsp, command)
+	lsp.language  = language
 	if err != nil {
 		free(lsp, context.allocator)
 		log.errorf("Failed to initialize lsp server '%s' (language: %s)", config.language_server, language)
@@ -248,17 +250,6 @@ leader_init :: proc(leader: ^Leader) {
 leader_destroy :: proc(leader: ^Leader) {
 	vmem.arena_destroy(&leader.arena)
 	strings.builder_destroy(&leader.sequence)
-}
-
-Multi_Window :: struct {
-	children: [dynamic]Window,
-	focused:  int,
-	vertical: bool,
-}
-
-Window :: union {
-	Multi_Window,
-	Buffer_View,
 }
 
 Popup :: struct {
@@ -714,7 +705,7 @@ animation_set_target :: proc(anim: ^Animation($T), target: T) {
 status_bar_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time, padding: f32, rect: Rect) {
 	size := rect_size(rect)
 	draw_rect(commands,
-		offset       = rect.min,
+		position     = rect.min,
 		size         = size,
 		color        = editor.config.theme[.Background].bg,
 		border_width = 2,
@@ -815,9 +806,9 @@ status_bar_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, del
 			style := editor.config.theme[mode_style]
 			if style.bg != 0 {
 				draw_rect(commands,
-					offset = { x - padding, rect.min.y + 2, },
-					size   = { w, editor.config.code_font.size, } + padding * 2,
-					color  = style.bg,
+					position = { x - padding, rect.min.y + 2, },
+					size     = { w, editor.config.code_font.size, } + padding * 2,
+					color    = style.bg,
 				)
 			}
 			draw_text(
@@ -949,7 +940,7 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 
 	leader_rect := animation_update(&editor.leader.rect, delta_time, editor.config.popup_animation_speed)
 	draw_rect(commands,
-		offset        = leader_rect.min,
+		position      = leader_rect.min,
 		size          = rect_size(leader_rect),
 		color         = editor.config.theme[.Popup_Background].fg,
 		border_color  = editor.config.theme[.Popup_Border].fg,
@@ -973,9 +964,9 @@ render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time: f3
 		y += editor.config.ui_font.size + padding
 
 		draw_rect(commands,
-			offset = { x, y, },
-			size   = { rect_size(leader_rect).x - padding * 2, 2, },
-			color  = color_from_hex_rgba(0x32363DFF) * { 1, 1, 1, leader_alpha, },
+			position = { x, y, },
+			size     = { rect_size(leader_rect).x - padding * 2, 2, },
+			color    = color_from_hex_rgba(0x32363DFF) * { 1, 1, 1, leader_alpha, },
 		)
 		y += padding + 2
 
@@ -1248,6 +1239,11 @@ code_block_render :: proc(
 			break
 		}
 
+		font := font
+		if properties := editor.config.theme[style].font; properties | font_properties != font_properties {
+			font = find_font(editor, .Code, font_properties | properties)
+		}
+
 		start_column := column
 
 		rect_index := len(commands)
@@ -1273,9 +1269,9 @@ code_block_render :: proc(
 			if highlight.start <= index && index < highlight.end {
 				draw_rect(
 					commands,
-					offset = { cell_size.x * f32(column), y - la.round(f32(font.ascender) * font.scale), } + position,
-					size   = cell_size,
-					color  = editor.config.theme[.Selection].bg,
+					position = { cell_size.x * f32(column), y - la.round(f32(font.ascender) * font.scale), } + position,
+					size     = cell_size,
+					color    = editor.config.theme[.Selection].bg,
 				)
 			}
 
@@ -1516,7 +1512,7 @@ popup_render :: proc(
 	popup_rect.max += position
 
 	draw_rect(commands,
-		offset        = popup_rect.min,
+		position      = popup_rect.min,
 		size          = rect_size(popup_rect),
 		color         = editor.config.theme[.Popup_Background].fg,
 		border_color  = editor.config.theme[.Popup_Border].fg,
@@ -1672,9 +1668,9 @@ buffer_render :: proc(
 
 	if color := editor.config.theme[.Gutter].bg; color != 0 && active {
 		draw_rect(commands,
-			offset = { 0, cell_size.y * (f32(position.line) - scroll), } + rect.min,
-			size   = { gutter_width - cell_size.x, cell_size.y * f32(last_visible_line - first_visble_line), },
-			color  = color,
+			position = { 0, cell_size.y * (f32(position.line) - scroll), } + rect.min,
+			size     = { gutter_width - cell_size.x, cell_size.y * f32(last_visible_line - first_visble_line), },
+			color    = color,
 		)
 	}
 
@@ -1683,6 +1679,11 @@ buffer_render :: proc(
 		text, style := highlighter_advance(&highlighter)
 		if style == .Invalid {
 			break
+		}
+
+		code_font := code_font
+		if flags := editor.config.theme[style].font; flags != {} {
+			code_font = find_font(editor, .Code, flags)
 		}
 
 		start_column := position.column
@@ -1701,8 +1702,10 @@ buffer_render :: proc(
 				text_color := editor.config.theme[.Gutter].fg
 				line       := position.line
 
+				properties: Font_Properties
 				if primary_position.line == position.line {
-					text_color = editor.config.theme[.Cursor].bg
+					text_color  = editor.config.theme[.Cursor].bg
+					properties |= { .Bold, }
 				} else if editor.config.relative_line_numbers && active {
 					line = abs(primary_position.line - position.line) - 1
 				}
@@ -1710,16 +1713,16 @@ buffer_render :: proc(
 				@(static)
 				line_number_buf: [32]byte
 				str := strconv.write_int(line_number_buf[:], i64(line + 1), base = 10)
-				w   := measure_text(editor, .Code, str)
-				draw_text(editor, commands, .Code, str, text_color, { lines_width - w, y, } + rect.min)
+				w   := measure_text(editor, .Code, str, properties)
+				draw_text(editor, commands, .Code, str, text_color, { lines_width - w, y, } + rect.min, properties)
 
 				draw_rect(commands,
-					offset = {
+					position = {
 						gutter_width - cell_size.x,
 						cell_size.y * (f32(position.line) - scroll),
 					} + rect.min,
-					size   = { 1, cell_size.y, },
-					color  = editor.config.theme[.Gutter].fg,
+					size     = { 1, cell_size.y, },
+					color    = editor.config.theme[.Gutter].fg,
 				)
 			}
 
@@ -1739,12 +1742,12 @@ buffer_render :: proc(
 				}
 
 				draw_rect(commands,
-					offset = {
+					position = {
 						f32(position.column) * cell_size.x + gutter_width,
 						cell_size.y * (f32(position.line) - scroll),
 					} + rect.min,
-					size   = cell_size * { f32(max(1, next_column - position.column)), 1, },
-					color  = editor.config.theme[.Selection].bg,
+					size     = cell_size * { f32(max(1, next_column - position.column)), 1, },
+					color    = editor.config.theme[.Selection].bg,
 				)
 			}
 
@@ -1767,24 +1770,36 @@ buffer_render :: proc(
 					style = .Hint
 				}
 
-				draw_rect(commands,
-					offset = {
+				// draw_rect(commands,
+				// 	position = {
+				// 		f32(position.column) * cell_size.x + gutter_width,
+				// 		cell_size.y * (1 + f32(position.line) - scroll),
+				// 	} + rect.min,
+				// 	size     = { cell_size.x * f32(max(1, next_column - position.column)), 1, },
+				// 	color    = editor.config.theme[style].fg,
+				// )
+
+				squiggle_height := cell_size.x / 2
+
+				draw_sine_wave(commands,
+					size      = { cell_size.x, squiggle_height, },
+					thickness = 1.5,
+					color     = editor.config.theme[style].fg,
+					position  = {
 						f32(position.column) * cell_size.x + gutter_width,
-						cell_size.y * (1 + f32(position.line) - scroll),
+						cell_size.y * (1 + f32(position.line) - scroll) - squiggle_height / 2,
 					} + rect.min,
-					size   = { cell_size.x * f32(max(1, next_column - position.column)), 1, },
-					color  = editor.config.theme[style].fg,
 				)
 			}
 
 			if index == primary_match {
 				draw_rect(commands,
-					offset = {
+					position = {
 						f32(position.column) * cell_size.x + gutter_width,
 						cell_size.y * (f32(position.line) - scroll) + la.round(f32(code_font.ascender - code_font.descender) * code_font.scale) - 1,
 					} + rect.min,
-					size   = { cell_size.x * f32(max(1, next_column - position.column)), 1, },
-					color  = editor.config.theme[.Cursor].bg,
+					size     = { cell_size.x * f32(max(1, next_column - position.column)), 1, },
+					color    = editor.config.theme[.Cursor].bg,
 				)
 			}
 
@@ -1817,12 +1832,12 @@ buffer_render :: proc(
 
 		if editor.config.theme[style].bg != 0 {
 			draw_rect(commands,
-				offset = {
+				position      = {
 					f32(start_column) * cell_size.x + gutter_width,
 					cell_size.y * (f32(position.line) - scroll),
 				} + rect.min,
-				size   = { f32(position.column - start_column) * cell_size.x, cell_size.y, },
-				color  = editor.config.theme[style].bg,
+				size          = { f32(position.column - start_column) * cell_size.x, cell_size.y, },
+				color         = editor.config.theme[style].bg,
 
 				border_radius = 2,
 			)
@@ -1869,14 +1884,14 @@ buffer_render :: proc(
 
 		if active {
 			draw_rect(commands,
-				offset        = render_position,
+				position      = render_position,
 				size          = rect_size(cursor_rect),
 				color         = editor.config.theme[style].bg,
 				border_radius = 2,
 			)
 		} else {
 			draw_rect(commands,
-				offset        = render_position,
+				position      = render_position,
 				size          = rect_size(cursor_rect),
 				color         = 0,
 				border_color  = editor.config.theme[style].bg,

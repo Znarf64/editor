@@ -117,6 +117,10 @@ _highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 
 		text = text[:uintptr(raw_data(h._text)) - uintptr(raw_data(text))]
 
+		if style, ok := h.keywords[text]; ok {
+			return style
+		}
+
 		for r in peek_rune(h) {
 			switch r {
 			case ' ', '\t':
@@ -128,10 +132,6 @@ _highlighter_advance :: proc(h: ^Highlighter) -> Style_Key {
 
 		if r, _ := peek_rune(h); r == '(' {
 			return .Function
-		}
-
-		if style, ok := h.keywords[text]; ok {
-			return style
 		}
 
 		if has_upper && has_lower {

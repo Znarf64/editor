@@ -17,7 +17,9 @@ Opengl_Renderer :: struct {
 	instance_buffer:  [dynamic]Opengl_Instance,
 	main_program:     u32,
 	blur_program:     u32,
-	font_atlas:       Font_Atlas,
+	texture_atlas:    Opengl_Texture_Atlas,
+	font_cache:       map[Opengl_Font_Atlas_Key ]Opengl_Baked_Glyph,
+	shape_cache:      map[Opengl_Shape_Atlas_Key]Opengl_Baked_Glyph,
 	blur_texture:     u32,
 	main_texture:     u32,
 	main_framebuffer: u32,
@@ -25,21 +27,25 @@ Opengl_Renderer :: struct {
 	resolution:       [2]int,
 }
 
-Font_Atlas_Key :: struct {
+Opengl_Shape_Atlas_Key :: struct {
+	shape:     Draw_Shape,
+	size:      [2]f32,
+	thickness: f32,
+}
+
+Opengl_Font_Atlas_Key :: struct {
 	font: ^Font,
 	rune: rune,
 }
 
-Font_Atlas :: struct {
+Opengl_Texture_Atlas :: struct {
 	texture: u32,
 	skyline: [dynamic]int,
-	baked:   map[Font_Atlas_Key]Baked_Glyph,
 }
 
-Baked_Glyph :: struct {
+Opengl_Baked_Glyph :: struct {
 	min, max:  [2]int,
 	offset:    [2]int,
-	x_advance: f32,
 }
 
 Opengl_Instance :: struct {
@@ -66,7 +72,7 @@ OPENGL_UNIFORM_BLUR_RECT          :: 5
 OPENGL_UNIFORM_BLUR_BORDER_RADIUS :: 6
 OPENGL_UNIFORM_BLUR_WEIGHTS       :: 7
 
-OPENGL_TEXTURE_BINDING_FONT       :: 0
+OPENGL_TEXTURE_BINDING_ATLAS      :: 0
 
 @(require_results)
 opengl_renderer_init :: proc(
@@ -206,10 +212,12 @@ opengl_renderer_init :: proc(
 	renderer.main_program = gl.load_shaders_source(#load("shaders/main.vert"), #load("shaders/main.frag")) or_else panic("Failed to compile main shader")
 	renderer.blur_program = gl.load_compute_source(#load("shaders/blur.comp")) or_else panic("Failed to compile blur shader")
 
-	gl.CreateTextures(gl.TEXTURE_2D, 1, &renderer.font_atlas.texture)
-	gl.TextureStorage2D(renderer.font_atlas.texture, 1, gl.RGB8, 1024, 1024)
-	renderer.font_atlas.skyline = make([dynamic]int, 1024, allocator)
-	renderer.font_atlas.baked   = make(map[Font_Atlas_Key]Baked_Glyph, allocator)
+	gl.CreateTextures(gl.TEXTURE_2D, 1, &renderer.texture_atlas.texture)
+	gl.TextureStorage2D(renderer.texture_atlas.texture, 1, gl.RGB8, 1024, 1024)
+	renderer.texture_atlas.skyline = make([dynamic]int, 1024, allocator)
+
+	renderer.font_cache  = make(map[Opengl_Font_Atlas_Key ]Opengl_Baked_Glyph, allocator)
+	renderer.shape_cache = make(map[Opengl_Shape_Atlas_Key]Opengl_Baked_Glyph, allocator)
 
 	gl.CreateTextures(gl.TEXTURE_2D, 1, &renderer.noise_texture)
 	gl.TextureStorage2D(renderer.noise_texture, 1, gl.R8, 1024, 1024)
@@ -270,17 +278,19 @@ opengl_renderer_resize :: proc(renderer: ^Opengl_Renderer, size: [2]int) {
 opengl_renderer_destroy :: proc(renderer: Opengl_Renderer) {
 	renderer := renderer
 
+	opengl_framebuffer_destroy(&renderer)
+
 	delete(renderer.instance_buffer)
-	delete(renderer.font_atlas.skyline)
-	delete(renderer.font_atlas.baked)
+	delete(renderer.texture_atlas.skyline)
+	delete(renderer.font_cache)
+	delete(renderer.shape_cache)
 
 	gl.DeleteVertexArrays(1, &renderer.vao)
 	gl.DeleteBuffers(1, &renderer.vbo)
 	gl.DeleteBuffers(1, &renderer.instance_vbo)
 	gl.DeleteProgram(renderer.main_program)
 	gl.DeleteProgram(renderer.blur_program)
-	gl.DeleteTextures(1, &renderer.font_atlas.texture)
-	gl.DeleteTextures(1, &renderer.blur_texture)
+	gl.DeleteTextures(1, &renderer.texture_atlas.texture)
 }
 
 opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, commands: []Draw_Command, background_color: [4]f32) {
@@ -293,7 +303,7 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, commands: []Draw_Comman
 
 	gl.Uniform2f(OPENGL_UNIFORM_SCREEN_SIZE, f32(renderer.resolution.x), f32(renderer.resolution.y))
 
-	gl.BindTextureUnit(OPENGL_TEXTURE_BINDING_FONT, renderer.font_atlas.texture)
+	gl.BindTextureUnit(OPENGL_TEXTURE_BINDING_ATLAS, renderer.texture_atlas.texture)
 
 	gl.Viewport(0, 0, i32(renderer.resolution.x), i32(renderer.resolution.y))
 
@@ -340,7 +350,15 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, commands: []Draw_Comman
 				shadow_width  = v.shadow_width,
 			})
 		case Draw_Command_Char:
-			g := get_baked_glyph(&renderer.font_atlas, v.font, v.char)
+			g := opengl_get_baked_glyph(renderer, v.font, v.char)
+			append(&renderer.instance_buffer, {
+				offset  = v.position + ([2]f32)(g.offset),
+				size    = ([2]f32)(g.max - g.min),
+				texture = { **([2]f32)(g.min), 1, },
+				color   = v.color,
+			})
+		case Draw_Command_Shape:
+			g := opengl_get_baked_shape(renderer, v)
 			append(&renderer.instance_buffer, {
 				offset  = v.position + ([2]f32)(g.offset),
 				size    = ([2]f32)(g.max - g.min),
@@ -365,6 +383,10 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, commands: []Draw_Comman
 				break
 			}
 
+			if v.rect.max.y <= v.rect.min.y || v.rect.max.x <= v.rect.min.x {
+				break
+			}
+
 			flush(renderer)
 
 			radius := v.radius
@@ -373,6 +395,22 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, commands: []Draw_Comman
 			}
 
 			gl.UseProgram(renderer.blur_program)
+
+			compute_gaussian_weights :: proc(weights: []f32, samples: int, sigma: f32) {
+				sum: f32
+				for i in 0 ..< samples {
+					x         := f32(i)
+					weights[i] = math.exp(-(x * x) / (2 * sigma * sigma))
+					sum       += weights[i]
+				}
+
+				sum *= 2
+				sum -= weights[0]
+
+				for i in 0 ..< samples {
+					weights[i] /= sum;
+				}
+			}
 
 			weights: [32]f32
 			compute_gaussian_weights(weights[:], int(radius), radius / 2)
@@ -440,8 +478,47 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, commands: []Draw_Comman
 }
 
 @(require_results)
-get_baked_glyph :: proc(atlas: ^Font_Atlas, font: ^Font, r: rune) -> Baked_Glyph {
-	if b, ok := atlas.baked[{ font, r, }]; ok {
+opengl_texture_atlas_push :: proc(atlas: ^Opengl_Texture_Atlas, size: [2]int, data: []u8, margin := 1) -> (pos: [2]int = max(int)) {
+	pack_size := size + margin
+
+	find_spot: for x in 0 ..< len(atlas.skyline) - pack_size.x {
+		if atlas.skyline[x] >= pos.y || atlas.skyline[x] + pack_size.y >= len(atlas.skyline) {
+			continue
+		}
+		for x2 in x ..< x + pack_size.x {
+			if atlas.skyline[x2] > atlas.skyline[x] {
+				continue find_spot
+			}
+		}
+
+		pos.x = x
+		pos.y = atlas.skyline[x]
+	}
+
+	if pos != -1 {
+		for x in pos.x ..< pos.x + pack_size.x {
+			atlas.skyline[x] = pos.y + pack_size.y
+		}
+
+		gl.TextureSubImage2D(
+			atlas.texture,
+			0,
+			i32(pos.x),
+			i32(pos.y),
+			i32(size.x),
+			i32(size.y),
+			gl.RED,
+			gl.UNSIGNED_BYTE,
+			raw_data(data),
+		)
+	}
+
+	return pos
+}
+
+@(require_results)
+opengl_get_baked_glyph :: proc(renderer: ^Opengl_Renderer, font: ^Font, r: rune) -> Opengl_Baked_Glyph {
+	if b, ok := renderer.font_cache[{ font, r, }]; ok {
 		return b
 	}
 
@@ -452,69 +529,66 @@ get_baked_glyph :: proc(atlas: ^Font_Atlas, font: ^Font, r: rune) -> Baked_Glyph
 	pixels := make([][1]u8, size.x * size.y, context.temp_allocator)
 	ttf.render_shape_bitmap(font, shape, font.scale, slice.to_bytes(pixels), subpixel = false)
 
-	@(require_results)
-	pack_rect :: proc(font: ^Font_Atlas, size: [2]int) -> (pos: [2]int = max(int)) {
-		find_spot: for x in 0 ..< len(font.skyline) - size.x {
-			if font.skyline[x] >= pos.y || font.skyline[x] + size.y >= len(font.skyline) {
-				continue
-			}
-			for x2 in x ..< x + size.x {
-				if font.skyline[x2] > font.skyline[x] {
-					continue find_spot
-				}
-			}
-
-			pos.x = x
-			pos.y = font.skyline[x]
-		}
-
-		if pos != -1 {
-			for x in pos.x ..< pos.x + size.x {
-				font.skyline[x] = pos.y + size.y
-			}
-		}
-
-		return pos
+	pos := opengl_texture_atlas_push(&renderer.texture_atlas, size, slice.to_bytes(pixels))
+	b := Opengl_Baked_Glyph {
+		min    = pos,
+		max    = pos + size,
+		offset = { rect.min.x, -rect.max.y, },
 	}
 
-	pos := pack_rect(atlas, size + 1)
-	gl.TextureSubImage2D(
-		atlas.texture,
-		0,
-		i32(pos.x),
-		i32(pos.y),
-		i32(size.x),
-		i32(size.y),
-		gl.RED,
-		gl.UNSIGNED_BYTE,
-		raw_data(pixels),
-	)
-
-	x_advance, _ := ttf.get_glyph_horizontal_metrics(font, glyph)
-
-	b := Baked_Glyph {
-		min       = pos,
-		max       = pos + size,
-		offset    = { rect.min.x, -rect.max.y, },
-		x_advance = f32(x_advance) * font.scale,
-	}
-
-	atlas.baked[{ font, r, }] = b
+	renderer.font_cache[{ font, r, }] = b
 	return b
 }
 
-compute_gaussian_weights :: proc(weights: []f32, samples: int, sigma: f32) {
-	sum: f32
-	for i in 0 ..< samples {
-		x         := f32(i)
-		weights[i] = math.exp(-(x * x) / (2 * sigma * sigma))
-		sum       += weights[i]
+@(require_results)
+opengl_get_baked_shape :: proc(renderer: ^Opengl_Renderer, shape: Draw_Command_Shape) -> Opengl_Baked_Glyph {
+	key := Opengl_Shape_Atlas_Key {
+		shape     = shape.shape,
+		size      = shape.size,
+		thickness = shape.thickness,
 	}
 
-	sum *= 2
-	sum -= weights[0]
-
-	for i in 0 ..< samples {
-		weights[i] /= sum;
+	if b, ok := renderer.shape_cache[key]; ok {
+		return b
 	}
+
+	size: [2]int
+	switch shape.shape {
+	case .Sine_Wave:
+		size = { int(math.ceil(shape.size.x)), int(math.ceil(shape.size.y)), }
+	}
+
+	pixels := make([]u8, size.x * size.y, context.temp_allocator)
+
+	switch shape.shape {
+	case .Sine_Wave:
+		@(require_results)
+		sdf_sine_approx :: #force_inline proc(p: [2]f32, amplitude, frequency: f32, phase: f32 = 0) -> f32 {
+			x  := frequency * p.x + phase
+			y  := amplitude * math.sin(x)
+			dy := amplitude * frequency * math.cos(x)
+			return (p.y - y) / math.sqrt(1 + dy * dy)
+		}
+
+		amplitude := shape.size.y / 2 - shape.thickness / 2
+		frequency := 2 * math.PI / shape.size.x
+
+		for y in 0 ..< size.y {
+			for x in 0 ..< size.x {
+				d := sdf_sine_approx({ f32(x) + 0.5, f32(y) + 0.5 - shape.size.y / 2, }, amplitude, frequency, phase = -math.PI / 2)
+				d  = abs(d) - shape.thickness / 2
+				a := clamp(0.5 - d, 0, 1)
+				pixels[x + y * size.x] = u8(a * 255.999)
+			}
+		}
+	}
+
+	pos := opengl_texture_atlas_push(&renderer.texture_atlas, size, pixels)
+
+	b := Opengl_Baked_Glyph {
+		min = pos,
+		max = pos + size,
+	}
+	renderer.shape_cache[key] = b
+	return b
 }

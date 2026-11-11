@@ -13,6 +13,7 @@ Primary_Motion :: enum {
 	Show_Hover_Information,
 	Show_Code_Actions,
 	Go_To_Definition,
+	Go_To_References,
 
 	Jumplist_Forward,
 	Jumplist_Backward,
@@ -501,6 +502,8 @@ primary_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection: ^
 	case .Go_To_Definition:
 		jumplist_add(editor, selection^)
 		lsp_go_to_definition(editor, buffer)
+	case .Go_To_References:
+		lsp_go_to_references(editor, buffer)
 	case .Show_Code_Actions:
 		unimplemented()
 

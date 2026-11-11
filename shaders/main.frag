@@ -11,7 +11,7 @@ layout (location = 7) in float v_shadow_width;
 
 layout (location = 0) out vec4 f_color;
 
-layout (binding  = 0) uniform sampler2D u_texture_font;
+layout (binding  = 0) uniform sampler2D u_texture_atlas;
 
 float sdf_rounded_box(vec2 p, vec2 b, float r) {
 	vec2 q = abs(p) - b + r;
@@ -60,8 +60,8 @@ void main() {
 	f_color *= v_color;
 
 	if (v_texture.z != 0.0) {
-		vec2 texel = v_texture.xy / vec2(textureSize(u_texture_font, 0));
-		f_color.a *= texture(u_texture_font, texel).r;
+		vec2 texel = v_texture.xy / vec2(textureSize(u_texture_atlas, 0));
+		f_color.a *= texture(u_texture_atlas, texel).r;
 	}
 
 	f_color = vec4(

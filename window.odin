@@ -2,6 +2,17 @@ package editor
 
 import la "core:math/linalg"
 
+Multi_Window :: struct {
+	children: [dynamic]Window,
+	focused:  int,
+	vertical: bool,
+}
+
+Window :: union {
+	Multi_Window,
+	Buffer_View,
+}
+
 window_tree_destroy :: proc(window_tree: Window) {
 	switch v in window_tree {
 	case Multi_Window:
@@ -33,9 +44,9 @@ window_render :: proc(editor: ^Editor, commands, popup_commands: ^[dynamic]Draw_
 				origin[axis] -= editor.config.padding
 
 				draw_rect(commands,
-					offset = la.round(origin),
-					size   = size,
-					color  = editor.config.theme[.Gutter].fg,
+					position = la.round(origin),
+					size     = size,
+					color    = editor.config.theme[.Gutter].fg,
 				)
 			}
 			window_render(editor, commands, popup_commands, &w, delta_time, { min = origin, max = origin + extent, })
@@ -212,4 +223,3 @@ window_close :: proc(editor: ^Editor) {
 		}
 	}
 }
-

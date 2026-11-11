@@ -8,9 +8,6 @@ import unicode "core:unicode"
 import utf8    "core:unicode/utf8"
 import vmem    "core:mem/virtual"
 
-import sync    "core:sync"
-import thread  "core:thread"
-
 import regex   "vendor/regex"
 
 Picker_Symbol :: struct {
@@ -502,7 +499,7 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 	}
 
 	draw_rect(commands,
-		offset        = picker_rect.min,
+		position      = picker_rect.min,
 		size          = rect_size(picker_rect),
 		color         = editor.config.theme[.Popup_Background].fg,
 		border_color  = editor.config.theme[.Popup_Border].fg,
@@ -513,7 +510,7 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 	)
 
 	// draw_rect(commands,
-	// 	offset        = preview_rect.min,
+	// 	position      = preview_rect.min,
 	// 	size          = rect_size(preview_rect),
 	// 	color         = editor.config.theme[.Popup_Background].fg,
 	// 	border_color  = editor.config.theme[.Popup_Border].fg,
@@ -541,9 +538,9 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 		)
 
 		draw_rect(commands,
-			offset = picker_rect.min + padding + { 0, editor.config.ui_font.size + padding, },
-			size   = { picker_rect.max.x - picker_rect.min.x - padding * 2, 2, },
-			color  = editor.config.theme[.Popup_Border].fg,
+			position = picker_rect.min + padding + { 0, editor.config.ui_font.size + padding, },
+			size     = { picker_rect.max.x - picker_rect.min.x - padding * 2, 2, },
+			color    = editor.config.theme[.Popup_Border].fg,
 		)
 
 		line_height := padding + editor.config.ui_font.size

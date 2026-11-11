@@ -377,6 +377,31 @@ lsp_go_to_definition :: proc(editor: ^Editor, buffer: ^Buffer_View) {
 	})
 }
 
+lsp_go_to_references :: proc(editor: ^Editor, buffer: ^Buffer_View) {
+	lsp := editor_get_lsp_server(editor, buffer.language)
+	if lsp == nil || !lsp.initialized {
+		editor_set_status(editor, "No lsp server available")
+		return
+	}
+
+	position := index_to_lsp_position(&buffer.btree, buffer.selections[buffer.primary].cursor)
+	_ = send_request(lsp, "textDocument/references", Text_Document_Position_Params {
+		textDocument = { uri = buffer.uri, },
+		position     = position,
+	}, proc(editor: ^Editor, lsp_server: ^LSP_Server, content: []byte) -> LSP_Error {
+		response: Response([]Fused_Location)
+		json.unmarshal(content, &response, allocator = context.temp_allocator) or_return
+
+		if len(response.result) == 0 {
+			editor_set_status(editor, "No references found")
+			return nil
+		}
+
+		picker_open(editor, .Symbols, fused_locations = response.result)
+		return nil
+	})
+}
+
 Markup_Kind :: distinct string
 
 Markup_Content :: struct {

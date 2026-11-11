@@ -19,6 +19,9 @@ main :: proc() {
 
 	testing, another: int
 
+	testing = 1
+	another = 2
+
 	when (false || true) && false {
 		testing = another
 	}

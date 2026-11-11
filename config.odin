@@ -49,6 +49,7 @@ Style_Key :: enum {
 
 Style :: struct {
 	fg, bg: [4]f32,
+	font:   Font_Properties,
 }
 
 Theme :: [Style_Key]Style
@@ -115,7 +116,7 @@ config_value_set :: proc(
 	@(require_results)
 	unmarshal_value :: proc(v: any, value: string) -> bool {
 		ti := runtime.type_info_base(type_info_of(v.id))
-		if u, ok := ti.variant.(reflect.Type_Info_Union); ok {
+		if u, ok := ti.variant.(^reflect.Type_Info_Union); ok {
 			assert(len(u.variants) == 1)
 
 			variant: any = {
@@ -171,7 +172,7 @@ config_value_set :: proc(
 		base, _, selector := strings.partition(key, ".")
 		style: Style_Key
 		ti := runtime.type_info_base(type_info_of(Style_Key))
-		if e, ok := ti.variant.(runtime.Type_Info_Enum); ok {
+		if e, ok := ti.variant.(^runtime.Type_Info_Enum); ok {
 			for name, i in e.names {
 				if strings.equal_fold(base, name) {
 					style = Style_Key(e.values[i])
@@ -180,6 +181,21 @@ config_value_set :: proc(
 			}
 		} else {
 			unreachable()
+		}
+
+		switch selector {
+		case "bold":
+			if value != "true" {
+				return false
+			}
+			config.theme[style].font |= { .Bold,   }
+			return true
+		case "italic":
+			if value != "true" {
+				return false
+			}
+			config.theme[style].font |= { .Italic, }
+			return true
 		}
 
 		color: [4]f32
