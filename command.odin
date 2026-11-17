@@ -1,8 +1,10 @@
+#+vet explicit-allocators
 package editor
 
 import runtime "base:runtime"
 
 import fmt     "core:fmt"
+import mem     "core:mem"
 import os      "core:os"
 import reflect "core:reflect"
 import strconv "core:strconv"
@@ -23,6 +25,7 @@ Command :: enum {
 	New,
 	Go_To_Line,
 	Character_Info,
+	Shell_Command,
 }
 
 Prepared_Command :: struct {
@@ -37,10 +40,20 @@ command_from_name_table: map[string]Command
 command_tables_init :: proc "contextless" () {
 	context = runtime.default_context()
 
+	@(static)
+	command_table_buffer: [1 << 12]u8
+
+	arena: vmem.Arena
+	vmem.arena_init_buffer(&arena, command_table_buffer[:]) or_else panic("Failed to initialize arena")
+	allocator := vmem.arena_allocator(&arena)
+
+	command_from_name_table = make(map[string]Command, allocator)
+	defer command_from_name_table.allocator = mem.panic_allocator()
+
 	for info, command in command_info_table {
 		name, _ := reflect.enum_name_from_value(command)
-		name     = strings.to_lower(name)
-		name, _  = strings.replace(name, "_", "-", -1)
+		name     = strings.to_lower(name, allocator)
+		name, _  = strings.replace(name, "_", "-", -1, allocator)
 		command_to_name_table[command] = name
 		command_from_name_table[name]  = command
 
@@ -57,21 +70,16 @@ command_execute :: proc(editor: ^Editor, command: Prepared_Command) {
 	case .Quit:
 		window_close(editor)
 	case .New:
-		buffer := new(Buffer)
+		buffer := new(Buffer, context.allocator)
 		buffer_init_with_data(editor, buffer, "<scratch>", "\n")
 		editor_open_buffer(editor, buffer)
 	case .Write:
-		buffer := editor.buffer
-		if strings.contains(string(buffer.path), "test/") {
-			b := strings.builder_make(context.temp_allocator)
-			btree_to_string(&buffer.btree, &b)
-			_ = os.write_entire_file(string(buffer.path), b.buf[:])
+		b := strings.builder_make(context.temp_allocator)
+		btree_to_string(&editor.buffer.btree, &b)
+		_ = os.write_entire_file(string(editor.buffer.path), b.buf[:])
 
-			editor_set_status(editor, "'%s' written.", buffer.path)
-		} else {
-			editor_set_status(editor, "NOTHING WRITTEN")
-		}
-		if lsp := editor_get_lsp_server(editor, buffer.language); lsp != nil {
+		editor_set_status(editor, "'%s' written.", editor.buffer.path)
+		if lsp := editor_get_lsp_server(editor, editor.buffer.language); lsp != nil {
 			lsp_save(lsp, editor.buffer)
 		}
 	case .Split_Vertical:
@@ -129,6 +137,13 @@ command_execute :: proc(editor: ^Editor, command: Prepared_Command) {
 		}
 
 		editor_set_status(editor, "%s", strings.to_string(b))
+	case .Shell_Command:
+		_, err := os.process_start({
+			command = { "/bin/sh", "-c", "--", strings.join(command.args, " ", context.temp_allocator), },
+		})
+		if err != nil {
+			editor_set_status(editor, "Failed to start process")
+		}
 	case:
 		editor_set_status(editor, "Invalid command: '%s'", command)
 	}
@@ -166,16 +181,17 @@ Command_Info :: struct {
 
 @(rodata)
 command_info_table: [Command]Command_Info = {
-	.Open              = { aliases = { "o",    }, args = 1,         },
-	.Write             = { aliases = { "w",    }, args = { 0, 1, }, },
-	.Quit              = { aliases = { "q",    },                   },
-	.Split_Vertical    = { aliases = { "vs",   }, args = { 0, 1, }, },
-	.Split_Horizontal  = { aliases = { "hs",   }, args = { 0, 1, }, },
-	.Config_Reload     = {                                          },
-	.Config_Open       = {                                          },
-	.Config_Option_Set = { aliases = { "set",  }, args = 2,         },
-	.Config_Option_Get = { aliases = { "get",  }, args = 1,         },
-	.New               = { aliases = { "n",    },                   },
-	.Go_To_Line        = { aliases = { "g",    }, args = 1,         },
-	.Character_Info    = { aliases = { "char", },                   },
+	.Open              = { aliases = { "o",       }, args = 1,                },
+	.Write             = { aliases = { "w",       }, args = { 0, 1,        }, },
+	.Quit              = { aliases = { "q",       },                          },
+	.Split_Vertical    = { aliases = { "vs",      }, args = { 0, 1,        }, },
+	.Split_Horizontal  = { aliases = { "hs",      }, args = { 0, 1,        }, },
+	.Config_Reload     = {                                                    },
+	.Config_Open       = {                                                    },
+	.Config_Option_Set = { aliases = { "set",     }, args = 2,                },
+	.Config_Option_Get = { aliases = { "get",     }, args = 1,                },
+	.New               = { aliases = { "n",       },                          },
+	.Go_To_Line        = { aliases = { "g",       }, args = 1,                },
+	.Character_Info    = { aliases = { "char",    },                          },
+	.Shell_Command     = { aliases = { "sh", "!", }, args = { 1, max(int), }, },
 }

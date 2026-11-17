@@ -1,6 +1,7 @@
 package editor
 
 import fmt     "core:fmt"
+import la      "core:math/linalg"
 import os      "core:os"
 import slice   "core:slice"
 import strings "core:strings"
@@ -21,23 +22,27 @@ Picker_File :: struct {
 }
 
 Picker :: struct {
-	mode:         Picker_Mode,
-	input:        Input_Line,
-	items:        [dynamic]Picker_Item,
-	active:       int,
-	matching:     int,
-	arena:        vmem.Arena,
-	search_arena: vmem.Arena,
+	mode:              Picker_Mode,
+	input:             Input_Line,
+	items:             [dynamic]Picker_Item,
+	active:            int,
+	matching:          int,
+	arena:             vmem.Arena,
+	search_arena:      vmem.Arena,
 
-	active_anim:  Animation(f32),
+	active_anim:       Animation(f32),
 
-	files:        []Picker_File,
-	symbols:      []Picker_Symbol,
-	diagnostics:  []Diagnostic,
-	searches:     [dynamic][2]int,
+	files:             []Picker_File,
+	symbols:           []Picker_Symbol,
+	diagnostics:       []Diagnostic,
+	searches:          [dynamic][2]int,
 
-	rect:         Animation(Rect),
-	preview_rect: Animation(Rect),
+	preview:           strings.Builder,
+	preview_language:  Language,
+	preview_highlight: Range,
+
+	rect:              Animation(Rect),
+	preview_rect:      Animation(Rect),
 }
 
 Picker_Mode :: enum {
@@ -70,11 +75,14 @@ picker_destroy :: proc(picker: ^Picker) {
 }
 
 picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused_locations: []Fused_Location = {}) {
-	input_line_reset(&editor.picker.input)
-	vmem.arena_free_all(&editor.picker.arena)
-	allocator := vmem.arena_allocator(&editor.picker.arena)
+	picker := &editor.picker
 
-	clear(&editor.picker.items)
+	input_line_reset(&picker.input)
+	vmem.arena_free_all(&picker.arena)
+	strings.builder_reset(&picker.preview)
+	allocator := vmem.arena_allocator(&picker.arena)
+
+	clear(&picker.items)
 
 	switch mode {
 	case .Global_Search:
@@ -88,7 +96,7 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 		defer os.walker_destroy(&w)
 
 		files := make([dynamic]Picker_File, allocator)
-		clear(&editor.picker.items)
+		clear(&picker.items)
 		walk_loop: for info in os.walker_walk(&w) {
 			_ = os.walker_error(&w) or_break
 
@@ -119,7 +127,7 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 
 			content := os.read_entire_file(name, allocator) or_continue
 
-			append(&editor.picker.items, {
+			append(&picker.items, {
 				name = name,
 				id   = len(files),
 			})
@@ -130,7 +138,7 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 				content = string(content),
 			})
 		}
-		editor.picker.files = files[:]
+		picker.files = files[:]
 	case .Files:
 		path := path
 		err: os.Error
@@ -143,7 +151,7 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 		}
 		files := os.read_all_directory_by_path(path, context.temp_allocator) or_break
 		for file, i in files {
-			editor.picker.files[i].path = normalize_path(file.fullpath, allocator)
+			picker.files[i].path = normalize_path(file.fullpath, allocator)
 		}
 		if err != nil {
 			editor_set_status(editor, "Failed to read directory: %v", err)
@@ -169,7 +177,7 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 		defer os.walker_destroy(&w)
 
 		files := make([dynamic]Picker_File, allocator)
-		clear(&editor.picker.items)
+		clear(&picker.items)
 		for info in os.walker_walk(&w) {
 			_ = os.walker_error(&w) or_break
 
@@ -185,7 +193,7 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 			name  = strings.trim_prefix(name, "/")
 			name  = strings.clone(name, allocator)
 
-			append(&editor.picker.items, {
+			append(&picker.items, {
 				name = name,
 				id   = len(files),
 			})
@@ -195,12 +203,12 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 				type = info.type,
 			})
 		}
-		editor.picker.files = files[:]
+		picker.files = files[:]
 	case .Symbols:
 		assert(len(fused_locations) != 0)
 
 		symbols := make([]Picker_Symbol, len(fused_locations), allocator)
-		resize(&editor.picker.items, len(fused_locations))
+		resize(&picker.items, len(fused_locations))
 		for &l, i in symbols {
 			l.location = fused_locations[i]
 			if l.location == {} {
@@ -212,16 +220,16 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 			path := uri_to_path(l.location.uri, context.temp_allocator) or_else "invalid path"
 			name := fmt.aprintf("%s:%d", path, l.location.range.start.line + 1, allocator = allocator)
 
-			editor.picker.items[i] = {
+			picker.items[i] = {
 				name = name,
 				id   = i,
 			}
 		}
 
-		editor.picker.symbols = symbols
+		picker.symbols = symbols
 	case .Diagnostics:
 		diagnostics := make([]Diagnostic, len(editor.buffer.diagnostics), allocator)
-		resize(&editor.picker.items, len(diagnostics))
+		resize(&picker.items, len(diagnostics))
 		for &d, i in diagnostics {
 			diagnostic := editor.buffer.diagnostics[i]
 			d = {
@@ -231,63 +239,63 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 				message = strings.clone(diagnostic.message, allocator),
 			}
 
-			editor.picker.items[i] = {
+			picker.items[i] = {
 				name = fmt.aprintf("%s:%s", d.code, d.message, allocator = allocator),
 				id   = i,
 			}
 		}
 
-		editor.picker.diagnostics = diagnostics
+		picker.diagnostics = diagnostics
 	case .Commands:
-		resize(&editor.picker.items, len(Command) + len(Motion) + len(Argument_Motion) + len(Selection_Motion) + len(Primary_Motion))
+		resize(&picker.items, len(Command) + len(Motion) + len(Argument_Motion) + len(Selection_Motion) + len(Primary_Motion))
 		i := 0
 		for command in Command {
-			editor.picker.items[i] = {
+			picker.items[i] = {
 				name = fmt.aprint(":", command_to_name_table[command], sep = "", allocator = allocator),
 				id   = i,
 			}
 			i += 1
 		}
 		for motion in Motion {
-			editor.picker.items[i] = {
+			picker.items[i] = {
 				name = motion_to_name_table[motion],
 				id   = i,
 			}
 			i += 1
 		}
 		for motion in Argument_Motion {
-			editor.picker.items[i] = {
+			picker.items[i] = {
 				name = argument_motion_to_name_table[motion],
 				id   = i,
 			}
 			i += 1
 		}
 		for motion in Selection_Motion {
-			editor.picker.items[i] = {
+			picker.items[i] = {
 				name = selection_motion_to_name_table[motion],
 				id   = i,
 			}
 			i += 1
 		}
 		for motion in Primary_Motion {
-			editor.picker.items[i] = {
+			picker.items[i] = {
 				name = primary_motion_to_name_table[motion],
 				id   = i,
 			}
 			i += 1
 		}
 	case .Buffers:
-		resize(&editor.picker.items, len(editor.buffers))
+		resize(&picker.items, len(editor.buffers))
 		for b, i in editor.buffers {
-			editor.picker.items[i] = {
+			picker.items[i] = {
 				name = string(b.path),
 				id   = i,
 			}
 		}
 	case .Jumplist:
-		resize(&editor.picker.items, len(editor.jumplist.entries))
+		resize(&picker.items, len(editor.jumplist.entries))
 		for b, i in editor.jumplist.entries {
-			editor.picker.items[i] = {
+			picker.items[i] = {
 				name = b.content,
 				id   = i,
 			}
@@ -295,7 +303,7 @@ picker_open :: proc(editor: ^Editor, mode: Picker_Mode, path: string = "", fused
 	}
 
 	editor.mode        = .Picker
-	editor.picker.mode = mode
+	picker.mode = mode
 
 	picker_update(editor)
 }
@@ -305,6 +313,7 @@ picker_focus_next :: proc(editor: ^Editor) {
 	if editor.picker.active >= editor.picker.matching {
 		editor.picker.active = 0
 	}
+	picker_update_preview(editor)
 }
 
 picker_focus_prev :: proc(editor: ^Editor, n := 1) {
@@ -312,6 +321,7 @@ picker_focus_prev :: proc(editor: ^Editor, n := 1) {
 	if editor.picker.active < 0 {
 		editor.picker.active = editor.picker.matching - 1
 	}
+	picker_update_preview(editor)
 }
 
 picker_update :: proc(editor: ^Editor) {
@@ -346,6 +356,7 @@ picker_update :: proc(editor: ^Editor) {
 			}
 		}
 		picker.matching = len(picker.items)
+		picker_update_preview(editor)
 		return
 	}
 
@@ -365,6 +376,35 @@ picker_update :: proc(editor: ^Editor) {
 
 		return a.name < b.name
 	})
+
+	picker_update_preview(editor)
+}
+
+picker_update_preview :: proc(editor: ^Editor) {
+	picker := &editor.picker
+
+	strings.builder_reset(&picker.preview)
+
+	if picker.matching == 0 {
+		return
+	}
+
+	active := picker.items[picker.active].id
+
+	switch picker.mode {
+	case .Files:
+	case .Files_Recursive:
+		path := string(picker.files[active].path)
+		data := os.read_entire_file(path, context.temp_allocator) or_break
+		strings.write_string(&picker.preview, string(data))
+		picker.preview_language = get_language_from_extension(editor, path)
+	case .Global_Search:
+	case .Symbols:
+	case .Diagnostics:
+	case .Commands:
+	case .Buffers:
+	case .Jumplist:
+	}
 }
 
 picker_submit :: proc(editor: ^Editor) {
@@ -468,31 +508,31 @@ item_match_score :: proc(item, pattern: string) -> int {
 picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_time, padding: f32, screen_size: [2]f32) {
 	picker := &editor.picker
 
-	// {
-	// 	rect    := rect_from_min_max(100, { screen_size.x / 2 - 25, screen_size.y - 100, })
-	// 	preview := rect_from_min_max({ screen_size.x / 2 + 25, 100, }, screen_size - 100)
+	enable_preview := strings.builder_len(picker.preview) != 0
 
-	// 	if editor.mode != .Picker {
-	// 		rect.min = rect_center(rect)
-	// 		rect.max = rect.min
+	main_target, preview_target: Rect
 
-	// 		preview.min = rect_center(preview)
-	// 		preview.max = preview.min
-	// 	}
+	MARGIN :: 100
 
-	// 	animation_set_target(&picker.rect, rect)
-	// 	animation_set_target(&picker.preview_rect, preview)
-	// }
-	if editor.mode == .Picker {
-		rect := rect_from_min_max(100, screen_size - 100)
-		animation_set_target(&picker.rect, rect)
+	if enable_preview {
+		GAP :: MARGIN / 2
+
+		main_target    = rect_from_min_max(MARGIN, { screen_size.x / 2 - GAP / 2, screen_size.y - MARGIN, })
+		preview_target = rect_from_min_max({ screen_size.x / 2 + GAP / 2, MARGIN, }, screen_size - MARGIN)
 	} else {
-		center := screen_size / 2
-		animation_set_target(&picker.rect, Rect{ min = center, max = center, })
+		main_target = rect_from_min_max(MARGIN, screen_size - MARGIN)
 	}
 
-	picker_rect := animation_update(&picker.rect, delta_time, editor.config.popup_animation_speed)
-	// preview_rect := animation_update(&picker.preview_rect, delta_time, editor.config.popup_animation_speed)
+	if editor.mode != .Picker {
+		main_target    = { min = rect_center(main_target),    max = rect_center(main_target),    }
+		preview_target = { min = rect_center(preview_target), max = rect_center(preview_target), }
+	}
+
+	animation_set_target(&picker.rect,         main_target)
+	animation_set_target(&picker.preview_rect, preview_target)
+
+	picker_rect  := animation_update(&picker.rect, delta_time, editor.config.popup_animation_speed)
+	preview_rect := animation_update(&picker.preview_rect, delta_time, editor.config.popup_animation_speed)
 
 	if rect_size(picker_rect) == 0 {
 		return
@@ -509,16 +549,23 @@ picker_render :: proc(editor: ^Editor, commands: ^[dynamic]Draw_Command, delta_t
 		blur_radius   = f32(editor.config.blur_strength),
 	)
 
-	// draw_rect(commands,
-	// 	position      = preview_rect.min,
-	// 	size          = rect_size(preview_rect),
-	// 	color         = editor.config.theme[.Popup_Background].fg,
-	// 	border_color  = editor.config.theme[.Popup_Border].fg,
-	// 	border_radius = 8,
-	// 	border_width  = 2,
-	// 	shadow_width  = 16,
-	// 	blur_radius   = f32(editor.config.blur_strength),
-	// )
+	if rect_size(preview_rect) != 0 {
+		draw_rect(commands,
+			position      = preview_rect.min,
+			size          = rect_size(preview_rect),
+			color         = editor.config.theme[.Popup_Background].fg,
+			border_color  = editor.config.theme[.Popup_Border].fg,
+			border_radius = 8,
+			border_width  = 2,
+			shadow_width  = 16,
+			blur_radius   = f32(editor.config.blur_strength),
+		)
+
+		append(commands, Draw_Command_Clip(rect_inflate(preview_rect, -2)))
+		defer append(commands, DRAW_COMMAND_CLIP_DISABLE)
+
+		code_block_render(editor, {}, commands, preview_rect.min + padding, strings.to_string(picker.preview), picker.preview_language, picker.preview_highlight)
+	}
 
 	clip_rect := rect_inflate(picker_rect, -2)
 	if clip_rect.min.x >= clip_rect.max.x || clip_rect.min.y >= clip_rect.max.y {

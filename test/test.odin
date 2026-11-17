@@ -12,11 +12,10 @@ main :: proc() {
 		field1 = 69  + 1 * m,
 		field2 = 420 * a,
 	}
-
-
+	
+	a2: A
 
 	fmt.println("Hello World")
-
 	testing, another: int
 
 	testing = 1
@@ -25,10 +24,4 @@ main :: proc() {
 	when (false || true) && false {
 		testing = another
 	}
-
-	asdf
-
-	ERROR
-	
-	alkjdflkaslkjdlkj
 }

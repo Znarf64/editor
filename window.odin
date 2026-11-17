@@ -10,7 +10,7 @@ Multi_Window :: struct {
 
 Window :: union {
 	Multi_Window,
-	Buffer_View,
+	^Buffer_View,
 }
 
 window_tree_destroy :: proc(window_tree: Window) {
@@ -20,8 +20,8 @@ window_tree_destroy :: proc(window_tree: Window) {
 			window_tree_destroy(c)
 		}
 		delete(v.children)
-	case Buffer_View:
-		buffer_view_destroy(v)
+	case ^Buffer_View:
+		buffer_view_free(v)
 	}
 }
 
@@ -52,8 +52,8 @@ window_render :: proc(editor: ^Editor, commands, popup_commands: ^[dynamic]Draw_
 			window_render(editor, commands, popup_commands, &w, delta_time, { min = origin, max = origin + extent, })
 			origin[axis] += per_window + gap
 		}
-	case Buffer_View:
-		buffer_render(editor, &w, commands, popup_commands, delta_time, rect_round(rect))
+	case ^Buffer_View:
+		buffer_render(editor, w, commands, popup_commands, delta_time, rect_round(rect))
 	}
 }
 
@@ -69,12 +69,12 @@ window_split :: proc(editor: ^Editor, vertical: bool) {
 				p = nil
 			}
 			w = &v.children[v.focused]
-		case Buffer_View:
-			view := buffer_view_clone(v)
+		case ^Buffer_View:
+			view := buffer_view_clone(v^)
 			if p != nil {
 				p.focused += 1
 				inject_at(&p.children, p.focused, view)
-				editor.buffer = (^Buffer_View)(&p.children[p.focused])
+				editor.buffer = view
 			} else {
 				m := Multi_Window {
 					children = make([dynamic]Window, 0, 2, context.allocator),
@@ -85,7 +85,7 @@ window_split :: proc(editor: ^Editor, vertical: bool) {
 				append(&m.children, view)
 				w^ = m
 
-				editor.buffer = (^Buffer_View)(&m.children[m.focused])
+				editor.buffer = view
 			}
 			return
 		case:
@@ -115,7 +115,7 @@ window_focus :: proc(editor: ^Editor, vertical: bool, next: bool) -> (changed: b
 				}
 			}
 			p = &v
-		case Buffer_View:
+		case ^Buffer_View:
 			if p == nil {
 				return
 			}
@@ -151,7 +151,7 @@ window_transpose :: proc(editor: ^Editor) {
 		case Multi_Window:
 			p = &v
 			w = &v.children[v.focused]
-		case Buffer_View:
+		case ^Buffer_View:
 			if p != nil {
 				p.vertical ~= true
 				window_focus_update(editor)
@@ -180,8 +180,8 @@ window_focus_update :: proc(editor: ^Editor) {
 			}
 			p = &v
 			w = &v.children[v.focused]
-		case Buffer_View:
-			editor.buffer = &v
+		case ^Buffer_View:
+			editor.buffer = v
 			return
 		case:
 			panic("Corrupted window tree")
@@ -197,12 +197,12 @@ window_close :: proc(editor: ^Editor) {
 		case Multi_Window:
 			p = w
 			w = &v.children[v.focused]
-		case Buffer_View:
+		case ^Buffer_View:
 			if p == nil {
 				editor.should_close = true
 				return
 			}
-			buffer_view_destroy(v)
+			buffer_view_free(v)
 
 			m := &p.(Multi_Window)
 			ordered_remove(&m.children, m.focused)

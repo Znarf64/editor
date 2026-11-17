@@ -50,38 +50,6 @@ Diagnostic :: struct {
 	severity:      Diagnostic_Severity,
 }
 
-Buffer_View :: struct {
-	using buffer: ^Buffer,
-
-	selections:    [dynamic]Selection,
-	primary:       int,
-	scroll:        int,
-	scroll_anim:   Animation(f32),
-	visible_lines: int,
-}
-
-Buffer :: struct {
-	path:              Normalized_Path,
-	btree:             BTree,
-
-	uri:               Uri,
-	language:          Language,
-	diagnostics:       []Diagnostic,
-	diagnostics_arena: vmem.Arena,
-	version:           int,
-}
-
-buffer_view_destroy :: proc(view: Buffer_View) {
-	delete(view.selections)
-}
-
-@(require_results)
-buffer_view_clone :: proc(view: Buffer_View) -> Buffer_View {
-	view           := view
-	view.selections = slice.clone_to_dynamic(view.selections[:], context.allocator)
-	return view
-}
-
 editor_open_buffer :: proc(editor: ^Editor, buffer: ^Buffer) {
 	if editor.buffer != nil && editor.buffer.buffer == buffer {
 		return
@@ -92,20 +60,15 @@ editor_open_buffer :: proc(editor: ^Editor, buffer: ^Buffer) {
 		switch &v in w {
 		case Multi_Window:
 			w = &v.children[v.focused]
-		case Buffer_View:
-			buffer_view_destroy(v)
-			v = {
-				buffer     = buffer,
-				selections = make([dynamic]Selection, 1, context.allocator),
-			}
-			editor.buffer = &v
+		case ^Buffer_View:
+			buffer_view_free(v)
+			v             = buffer_view_new(buffer)
+			editor.buffer = v
 			return
 		case:
-			v = Buffer_View {
-				buffer     = buffer,
-				selections = make([dynamic]Selection, 1, context.allocator),
-			}
-			editor.buffer = (^Buffer_View)(&v)
+			buffer_view  := buffer_view_new(buffer)
+			v             = buffer_view
+			editor.buffer = buffer_view
 			return
 		}
 	}
@@ -121,8 +84,8 @@ file_open :: proc(editor: ^Editor, path: Normalized_Path) {
 	}
 
 	buffer := new(Buffer, context.allocator)
-	editor_open_buffer(editor, buffer)
 	buffer_init(editor, buffer, path)
+	editor_open_buffer(editor, buffer)
 }
 
 editor_go_to :: proc(editor: ^Editor, path: Normalized_Path, start: Index, end: Index = -1) {
@@ -140,52 +103,6 @@ editor_go_to :: proc(editor: ^Editor, path: Normalized_Path, start: Index, end: 
 	editor.buffer.selections[0].anchor        = start
 	editor.buffer.selections[0].cursor        = end
 	editor.buffer.selections[0].target_cursor = end
-}
-
-buffer_init :: proc(editor: ^Editor, buffer: ^Buffer, path: Normalized_Path, language: Language = "") {
-	data := os.read_entire_file(string(path), context.temp_allocator) or_else { '\n', }
-	b    := strings.builder_make(0, len(data), context.temp_allocator)
-	// iterating byte-wise is fine here
-	for x in data {
-		if x == '\r' {
-			continue // nope
-		}
-		strings.write_byte(&b, x)
-	}
-	if len(data) == 0 || data[len(data) - 1] != '\n' {
-		strings.write_byte(&b, '\n')
-	}
-	buffer_init_with_data(editor, buffer, path, strings.to_string(b), language)
-}
-
-buffer_init_with_data :: proc(editor: ^Editor, buffer: ^Buffer, path: Normalized_Path, data: string, language: Language = "") {
-	path := path_clone(path, context.allocator)
-	log.infof("Opening file '%s'", path)
-
-	language := language
-	if language == "" {
-		language = get_language_from_extension(editor, path)
-	}
-
-	buffer^ = {
-		path     = path,
-		uri      = uri_from_path(path, context.allocator),
-		btree    = btree_build(string(data), context.allocator),
-		language = language,
-	}
-	vmem.arena_init_growing(&buffer.diagnostics_arena) or_else panic("Failed to initialize arena")
-
-	if lsp := editor_get_lsp_server(editor, language); lsp != nil {
-		lsp_open_file(lsp, buffer.uri, data)
-	}
-	append(&editor.buffers, buffer)
-}
-
-buffer_destroy :: proc(buffer: ^Buffer) {
-	vmem.arena_destroy(&buffer.diagnostics_arena)
-	btree_destroy(buffer.btree)
-	delete(string(buffer.path), context.allocator)
-	delete(string(buffer.uri), context.allocator)
 }
 
 @(require_results)
@@ -359,6 +276,7 @@ main :: proc() {
 	defer picker_destroy(&editor.picker)
 
 	defer {
+		window_tree_destroy(editor.window_tree)
 		for _, lsp in editor.language_servers {
 			lsp_destroy(lsp)
 			free(lsp, context.allocator)
@@ -374,7 +292,6 @@ main :: proc() {
 		for &popup in editor.popups {
 			strings.builder_destroy(&popup.text)
 		}
-		window_tree_destroy(editor.window_tree)
 	}
 
 	config_ok := load_config(&editor.config)
@@ -1385,6 +1302,11 @@ markdown_render :: proc(
 			rect_index := len(commands)
 			append(commands, nil)
 
+			text := strings.trim_right(text, "\n")
+			if text == "" {
+				continue
+			}
+
 			code_font := find_font(editor, .Code, font_properties)
 
 			y -= la.round(f32(code_font.ascender) * code_font.scale)
@@ -1395,7 +1317,7 @@ markdown_render :: proc(
 			}
 
 			pad: f32 = 4
-			code_block_size := code_block_render(editor, font_properties, commands, position + { x, y, } + pad, strings.trim_right(text, "\n"), language, highlight)
+			code_block_size := code_block_render(editor, font_properties, commands, position + { x, y, } + pad, text, language, highlight)
 
 			commands[rect_index] = Draw_Command_Rect {
 				rect          = {

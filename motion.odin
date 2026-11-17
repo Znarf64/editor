@@ -148,6 +148,9 @@ Motion :: enum {
 	Window_Move_Below,
 	Window_Transpose,
 
+	Undo,
+	Redo,
+
 	Save,
 	Save_As,
 
@@ -162,6 +165,8 @@ Argument_Motion :: enum {
 	Replace,
 	Find,
 	Find_Backward,
+	Until,
+	Until_Backward,
 
 	Surround_Add,
 	Surround_Delete,
@@ -274,7 +279,7 @@ argument_motion_apply_single :: proc(editor: ^Editor, buffer: ^Buffer_View, sele
 	}
 
 	switch motion {
-	case .Find:
+	case .Find, .Until:
 		selection.anchor = selection.cursor
 
 		iter := btree_iterator(&buffer.btree, index = selection.cursor)
@@ -285,7 +290,11 @@ argument_motion_apply_single :: proc(editor: ^Editor, buffer: ^Buffer_View, sele
 				break
 			}
 		}
-	case .Find_Backward:
+		
+		if motion == .Until {
+			selection.cursor = max(selection.cursor - 1, 0)
+		}
+	case .Find_Backward, .Until_Backward:
 		selection.anchor = selection.cursor
 
 		iter := btree_iterator(&buffer.btree, index = selection.cursor)
@@ -296,7 +305,26 @@ argument_motion_apply_single :: proc(editor: ^Editor, buffer: ^Buffer_View, sele
 				break
 			}
 		}
+		
+		if motion == .Until_Backward {
+			selection.cursor = max(selection.cursor + 1, buffer.btree.chars - 1)
+		}
 	case .Replace:
+		previous_selection := selection^
+
+		start := min(selection.anchor, selection.cursor)
+		end   := max(selection.anchor, selection.cursor) + 1
+		buffer_remove(editor, buffer, start, end)
+
+		encoded, width := utf8.encode_rune(arg)
+		n              := int(end - start)
+		buf            := make([]u8, width * n,context.temp_allocator)
+		for i in 0 ..< n {
+			copy(buf[i * width:], encoded[:width])
+		}
+		buffer_insert(editor, buffer, start, string(buf))
+
+		selection^ = previous_selection
 	case .Insert_Character:
 		buffer_insert(editor, buffer, selection.cursor, arg)
 	case .Surround_Add:
@@ -326,79 +354,6 @@ argument_motion_apply_single :: proc(editor: ^Editor, buffer: ^Buffer_View, sele
 	case .Surround_Replace:
 		unimplemented()
 	}
-}
-
-buffer_remove :: proc(buffer: ^Buffer_View, start, end: Index) {
-	btree_remove_range(&buffer.btree, start, end)
-	for &selection in buffer.selections {
-		if selection.cursor >= start {
-			selection.cursor -= start - end
-		}
-		if selection.anchor >= start {
-			selection.anchor -= start - end
-		}
-	}
-}
-
-buffer_insert :: proc {
-	buffer_insert_rune,
-	buffer_insert_string,
-}
-
-buffer_insert_rune :: proc(editor: ^Editor, buffer: ^Buffer_View, index: Index, r: rune) -> Index {
-	buf, n := utf8.encode_rune(r)
-	return buffer_insert_string(editor, buffer, index, string(buf[:n]))
-}
-
-buffer_insert_string :: proc(editor: ^Editor, buffer: ^Buffer_View, index: Index, s: string) -> Index {
-	_buffer_insert :: proc(buffer: ^Buffer_View, arg: string, index: Index) -> Index {
-		runes, _ := btree_insert(&buffer.btree, index, arg)
-		for &selection in buffer.selections {
-			if selection.cursor >= index {
-				selection.cursor += runes
-			}
-			if selection.anchor >= index {
-				selection.anchor += runes
-			}
-		}
-		for &diagnostic in buffer.diagnostics {
-			if diagnostic.start >= index {
-				diagnostic.start += runes
-			}
-			if diagnostic.end >= index {
-				diagnostic.end += runes
-			}
-		}
-		return runes
-	}
-
-	buffer.version += 1
-	if lsp := editor_get_lsp_server(editor, buffer.language); lsp != nil {
-		lsp_apply_change(lsp, buffer, index, index, s, buffer.version)
-		for char in (lsp.capabilities.signatureHelpProvider.? or_else {}).triggerCharacters {
-			if strings.contains(s, char) {
-				lsp_get_signature_help(editor, buffer)
-				break
-			}
-		}
-		// needs_completion: bool
-		// for char in s {
-		// 	if char == '_' || unicode.is_letter(char) || unicode.is_digit(char) {
-		// 		needs_completion = true
-		// 		break
-		// 	}
-		// }
-		// for char in (lsp.capabilities.completionProvider.? or_else {}).triggerCharacters {
-		// 	if strings.contains(s, char) {
-		// 		needs_completion = true
-		// 		break
-		// 	}
-		// }
-		// if needs_completion {
-		// 	lsp_get_completion(editor, buffer)
-		// }
-	}
-	return _buffer_insert(buffer, s, index)
 }
 
 @(require_results)
@@ -459,6 +414,15 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, motion: Motion) {
 	case .Jumplist:
 		picker_open(editor, .Jumplist)
 
+	case .Undo:
+		for _ in 0 ..< editor.repeat_count {
+			buffer_undo(editor, buffer) or_break
+		}
+	case .Redo:
+		for _ in 0 ..< editor.repeat_count {
+			buffer_redo(editor, buffer) or_break
+		}
+
 	case .Save:
 		unimplemented()
 	case .Save_As:
@@ -493,9 +457,6 @@ motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, motion: Motion) {
 }
 
 primary_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection: ^Selection, motion: Primary_Motion) {
-	defer selection.anchor = clamp(selection.anchor, 0, buffer.btree.chars)
-	defer selection.cursor = clamp(selection.cursor, 0, buffer.btree.chars)
-
 	switch motion {
 	case .Show_Hover_Information:
 		lsp_get_hover_information(editor, buffer)
@@ -593,8 +554,8 @@ selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection:
 		selection.target_cursor = selection.cursor
 	}
 
-	defer selection.anchor = clamp(selection.anchor, 0, buffer.btree.chars)
-	defer selection.cursor = clamp(selection.cursor, 0, buffer.btree.chars)
+	defer selection.anchor = clamp(selection.anchor, 0, buffer.btree.chars - 1)
+	defer selection.cursor = clamp(selection.cursor, 0, buffer.btree.chars - 1)
 
 	switch motion {
 	case .Cursor_Half_Page_Up:
@@ -1085,8 +1046,12 @@ selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection:
 		unimplemented()
 
 	case .Delete:
+		selection_motion_apply(editor, buffer, selection, .Yank, primary)
+
 		start, end := min(selection.anchor, selection.cursor), max(selection.anchor, selection.cursor)
-		buffer_remove(buffer, start, end + 1)
+		buffer_remove(editor, buffer, start, end + 1)
+		selection.cursor = start
+		selection.anchor = start
 
 	case .Paste:
 		end := max(selection.anchor, selection.cursor) + 1
@@ -1193,7 +1158,11 @@ selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection:
 		editor.mode = .Insert
 	case .Change:
 		start, end := min(selection.anchor, selection.cursor), max(selection.anchor, selection.cursor)
-		buffer_remove(buffer, start, end + 1)
+		buffer_remove(editor, buffer, start, end + 1)
+
+		selection.anchor = start
+		selection.cursor = start
+
 		editor.mode = .Insert
 
 	case .Indent:
@@ -1228,7 +1197,7 @@ selection_motion_apply :: proc(editor: ^Editor, buffer: ^Buffer_View, selection:
 		for _ in 0 ..< editor.repeat_count {
 			r := btree_get_rune(buffer.btree, index)
 			if r == '\t' {
-				buffer_remove(buffer, index, index + 1)
+				buffer_remove(editor, buffer, index, index + 1)
 			} else {
 				break
 			}

@@ -101,8 +101,8 @@ Action :: union {
 }
 
 // this is a bit dumb, we should just have a proper data structure to store selections
-deduplicate_selections :: proc(editor: ^Buffer_View) {
-	n := len(editor.selections)
+deduplicate_selections :: proc(view: ^Buffer_View) {
+	n := len(view.selections)
 	if n <= 1 {
 		return
 	}
@@ -113,7 +113,7 @@ deduplicate_selections :: proc(editor: ^Buffer_View) {
 	}
 
 	entries := make([]Entry, n, context.temp_allocator)
-	for s, i in editor.selections {
+	for s, i in view.selections {
 		entries[i] = { min = min(s.cursor, s.anchor), max = max(s.cursor, s.anchor), orig_index = i, }
 	}
 
@@ -125,7 +125,7 @@ deduplicate_selections :: proc(editor: ^Buffer_View) {
 	new_selections := make([dynamic]Selection, 0, n, context.temp_allocator)
 
 	cur                      := entries[0]
-	cur_sel                  := editor.selections[cur.orig_index]
+	cur_sel                  := view.selections[cur.orig_index]
 	index_map[cur.orig_index] = 0
 
 	for e in entries[1:] {
@@ -140,17 +140,17 @@ deduplicate_selections :: proc(editor: ^Buffer_View) {
 		} else {
 			append(&new_selections, cur_sel)
 			cur                       = e
-			cur_sel                   = editor.selections[cur.orig_index]
+			cur_sel                   = view.selections[cur.orig_index]
 			index_map[cur.orig_index] = len(new_selections)
 		}
 	}
 
 	append(&new_selections, cur_sel)
 
-	editor.primary = index_map[editor.primary]
+	view.primary = index_map[view.primary]
 
-	resize(&editor.selections, len(new_selections))
-	copy(editor.selections[:], new_selections[:])
+	resize(&view.selections, len(new_selections))
+	copy(view.selections[:], new_selections[:])
 }
 
 action_apply :: proc(editor: ^Editor, action: Action, keybind: Keybind) {

@@ -3,9 +3,10 @@ package editor
 import runtime "base:runtime"
 
 import fmt     "core:fmt"
+import la      "core:math/linalg"
+import math    "core:math"
 import slice   "core:slice"
 import strings "core:strings"
-import math    "core:math"
 
 import gl "vendor:OpenGL"
 
@@ -376,14 +377,19 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, commands: []Draw_Comman
 			rect := v
 			rect.min.y, rect.max.y = f32(renderer.resolution.y) - v.max.y, f32(renderer.resolution.y) - v.min.y
 
-			gl.Scissor(i32(rect.min.x), i32(rect.min.y), i32(rect.max.x - rect.min.x), i32(rect.max.y - rect.min.y))
+			gl.Scissor(i32(rect.min.x), i32(rect.min.y), max(0, i32(rect.max.x - rect.min.x)), max(0, i32(rect.max.y - rect.min.y)))
 			gl.Enable(gl.SCISSOR_TEST)
 		case Draw_Command_Blur:
 			if v.radius == 0 {
 				break
 			}
 
-			if v.rect.max.y <= v.rect.min.y || v.rect.max.x <= v.rect.min.x {
+			rect := Rect {
+				min = la.max(v.rect.min, 0),
+				max = la.min(v.rect.max, ([2]f32)(renderer.resolution)),
+			}
+
+			if rect.max.y <= rect.min.y || rect.max.x <= rect.min.x {
 				break
 			}
 
@@ -424,10 +430,10 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, commands: []Draw_Comman
 
 			gl.Uniform4i(
 				OPENGL_UNIFORM_BLUR_RECT,
-				i32(v.rect.min.x),
-				i32(v.rect.min.y),
-				i32(v.rect.max.x),
-				i32(v.rect.max.y),
+				i32(rect.min.x),
+				i32(rect.min.y),
+				i32(rect.max.x),
+				i32(rect.max.y),
 			)
 
 			gl.Uniform1i(OPENGL_UNIFORM_BLUR_INPUT,    0)
@@ -438,8 +444,8 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, commands: []Draw_Comman
 			LOCAL_SIZE :: 16
 
 			gl.DispatchCompute(
-				u32(                  i32(v.rect.max.x) - i32(v.rect.min.x) + LOCAL_SIZE - 1) / LOCAL_SIZE,
-				u32(2 * i32(radius) + i32(v.rect.max.y) - i32(v.rect.min.y) + LOCAL_SIZE - 1) / LOCAL_SIZE,
+				u32(                  i32(rect.max.x) - i32(rect.min.x) + LOCAL_SIZE - 1) / LOCAL_SIZE,
+				u32(2 * i32(radius) + i32(rect.max.y) - i32(rect.min.y) + LOCAL_SIZE - 1) / LOCAL_SIZE,
 				1,
 			)
 			gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT)
@@ -450,8 +456,8 @@ opengl_renderer_draw :: proc(renderer: ^Opengl_Renderer, commands: []Draw_Comman
 			gl.Uniform1f(OPENGL_UNIFORM_BLUR_BORDER_RADIUS, v.border_radius)
 
 			gl.DispatchCompute(
-				u32(min(i32(renderer.resolution.x), i32(v.rect.max.x)) - i32(v.rect.min.x) + LOCAL_SIZE - 1) / LOCAL_SIZE,
-				u32(min(i32(renderer.resolution.y), i32(v.rect.max.y)) - i32(v.rect.min.y) + LOCAL_SIZE - 1) / LOCAL_SIZE,
+				u32(min(i32(renderer.resolution.x), i32(rect.max.x)) - i32(rect.min.x) + LOCAL_SIZE - 1) / LOCAL_SIZE,
+				u32(min(i32(renderer.resolution.y), i32(rect.max.y)) - i32(rect.min.y) + LOCAL_SIZE - 1) / LOCAL_SIZE,
 				1,
 			)
 			gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT)

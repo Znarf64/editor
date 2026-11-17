@@ -269,9 +269,8 @@ lsp_open_file :: proc(lsp: ^LSP_Server, uri: Uri, content: string) {
 	})
 
 	_ = send_notification(lsp, "textDocument/didSave", Did_Save_Text_Document_Params {
-		textDocument = {
-			uri = uri,
-		},
+		textDocument = { uri = uri, },
+		text         = content,
 	})
 }
 
@@ -309,8 +308,11 @@ lsp_apply_change :: proc(lsp: ^LSP_Server, buffer: ^Buffer, start, end: Index, t
 }
 
 lsp_save :: proc(lsp: ^LSP_Server, buffer: ^Buffer) {
+	b := strings.builder_make(context.temp_allocator)
+	btree_to_string(&buffer.btree, &b)
 	_ = send_notification(lsp, "textDocument/didSave", Did_Save_Text_Document_Params {
 		textDocument = { uri = buffer.uri, },
+		text         = strings.to_string(b),
 	})
 }
 

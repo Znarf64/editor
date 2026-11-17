@@ -68,5 +68,3 @@ jumplist_backward :: proc(editor: ^Editor) {
 
 	editor_go_to(editor, entry.path, entry.start, entry.end)
 }
-
-
